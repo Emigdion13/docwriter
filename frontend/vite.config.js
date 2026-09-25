@@ -5,6 +5,11 @@ import { defineConfig } from "vite";
 // from pywebview's local file serving with no server root assumptions.
 export default defineConfig({
   base: "./",
+  server: {
+    host: "0.0.0.0",
+    port: 5173,
+    allowedHosts: true,
+  },
   build: {
     outDir: "../src/vaultnotes/web",
     emptyOutDir: true,
