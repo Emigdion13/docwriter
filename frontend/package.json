@@ -1,0 +1,26 @@
+{
+  "name": "vaultnotes-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "The look of VaultNotes: HTML/CSS/JS bundled by Vite into src/vaultnotes/web",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@codemirror/autocomplete": "^6.18.6",
+    "@codemirror/language": "^6.11.0",
+    "@codemirror/lang-markdown": "^6.3.2",
+    "@lezer/highlight": "^1.2.4",
+    "@fontsource/inter": "^5.2.5",
+    "@fontsource/jetbrains-mono": "^5.2.5",
+    "@fontsource/space-grotesk": "^5.2.5",
+    "codemirror": "^6.0.2",
+    "dompurify": "^3.2.5"
+  },
+  "devDependencies": {
+    "vite": "^6.3.5"
+  }
+}
