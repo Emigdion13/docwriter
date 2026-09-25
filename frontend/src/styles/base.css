@@ -1,0 +1,155 @@
+/* =================================================================
+   2. BASE  (frontend/src/styles/base.css)
+   ================================================================= */
+
+* { box-sizing: border-box; }
+
+html {
+  transition: --accent .6s ease;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--muted) 35%, transparent) transparent;
+}
+
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+  overflow: auto;
+  transition: background-color .4s ease, color .4s ease;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 75%, transparent);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+.i {
+  flex-shrink: 0;
+  display: block;
+}
+
+/* Living background: aurora + grid */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.blob {
+  position: absolute;
+  border-radius: 50%;
+  animation: drift 40s ease-in-out infinite alternate;
+}
+
+.b1 {
+  width: 70vmax;
+  height: 70vmax;
+  top: -30vmax;
+  left: -20vmax;
+  background: radial-gradient(circle, var(--glow-1), transparent 62%);
+}
+
+.b2 {
+  width: 70vmax;
+  height: 70vmax;
+  bottom: -35vmax;
+  right: -25vmax;
+  background: radial-gradient(circle, var(--glow-2), transparent 62%);
+  animation-duration: 55s;
+  animation-direction: alternate-reverse;
+}
+
+.b3 {
+  width: 45vmax;
+  height: 45vmax;
+  top: 35%;
+  left: 30%;
+  background: radial-gradient(circle, var(--glow-3), transparent 62%);
+  animation-duration: 70s;
+}
+
+.ba {
+  width: 50vmax;
+  height: 50vmax;
+  top: 5%;
+  right: -5%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--accent) 16%, transparent), transparent 62%);
+  animation-duration: 60s;
+}
+
+@keyframes drift {
+  from { transform: translate(0, 0) scale(1); }
+  to { transform: translate(6vmax, 4vmax) scale(1.15); }
+}
+
+.grid {
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 44px 44px;
+  -webkit-mask-image: radial-gradient(ellipse at 50% 40%, #000 15%, transparent 72%);
+          mask-image: radial-gradient(ellipse at 50% 40%, #000 15%, transparent 72%);
+}
+
+[data-theme="synthwave"] .grid {
+  inset: auto -50% 0 -50%;
+  height: 60%;
+  background-size: 64px 64px;
+  transform: perspective(520px) rotateX(64deg);
+  transform-origin: center bottom;
+  -webkit-mask-image: linear-gradient(to top, #000 5%, transparent 85%);
+          mask-image: linear-gradient(to top, #000 5%, transparent 85%);
+  animation: floor 4s linear infinite;
+}
+
+@keyframes floor {
+  to { background-position: 0 64px, 0 0; }
+}
+
+/* Glass recipe */
+.glass {
+  background: var(--glass);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--r-panel);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+          backdrop-filter: blur(20px) saturate(140%);
+  box-shadow: inset 0 1px 0 var(--glass-highlight), var(--shadow);
+}
+
+/* App grid */
+.app {
+  position: relative;
+  z-index: 1;
+  height: 100vh;
+  min-height: 620px;
+  min-width: 960px;
+  display: grid;
+  grid-template-columns: 236px 300px minmax(0, 1fr);
+  grid-template-rows: 58px minmax(0, 1fr) 36px;
+  gap: 10px;
+  padding: 10px;
+}
+
+.toolbar { grid-column: 1 / -1; }
+.sidebar { grid-column: 1; grid-row: 2; }
+.notelist { grid-column: 2; grid-row: 2; }
+.workspace { grid-column: 3; grid-row: 2; }
+.statusbar { grid-column: 1 / -1; grid-row: 3; }
