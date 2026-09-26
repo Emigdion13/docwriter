@@ -10,6 +10,9 @@ import { replay } from './effects.js';
 export function createStatusBar({ onToggleFx, onCycleTheme }) {
   const footer = document.createElement('footer');
   footer.className = 'statusbar glass';
+  // main.js replaces the placeholder <footer id="statusbar"> with this element,
+  // so the id has to travel with it (styles and debugging both look for it).
+  footer.id = 'statusbar';
 
   footer.innerHTML = `
     <span class="st-item">
@@ -36,11 +39,29 @@ export function setSavingState(isSaving) {
   if (!dot || !text) return;
 
   dot.classList.toggle('saving', isSaving);
+  if (isSaving) dot.classList.remove('error');
   text.textContent = isSaving ? 'Saving…' : 'Saved';
+  if (!isSaving) text.removeAttribute('title');
 
   if (!isSaving) {
     replay(dot, 'flash');
   }
+}
+
+/**
+ * Shows a failed save (full disk, no permission, damaged encrypted file).
+ * The editor keeps the text, so the status bar must not claim "Saved" (M7).
+ */
+export function setSaveError(message) {
+  const dot = document.getElementById('save-dot');
+  const text = document.getElementById('save-text');
+  if (!dot || !text) return;
+
+  dot.classList.remove('saving');
+  dot.classList.add('error');
+  text.textContent = 'Not saved';
+  text.title = message || 'The note could not be written to disk';
+  replay(dot, 'flash');
 }
 
 export function updateLockCountdown(openVaults, remainingMs, totalMs = 600000) {

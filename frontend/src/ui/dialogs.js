@@ -7,10 +7,10 @@ import { icon } from '../icons.js';
 
 /**
  * Shows a confirm dialog and resolves true when the user confirms.
- * @param {object} opts - { title, message, confirmLabel, danger, iconName }
+ * @param {object} opts - { title, message, confirmLabel, cancelLabel, danger, iconName }
  * @returns {Promise<boolean>}
  */
-export function confirmAction({ title, message, confirmLabel = 'Confirm', danger = false, iconName = 'alert' }) {
+export function confirmAction({ title, message, confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = false, iconName = 'alert' }) {
   return new Promise((resolve) => {
     const overlay = document.createElement('div');
     overlay.className = 'overlay';
@@ -30,6 +30,7 @@ export function confirmAction({ title, message, confirmLabel = 'Confirm', danger
     `;
     overlay.querySelector('h3').textContent = title;
     overlay.querySelector('.dlg-sub').textContent = message;
+    overlay.querySelector('[data-x="cancel"]').textContent = cancelLabel;
     const okBtn = overlay.querySelector('[data-x="ok"]');
     okBtn.textContent = confirmLabel;
 

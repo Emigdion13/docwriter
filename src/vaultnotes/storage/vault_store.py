@@ -147,6 +147,15 @@ class VaultStore:
         self._key: bytearray | None = None
         self._notes: dict[str, Note] = {}
         self._trash_notes: dict[str, Note] = {}
+        # Encrypted files that could not be read at the last unlock.  Only the
+        # opaque ``<note_id>.vnote`` file names are kept here: a damaged file
+        # was never decrypted, so its title is unknown and must not be guessed
+        # or logged (security rule 5).
+        self.damaged_files: list[str] = []
+        self.damaged_trash_files: list[str] = []
+        # Read-back check after every encrypted write (M7).  Turning it off is
+        # only for benchmarking; the app always verifies.
+        self.verify_writes = True
 
         if self.header_path.is_file():
             try:
@@ -326,12 +335,19 @@ class VaultStore:
         store.create(key, vault_id=vault_id, name=name)
         return store
 
-    def unlock(self, key: bytes | bytearray | VaultKey) -> int:
+    def unlock(self, key: bytes | bytearray | VaultKey, skip_damaged: bool = True) -> int:
         """Verify ``key`` and decrypt all active and trash notes into memory.
 
-        No in-memory state is replaced until every encrypted file has been
-        checked.  Therefore a wrong key or a damaged note leaves an already
-        unlocked store usable and never overwrites any file.
+        Returns the number of active notes that are now readable.  Files that
+        cannot be decrypted are **skipped and recorded** in
+        :attr:`damaged_files` instead of failing the whole vault, so one bad
+        file (or one that vanished mid-unlock) cannot lock the user out of the
+        other 499.  Pass ``skip_damaged=False`` to get the strict behaviour
+        where any damaged file raises :class:`DamagedVaultError`.
+
+        No in-memory state is replaced until every readable file has been
+        checked.  A wrong key therefore leaves an already unlocked store usable
+        and a damaged file is never overwritten (security rule 8).
         """
         if self._header is None:
             if self.header_path.is_file():
@@ -350,30 +366,39 @@ class VaultStore:
 
         active: dict[str, Note] = {}
         trash: dict[str, Note] = {}
-        try:
-            for note_path in self._iter_note_paths(self.root):
+        damaged: list[str] = []
+        damaged_trash: list[str] = []
+        for note_path in self._iter_note_paths(self.root):
+            try:
                 note_id = self._id_from_path(note_path)
                 active[note_id] = self._decrypt_file(note_path, note_id, raw)
-            for note_path in self._iter_note_paths(self.trash_dir):
+            except (DamagedVaultError, ValueError, OSError) as exc:
+                if not skip_damaged:
+                    raise DamagedVaultError("Damaged encrypted note in vault") from exc
+                damaged.append(note_path.name)
+        for note_path in self._iter_note_paths(self.trash_dir):
+            try:
                 note_id = self._id_from_path(note_path)
                 trash[note_id] = self._decrypt_file(note_path, note_id, raw)
-        except (DamagedVaultError, ValueError) as exc:
-            # Do not expose whether a particular title was in a damaged file;
-            # the file name is an opaque id and the error is safe to display.
-            if isinstance(exc, DamagedVaultError):
-                raise
-            raise DamagedVaultError("Damaged encrypted note in vault") from exc
+            except (DamagedVaultError, ValueError, OSError) as exc:
+                if not skip_damaged:
+                    raise DamagedVaultError("Damaged encrypted note in vault") from exc
+                damaged_trash.append(note_path.name)
 
         self._wipe_key()
         self._key = bytearray(raw)
         self._notes = active
         self._trash_notes = trash
+        self.damaged_files = damaged
+        self.damaged_trash_files = damaged_trash
         return len(active)
 
     def lock(self) -> None:
         """Forget the key and all decrypted note content held by this store."""
         self._notes.clear()
         self._trash_notes.clear()
+        self.damaged_files = []
+        self.damaged_trash_files = []
         self._wipe_key()
 
     def _wipe_key(self) -> None:
@@ -458,13 +483,34 @@ class VaultStore:
             "body": note.body,
         }
 
-    def _write_note(self, note: Note, path: Path) -> None:
+    def _write_note(self, note: Note, path: Path, verify: bool | None = None) -> None:
+        """Encrypt ``note`` with a fresh nonce and atomically replace ``path``.
+
+        With verification on (the default, M7) the file that just landed on
+        disk is decrypted once and compared with what was written, so a full
+        disk, a dying SSD or an interrupted write is reported *before* the UI
+        says "Saved".  A failure raises :class:`DamagedVaultError` and records
+        the file name; the caller decides what to keep in memory.
+        """
         key = self._require_unlocked()
         if self.vault_id is None:
             raise VaultNotInitializedError("Vault has not been created")
-        data = encrypt_note(key, self.vault_id, note.id, self._note_payload(note))
-        # The temporary file contains ciphertext only.
+        payload = self._note_payload(note)
+        data = encrypt_note(key, self.vault_id, note.id, payload)
+        # The temporary file contains ciphertext only (security rule 4).
         atomic_write(path, data)
+
+        should_verify = self.verify_writes if verify is None else verify
+        if not should_verify:
+            return
+        try:
+            read_back = decrypt_note(bytes(key), self.vault_id, note.id, path.read_bytes())
+        except Exception as exc:  # noqa: BLE001 - any failure means "not verified"
+            self.damaged_files.append(path.name)
+            raise DamagedVaultError("The saved file could not be read back") from exc
+        if read_back != payload:
+            self.damaged_files.append(path.name)
+            raise DamagedVaultError("The saved file did not match what was written")
 
     # ------------------------------------------------------------------
     # Note CRUD
@@ -540,7 +586,14 @@ class VaultStore:
             created=old.created,
             tags=list(old.tags),
         )
-        self._write_note(updated, self._note_path(clean_id))
+        try:
+            self._write_note(updated, self._note_path(clean_id))
+        except DamagedVaultError:
+            # The bytes on disk are not trustworthy, but the newest text is:
+            # keep it in memory so the user can retry or copy it out instead of
+            # silently losing the edit (M7).
+            self._notes[clean_id] = updated
+            raise
         self._notes[clean_id] = updated
         return _copy_note(updated)
 
@@ -705,6 +758,22 @@ class VaultStore:
         else:
             notes.sort(key=lambda note: (note.modified, note.id), reverse=True)
         return [_copy_note(note) for note in notes]
+
+    @property
+    def active_count(self) -> int:
+        """Number of decrypted notes held in memory (0 while locked)."""
+        return len(self._notes)
+
+    def iter_notes(self) -> Iterable[Note]:
+        """Iterate the in-memory notes **without copying** them.
+
+        Read-only fast path for the Bridge API and the link index: copying 500
+        note bodies on every call is the difference between a smooth and a
+        stuttering note list (M7 performance).  Callers must not mutate the
+        notes they receive.
+        """
+        self._require_unlocked()
+        return list(self._notes.values())
 
     # Useful aliases shared with PlainStore and convenient in tests.  The
     # name ``create`` is intentionally reserved for creating the vault header;

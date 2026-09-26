@@ -768,6 +768,16 @@
   padding: 1px 3px !important;
 }
 
+/* A [[link]] to a note that is not in this space: dashed and dimmer, the same
+   language the preview uses, so a typo shows up while typing (M6). */
+.cm-wikilink.is-missing {
+  color: var(--muted) !important;
+  background: transparent !important;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--muted) 40%, transparent) !important;
+  border-radius: 4px !important;
+  font-style: italic;
+}
+
 /* Autocomplete popup */
 .cm-tooltip-autocomplete {
   background: var(--surface) !important;
@@ -1070,6 +1080,17 @@
   background: var(--warning);
   box-shadow: 0 0 10px var(--warning);
   animation: pulse .9s ease-in-out infinite;
+}
+
+/* A save that failed (full disk, no permission, damaged file) - M7. */
+.dot.error {
+  background: var(--danger);
+  box-shadow: 0 0 10px var(--danger);
+}
+
+#save-text[title] {
+  cursor: help;
+  border-bottom: 1px dotted color-mix(in srgb, var(--danger) 60%, transparent);
 }
 
 .dot.flash {

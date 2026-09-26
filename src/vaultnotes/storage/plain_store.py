@@ -14,15 +14,31 @@ from vaultnotes.storage.atomic import atomic_write
 # Disallowed Windows filename characters
 INVALID_CHARS_RE = re.compile(r'[\\/:*?"<>|]')
 
+# Snippets only ever look at the start of a note, so a huge body stays cheap.
+_SNIPPET_LINE_LIMIT = 60
+
+# Longest title we are willing to turn into a file name.
+MAX_TITLE_LENGTH = 120
+
 
 def sanitize_title(title: str) -> str:
-    """Sanitize title for use as a filesystem filename.
+    """Sanitize a title for use as a filesystem filename.
 
-    Replaces invalid characters with '-', strips whitespace, dots, and trailing dashes.
+    Replaces characters Windows forbids with '-', trims whitespace, dots and
+    trailing dashes, and caps the length so the resulting path stays well
+    inside the Windows MAX_PATH limit.  Raises ``ValueError`` for input that is
+    not text, so a crafted Bridge API call gets a clean error instead of a
+    crash (M7).
     """
+    if not isinstance(title, str):
+        raise ValueError("Title must be text")
     cleaned = INVALID_CHARS_RE.sub("-", title)
     cleaned = cleaned.strip(" .\t\r\n-")
     cleaned = re.sub(r"-+", "-", cleaned)
+    if len(cleaned) > MAX_TITLE_LENGTH:
+        cleaned = cleaned[:MAX_TITLE_LENGTH].rstrip(" .-")
+    # Control characters have no business in a file name either.
+    cleaned = re.sub(r"[\x00-\x1f]", "-", cleaned).strip(" .\t\r\n-")
     return cleaned if cleaned else "Untitled"
 
 
@@ -41,10 +57,16 @@ def format_timestamp(ts: float) -> str:
 
 
 def make_snippet(body: str, max_length: int = 120) -> str:
-    """Generate a clean single-line snippet from markdown content."""
-    lines = body.split("\n")
+    """Generate a clean single-line snippet from markdown content.
+
+    Only the first lines are examined: a 1 MB note must not cost a full scan on
+    every note-list refresh (M7 performance).
+    """
+    if not isinstance(body, str) or not body:
+        return ""
+
     cleaned_lines: list[str] = []
-    for line in lines:
+    for line in body.split("\n", _SNIPPET_LINE_LIMIT)[:_SNIPPET_LINE_LIMIT]:
         line = line.strip()
         if not line:
             continue
@@ -60,6 +82,8 @@ def make_snippet(body: str, max_length: int = 120) -> str:
         line = re.sub(r"\s+", " ", line).strip()
         if line:
             cleaned_lines.append(line)
+        if sum(len(item) for item in cleaned_lines) >= max_length:
+            break
 
     joined = " · ".join(cleaned_lines)
     return joined[:max_length].strip()
@@ -73,25 +97,92 @@ class PlainStore:
         self.trash_dir = self.root / ".trash"
         self.root.mkdir(parents=True, exist_ok=True)
         self.trash_dir.mkdir(parents=True, exist_ok=True)
+        # Files that could not be read during the last listing.  Plain file
+        # names are not secret (they sit on disk in clear text), so they are
+        # safe to show in a warning.
+        self.skipped_files: list[str] = []
+
+    @staticmethod
+    def _validate_note_id(note_id: str) -> str:
+        """Reject anything that is not a bare file name.
+
+        Plain note ids *are* file names, so this is what stops a crafted Bridge
+        API call such as ``open_note("plain", "../../secret")`` from reading or
+        overwriting a ``.md`` file outside the notes folder (security rule 12f).
+        """
+        if not isinstance(note_id, str):
+            raise ValueError("Note id must be text")
+        clean_id = note_id[:-3] if note_id.lower().endswith(".md") else note_id
+        clean_id = clean_id.strip()
+        if not clean_id or clean_id in {".", ".."}:
+            raise ValueError(f"Invalid note id: {note_id!r}")
+        if any(character in clean_id for character in ("/", "\\", ":", "\x00")):
+            raise ValueError(f"Invalid note id: {note_id!r}")
+        return clean_id
 
     def _resolve_note_path(self, note_id: str, in_trash: bool = False) -> Path:
-        """Resolve a note ID to its .md file path."""
+        """Resolve a note ID to its .md file path, confined to this folder."""
         folder = self.trash_dir if in_trash else self.root
-        clean_id = note_id[:-3] if note_id.lower().endswith(".md") else note_id
+        clean_id = self._validate_note_id(note_id)
         # Direct lookup
         direct = folder / f"{clean_id}.md"
+        if not self._inside(direct, folder):
+            raise ValueError(f"Invalid note id: {note_id!r}")
         if direct.is_file():
             return direct
 
         # Case-insensitive lookup
         clean_lower = clean_id.lower()
         if folder.is_dir():
-            for p in folder.iterdir():
-                if p.is_file() and p.suffix.lower() == ".md":
-                    if p.stem.lower() == clean_lower:
+            try:
+                entries = list(folder.iterdir())
+            except OSError:
+                entries = []
+            for p in entries:
+                try:
+                    if p.is_file() and p.suffix.lower() == ".md" and p.stem.lower() == clean_lower:
                         return p
+                except OSError:
+                    continue
 
         return direct
+
+    @staticmethod
+    def _inside(path: Path, folder: Path) -> bool:
+        """Whether ``path`` stays inside ``folder`` after resolution."""
+        try:
+            return path.resolve().is_relative_to(folder.resolve())
+        except (OSError, ValueError):
+            return False
+
+    def fingerprint(self) -> tuple[int, int, int]:
+        """Cheap change detector for the folder: (file count, newest mtime, total size).
+
+        Reading 500 note bodies to answer "did anything change?" would defeat
+        the point of the in-memory link index, so the index is only rebuilt
+        when this fingerprint moves.  A note edited outside the app (in
+        Obsidian, say) changes an mtime and is picked up on the next call.
+        """
+        count = 0
+        newest = 0
+        total = 0
+        try:
+            with os.scandir(self.root) as entries:
+                for entry in entries:
+                    try:
+                        if not entry.is_file() or not entry.name.lower().endswith(".md"):
+                            continue
+                        if entry.name.startswith("."):
+                            continue
+                        stat = entry.stat()
+                    except OSError:
+                        continue
+                    count += 1
+                    total += stat.st_size
+                    newest = max(newest, int(stat.st_mtime_ns))
+        except OSError:
+            return (-1, -1, -1)
+        return (count, newest, total)
 
     def _get_unique_path(self, title: str, folder: Path, exclude_path: Path | None = None) -> tuple[str, Path]:
         """Find an available title and path, handling collisions by appending (2), (3)..."""
@@ -295,40 +386,57 @@ class PlainStore:
         return count
 
     def list_notes(self, query: str = "", sort: str = "modified") -> list[Note]:
-        """List active notes with optional search query and sorting."""
-        notes: list[tuple[Note, float]] = []
+        """List active notes with optional search query and sorting.
 
-        if self.root.is_dir():
-            for p in self.root.iterdir():
-                if p.is_file() and p.suffix.lower() == ".md" and not p.name.startswith("."):
-                    try:
-                        stat = p.stat()
-                        with open(p, "r", encoding="utf-8", errors="replace") as f:
-                            body = f.read()
-                        title = p.stem
-                        mtime = stat.st_mtime
-                        notes.append(
-                            (
-                                Note(
-                                    id=title,
-                                    title=title,
-                                    body=body,
-                                    modified=format_timestamp(mtime),
-                                    created=format_timestamp(getattr(stat, "st_birthtime", stat.st_ctime)),
-                                ),
-                                mtime,
-                            )
-                        )
-                    except OSError:
-                        pass
+        A file that cannot be read (removed underneath us, no permission, or a
+        folder that is not readable) is **skipped and recorded** in
+        :attr:`skipped_files` instead of failing the whole list, so one bad
+        file cannot hide the other notes (M7).
+        """
+        notes: list[tuple[Note, float]] = []
+        skipped: list[str] = []
+
+        try:
+            entries = list(self.root.iterdir()) if self.root.is_dir() else []
+        except OSError as exc:
+            self.skipped_files = [f"{self.root.name}: {exc.strerror or exc}"]
+            return []
+
+        for p in entries:
+            try:
+                if not (p.is_file() and p.suffix.lower() == ".md" and not p.name.startswith(".")):
+                    continue
+                stat = p.stat()
+                with open(p, "r", encoding="utf-8", errors="replace") as f:
+                    body = f.read()
+            except OSError as exc:
+                skipped.append(f"{p.name}: {exc.strerror or exc}")
+                continue
+
+            title = p.stem
+            mtime = stat.st_mtime
+            notes.append(
+                (
+                    Note(
+                        id=title,
+                        title=title,
+                        body=body,
+                        modified=format_timestamp(mtime),
+                        created=format_timestamp(getattr(stat, "st_birthtime", stat.st_ctime)),
+                    ),
+                    mtime,
+                )
+            )
+
+        self.skipped_files = skipped
 
         # Filter by search query
-        q = (query or "").strip().lower()
+        q = (query if isinstance(query, str) else "").strip().lower()
         if q:
             notes = [item for item in notes if q in item[0].title.lower() or q in item[0].body.lower()]
 
         # Sort
-        if sort == "title":
+        if isinstance(sort, str) and sort.casefold() in {"title", "name"}:
             notes.sort(key=lambda item: item[0].title.lower())
         else:
             # Sort by modified time descending

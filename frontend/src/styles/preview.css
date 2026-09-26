@@ -286,3 +286,68 @@
   border-color: color-mix(in srgb, var(--muted) 45%, transparent);
   font-style: italic;
 }
+
+/* ---------------------------------------------------------------------
+   Note links produced by links.render_links_for_preview (section 4.7).
+   The engine writes internal addresses rather than classes, so the chips
+   are selected by href:
+     a[href^="#vn-open/"]  a note that exists  -> glowing chip
+     a[href^="#vn-new/"]   a note not written yet -> dashed, dimmer chip
+   --------------------------------------------------------------------- */
+.preview a[href^="#vn-open/"],
+.preview a[href^="#vn-new/"] {
+  padding: 1px 7px;
+  border-radius: var(--r-chip);
+  white-space: nowrap;
+  cursor: pointer;
+  text-decoration: none;
+  transition: box-shadow .2s, background .2s, color .2s;
+}
+
+.preview a[href^="#vn-open/"] {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+}
+
+.preview a[href^="#vn-open/"]:hover,
+.preview a[href^="#vn-open/"]:focus-visible {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+.preview a[href^="#vn-new/"] {
+  color: var(--muted);
+  background: transparent;
+  border: 1px dashed color-mix(in srgb, var(--muted) 45%, transparent);
+  font-style: italic;
+}
+
+.preview a[href^="#vn-new/"]:hover,
+.preview a[href^="#vn-new/"]:focus-visible {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+/* A web link keeps the plain underlined look from the design file. */
+.preview a:not([href^="#vn-open/"]):not([href^="#vn-new/"]) {
+  color: var(--accent);
+  text-underline-offset: 3px;
+}
+
+/* Links inside a table cell must not stretch the row apart. */
+.preview td a[href^="#vn-open/"],
+.preview td a[href^="#vn-new/"] {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+
+/* Effects: Lite and Off drop the glow, keeping only the shape (section 6.7). */
+.fx-lite .preview a[href^="#vn-open/"]:hover,
+.fx-off .preview a[href^="#vn-open/"]:hover {
+  box-shadow: none;
+}

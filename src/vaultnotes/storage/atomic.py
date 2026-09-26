@@ -27,7 +27,11 @@ def atomic_write(path: Path | str, data: bytes | str, encoding: str = "utf-8") -
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, dest)
-    except Exception:
+    except BaseException:
+        # BaseException, not Exception: a KeyboardInterrupt or a kill while
+        # saving must not leave a half-written .tmp file behind either (M7).
+        # The target file is untouched in every case, so the previous version
+        # of the note survives.
         if tmp_path.exists():
             try:
                 tmp_path.unlink()

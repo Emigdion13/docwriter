@@ -106,6 +106,36 @@ const mockSpaces = [
   }
 ];
 
+/* Stand-in for the Python renderer, reached ONLY when this page is opened in a
+   plain browser with no pywebview bridge (design review, CSS work).  Real
+   rendering - Markdown, sanitising, link resolution - always happens in
+   vaultnotes.render; this escapes the text and turns [[links]] into the same
+   #vn-open/ and #vn-new/ addresses so the chips and their click handling can
+   be seen without the desktop app. */
+function mockPreview(space_id, body) {
+  const space = mockSpaces.find(x => x.id === space_id);
+  const titles = space && !space.locked ? space.notes.map(n => n.title.toLowerCase()) : [];
+  const escaped = String(body ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+  return escaped
+    .split('\n')
+    .map(line => `<p>${line.replace(
+      /\[\[([^\]|#]+)(?:#([^\]|]*))?(?:\|([^\]]*))?\]\]/g,
+      (_match, target, _heading, alias) => {
+        const clean = String(target).trim().replace(/\.md$/i, '');
+        const known = titles.includes(clean.toLowerCase());
+        const label = (alias && alias.trim()) || clean;
+        const href = `#vn-${known ? 'open' : 'new'}/${encodeURIComponent(clean)}`;
+        const hint = known ? `Open ${clean}` : `${clean} is not written yet`;
+        return `<a href="${href}" title="${hint}">${label}</a>`;
+      }
+    )}</p>`)
+    .join('');
+}
+
 export const bridge = {
   async get_state() {
     const api = await waitForBridge();
@@ -207,6 +237,12 @@ export const bridge = {
     return { count: 0 };
   },
 
+  async note_links(space_id, note_id) {
+    const api = await waitForBridge();
+    if (api?.note_links) return await api.note_links(space_id, note_id);
+    return { backlinks: [], outgoing: [], link_count: 0 };
+  },
+
   async delete_note(space_id, note_id) {
     const api = await waitForBridge();
     if (api?.delete_note) return await api.delete_note(space_id, note_id);
@@ -289,7 +325,7 @@ export const bridge = {
   async render_preview(space_id, body) {
     const api = await waitForBridge();
     if (api?.render_preview) return await api.render_preview(space_id, body);
-    return `<p>${body.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>`;
+    return mockPreview(space_id, body);
   },
 
   async list_titles(space_id) {

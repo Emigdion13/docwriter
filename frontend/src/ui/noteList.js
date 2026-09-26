@@ -9,6 +9,11 @@ import { glyphs, isCalm } from './effects.js';
 
 let noiseInterval = null;
 
+// Rows that get an entrance animation.  Past this the list is drawn at once,
+// so a space with hundreds of notes opens instantly instead of rippling.
+const STAGGER_LIMIT = 12;
+const MAX_STAGGERED_ROWS = 60;
+
 function escapeHtml(s) {
   return String(s)
     .replace(/&/g, '&amp;')
@@ -175,13 +180,17 @@ export function renderNotes(space, notes, activeNoteId, animate = true, opts = {
     return;
   }
 
+  // A 500-note list must not animate for half a minute, and rebuilding it on
+  // every keystroke has to stay cheap: only the first rows get a stagger, and
+  // long lists skip the entrance animation completely (M7 performance).
+  const staggered = animate && notes.length <= MAX_STAGGERED_ROWS && !isCalm();
   notesContainer.innerHTML = notes.map((n, i) => {
     const isActive = n.id === activeNoteId;
     const lc = n.link_count || 0;
-    const delay = i * 45;
+    const delay = staggered ? Math.min(i, STAGGER_LIMIT) * 45 : 0;
 
     return `
-      <button class="note ${isActive ? 'active' : ''} ${animate ? '' : 'still'}"
+      <button class="note ${isActive ? 'active' : ''} ${staggered ? '' : 'still'}"
               data-note="${escapeHtml(n.id)}"
               style="animation-delay:${delay}ms">
         <span class="t">${escapeHtml(n.title)}</span>
