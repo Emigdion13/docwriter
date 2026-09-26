@@ -20,14 +20,34 @@ import urllib.parse
 import uuid
 import webbrowser
 from collections.abc import Iterable, Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 from vaultnotes.autolock import AutoLock
-from vaultnotes.config import Config, get_config
-from vaultnotes.crypto.keyfile import KeyFileError, VaultKey, generate_key_file, load_key_file
+from vaultnotes.backup.gdrive_auth import DriveAuthError, TokenStore, is_connected, sign_in
+from vaultnotes.backup.gdrive_auth import CLIENT_SECRET_FILE as CLIENT_SECRET_NAME
+from vaultnotes.backup.gdrive_backup import (
+    BACKUP_FOLDER_NAME,
+    MANIFEST_NAME,
+    BackupError,
+    BackupManifest,
+    BackupReport,
+    BackupRunner,
+    GoogleDriveClient,
+)
+from vaultnotes.config import Config, get_app_dir, get_config
+from vaultnotes.crypto.keyfile import (
+    KeyFileError,
+    PassphraseRequired,
+    VaultKey,
+    WrongPassphrase,
+    generate_key_file,
+    key_file_needs_passphrase,
+    load_key_file,
+)
 from vaultnotes.events import emit_event
-from vaultnotes.links import LinkIndex, count_links, parse_links, rename_links
+from vaultnotes.links import LinkIndex, count_links, rename_links
 from vaultnotes.models import Note
 from vaultnotes.render import render_preview
 from vaultnotes.storage.atomic import atomic_write
@@ -47,11 +67,24 @@ SPACE_DEFINITIONS = {
     "personal": {"name": "Personal", "colorVar": "--personal"},
 }
 
+#: Display name of every space, Plain included: user-facing messages must be
+#: able to name the space without assuming it is a vault.
+SPACE_NAMES = {"plain": "Plain", **{key: value["name"] for key, value in SPACE_DEFINITIONS.items()}}
+
 #: Longest note body the editor may send (about 20 MB of text).
 MAX_BODY_LENGTH = 20_000_000
 
 #: The only keys ``settings.json`` may hold (section 4.6).
 SETTING_KEYS = frozenset({"notes_root", "vaults", "autolock_minutes", "look", "backup"})
+
+#: Of the ``backup`` block, the two the frontend may write.  ``drive_folder_id``
+#: and ``last_backup`` are app-owned (sections 4.6 and 8.2).
+BACKUP_SETTING_KEYS = frozenset({"enabled", "interval_minutes"})
+
+
+def _now_stamp() -> str:
+    """UTC timestamp in the format ``settings.json`` and the manifest use."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class BridgeError(Exception):
@@ -120,9 +153,19 @@ class Api:
     lifecycle: unlock, use, then lock or auto-lock.
     """
 
-    def __init__(self, config: Config | None = None, window: Any = None) -> None:
+    def __init__(
+        self,
+        config: Config | None = None,
+        window: Any = None,
+        *,
+        drive_store: TokenStore | None = None,
+        app_dir: Path | str | None = None,
+    ) -> None:
         self.config = config or get_config()
         self.window = window
+        #: ``%APPDATA%\\VaultNotes``: settings, manifest, OAuth client file.
+        #: Tests point it at a temporary folder.
+        self.app_dir = Path(app_dir).resolve() if app_dir is not None else get_app_dir()
         self.plain_store = PlainStore(self.config.plain_dir)
         self.vault_stores: dict[str, VaultStore] = {}
         self._build_vault_stores()
@@ -142,12 +185,35 @@ class Api:
             on_lock=self._auto_lock_expired,
         )
 
+        #: Where the Google refresh token lives.  Tests pass a memory store so
+        #: no real credential manager is read or written.
+        self.drive_store = drive_store if drive_store is not None else TokenStore()
+
+        #: Memoised "is this key file wrapped?" answers, see
+        #: :meth:`_key_file_is_wrapped`.  Never holds key material.
+        self._key_wrapped_cache: dict[str, tuple[str, int, bool]] = {}
+
+        # Drive backup runs in its own thread, so a slow or broken network can
+        # never freeze the window (section 8.2).  It is built here but stays
+        # silent until "Connect Google Drive" and "Back up now" are used.
+        # Each hook is looked up when it fires, not when the runner is built:
+        # the window, the stores and the schedule all change during a session.
+        self.backup = BackupRunner(
+            context_provider=lambda: self._backup_context(),
+            service_factory=lambda: self._drive_service(),
+            on_result=lambda report: self._backup_finished(report),
+            emit=lambda name, data: self._emit(name, data),
+            auto_callback=lambda: self._auto_backup_due(),
+        )
+        self.backup.configure(**self._backup_schedule_settings())
+
     def set_window(self, window: Any) -> None:
         """Store the pywebview window used for native file dialogs/events."""
         self.window = window
 
     def close(self) -> None:
-        """Stop the timer and clear all decrypted vault state on shutdown."""
+        """Stop the timers, make a final backup if asked to, and clear state."""
+        self.backup.finish_on_close()
         self.autolock.stop()
         for store in self.vault_stores.values():
             store.lock()
@@ -360,6 +426,30 @@ class Api:
             raise ValueError("Key files must be stored outside the VaultNotes notes folder")
         return candidate
 
+    def _key_file_is_wrapped(self, space_id: str, key_path: str | None) -> bool:
+        """Whether this space's key file is passphrase protected (M10).
+
+        :func:`vaultnotes.crypto.keyfile.key_file_needs_passphrase` opens the
+        file, and ``get_state`` runs on every space switch, so the answer is
+        remembered per path and only re-read when the file actually changed (or
+        the key file was swapped for another one).  A key file that cannot be
+        read - a USB stick pulled out - is reported as unprotected, which is
+        what the unlock flow needs: ask for no passphrase, then fail clearly.
+        """
+        if not key_path:
+            return False
+        try:
+            stamp = Path(key_path).stat().st_mtime_ns
+        except OSError:
+            self._key_wrapped_cache.pop(space_id, None)
+            return False
+        seen = self._key_wrapped_cache.get(space_id)
+        if seen is not None and seen[:2] == (str(key_path), stamp):
+            return seen[2]
+        wrapped = key_file_needs_passphrase(key_path)
+        self._key_wrapped_cache[space_id] = (str(key_path), stamp, wrapped)
+        return wrapped
+
     def _space_summary(self, space_id: str) -> dict[str, Any]:
         definition = SPACE_DEFINITIONS[space_id]
         store = self.vault_stores[space_id]
@@ -380,6 +470,9 @@ class Api:
             "colorVar": definition["colorVar"],
             "note_count": count,
             "key_path": key_path,
+            # M10: the unlock dialog only shows a passphrase box for a wrapped
+            # key file, so the app must know which kind it is pointing at.
+            "key_wrapped": self._key_file_is_wrapped(space_id, key_path),
         }
         if store.vault_id:
             result["vault_id"] = store.vault_id
@@ -409,6 +502,9 @@ class Api:
             "look": self.config.get("look", {}),
             "autolock_minutes": self.config.get("autolock_minutes", 10),
             "last_backup": backup.get("last_backup") if isinstance(backup, Mapping) else None,
+            # Drive card / Settings read this (section 7 "Backup").  Reported
+            # through get_state so the Bridge API keeps section 4.8's names.
+            "backup": self._backup_state(),
             "needs_setup": needs_setup,
             "locks_at": self.autolock.locks_at,
             "notes_root": str(self.config.notes_root),
@@ -1027,16 +1123,44 @@ class Api:
     # ------------------------------------------------------------------
     # Markdown links and preview
     # ------------------------------------------------------------------
+    def _note_body_by_title(self, space_id: str, title: str) -> str | None:
+        """One note's Markdown looked up by title, for ``![[embeds]]`` (M10).
+
+        Any problem - a locked vault, a note deleted a moment ago, a damaged
+        file - means "no embed", which the preview shows as a plain link.  A
+        preview must never fail because of a second note.
+        """
+        index = self.link_indexes.get(space_id)
+        if index is None:
+            return None
+        note_id = index.note_id_for(title)
+        if not note_id:
+            return None
+        try:
+            note = self._read_any_note(space_id, note_id)
+        except (OSError, ValueError, VaultLockedError):
+            return None
+        body = getattr(note, "body", None)
+        return body if isinstance(body, str) else None
+
     @bridge_method
     def render_preview(self, space_id: str, body: str) -> str:
         """Render Markdown, resolving links against same-space titles only.
 
         A locked vault contributes no titles, so its notes can never be
-        discovered through a preview (security rule 11).
+        discovered through a preview (security rule 11).  ``spaces`` is only
+        ever given the Plain space: vault notes may link out to Plain notes
+        (``[[Plain:Title]]``, M10) and never the other way around.
         """
         space = self._known_space(space_id)
         text_body = self._body_text(body)
-        return render_preview(text_body, titles=self._titles_for(space))
+        titles = self._titles_for(space)
+        return render_preview(
+            text_body,
+            titles=titles,
+            read_note=lambda title: self._note_body_by_title(space, title),
+            spaces={"plain": self._titles_for("plain")},
+        )
 
     @bridge_method
     def list_titles(self, space_id: str) -> list[str]:
@@ -1061,6 +1185,89 @@ class Api:
             "backlinks": index.backlinks(clean_id),
             "outgoing": index.outgoing(clean_id),
             "link_count": index.link_count(clean_id),
+        }
+
+    @bridge_method
+    def open_note_by_title(
+        self,
+        space_id: str,
+        title: str,
+        heading: str = "",
+    ) -> dict[str, Any]:
+        """Resolve one ``[[link]]`` title into a note the app can open.
+
+        The frontend owns the click, so it asks here rather than guessing from
+        its own filtered list: this resolves case, a trailing ``.md`` and an
+        alias exactly like the preview does.  ``space_id`` is the space to
+        search, which for ``[[Plain:Title]]`` is ``"plain"`` (M10).  A missing
+        note is reported as ``not_found``; creating it is a separate, explicit
+        call so a link can never write to a file by itself.
+        """
+        space = self._known_space(space_id)
+        wanted = str(title or "").strip()
+        if not wanted:
+            return _error("invalid_title", "That link has no title to open.")
+        if len(wanted) > MAX_TITLE_LENGTH:
+            return _error("invalid_title", "That link title is too long to be a note.")
+        if space != "plain" and self._vault(space).locked:
+            # Say why, instead of claiming the note does not exist.
+            return _error("locked", f"Unlock {SPACE_NAMES[space]} first.")
+
+        index = self._sync_index(space)
+        note_id = index.note_id_for(wanted) if index is not None else None
+        if not note_id:
+            return _error("not_found", f"No note named “{wanted}” in {SPACE_NAMES[space]}.")
+        result: dict[str, Any] = {
+            "ok": True,
+            "space_id": space,
+            "note_id": note_id,
+            "title": index.title_of(note_id) or wanted,
+        }
+        text_heading = self._text(heading, "Heading", max_length=200)
+        if text_heading:
+            result["heading"] = text_heading
+        return result
+
+    @bridge_method
+    def get_graph(self, space_id: str) -> dict[str, Any]:
+        """Notes and links of one space, for the graph view (M10).
+
+        Nodes are the notes; an edge is one note linking to another.  A link to
+        a missing note is returned as a ghost node (``id=None``) so the graph can
+        show where a note is wanted, but never as something to open.
+        """
+        space = self._known_space(space_id)
+        index = self._sync_index(space)
+        if space != "plain" and self._vault(space).locked:
+            return {"space_id": space, "nodes": [], "edges": [], "locked": True}
+
+        notes = self.list_notes(space, "", "title")
+        summaries = notes if isinstance(notes, list) else []
+        nodes = [
+            {
+                "id": item["id"],
+                "title": item["title"],
+                "links": int(item.get("link_count") or 0),
+            }
+            for item in summaries
+        ]
+        edges: list[dict[str, Any]] = []
+        if index is not None:
+            for node in nodes:
+                for target in index.outgoing(node["id"]):
+                    edges.append(
+                        {
+                            "from": node["id"],
+                            "to": target["id"],
+                            "title": target["title"],
+                            "resolved": bool(target["resolved"]),
+                        }
+                    )
+        return {
+            "space_id": space,
+            "nodes": nodes,
+            "edges": edges,
+            "locked": False,
         }
 
     # ------------------------------------------------------------------
@@ -1254,13 +1461,20 @@ class Api:
         return {"ok": True, "name": selected.name}
 
     @bridge_method
-    def create_vault(self, space_id: str, key_path: Path | str | None = None) -> dict[str, Any]:
+    def create_vault(
+        self,
+        space_id: str,
+        key_path: Path | str | None = None,
+        passphrase: str = "",
+    ) -> dict[str, Any]:
         """Create one configured vault and generate its external key file.
 
         ``key_path`` is optional for Python callers/tests.  The frontend calls
         this without a path, causing a native Save dialog.  In a headless
         environment a deterministic location next to ``settings.json`` is
-        used; it is still outside the notes root.
+        used; it is still outside the notes root.  A ``passphrase`` writes the
+        wrapped key file of section 4.5 (M10), where the file alone unlocks
+        nothing.
         """
         definition = SPACE_DEFINITIONS.get(space_id)
         store = self._vault(space_id)
@@ -1292,7 +1506,12 @@ class Api:
         key: VaultKey | None = None
         try:
             vault_id = str(uuid.uuid4())
-            key = generate_key_file(selected, vault_id, definition["name"])
+            key = generate_key_file(
+                selected,
+                vault_id,
+                definition["name"],
+                passphrase=str(passphrase or ""),
+            )
             header = store.create(key, vault_id=vault_id, name=definition["name"])
             self.config.set_vault_key_path(definition["name"], selected)
             # Make the in-memory object reflect the newly created header.
@@ -1303,6 +1522,7 @@ class Api:
                 "vault_id": header["vault_id"],
                 "key_path": str(selected),
                 "key_name": selected.name,
+                "protected": bool(str(passphrase or "")),
             }
         except (OSError, KeyFileError, VaultStoreError, ValueError) as exc:
             return {"error": "damaged", "message": str(exc)}
@@ -1311,17 +1531,28 @@ class Api:
                 key.wipe()
 
     @bridge_method
-    def initialize_vaults(self, key_paths: Mapping[str, Path | str] | None = None) -> dict[str, Any]:
-        """Create the built-in Encrypted and Personal vaults if needed."""
+    def initialize_vaults(
+        self,
+        key_paths: Mapping[str, Path | str] | None = None,
+        passphrases: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Create the built-in Encrypted and Personal vaults if needed.
+
+        ``passphrases`` (M10) optionally wraps each new key file; an empty
+        value keeps the plain form of section 4.2.
+        """
         paths = key_paths or {}
+        phrases = passphrases or {}
         created: list[str] = []
         for space_id in SPACE_DEFINITIONS:
             store = self.vault_stores[space_id]
             if store.has_header:
                 continue
+            name = SPACE_DEFINITIONS[space_id]["name"]
             result = self.create_vault(
                 space_id,
-                paths.get(space_id, paths.get(SPACE_DEFINITIONS[space_id]["name"])),
+                paths.get(space_id, paths.get(name)),
+                passphrase=str(phrases.get(space_id, phrases.get(name, "")) or ""),
             )
             if result.get("error"):
                 return {"error": result["error"], "message": result.get("message", ""), "created": created}
@@ -1329,12 +1560,15 @@ class Api:
         return {"ok": True, "created": created}
 
     @bridge_method
-    def unlock_vault(self, space_id: str) -> dict[str, Any]:
+    def unlock_vault(self, space_id: str, passphrase: str = "") -> dict[str, Any]:
         """Load an external key, verify the vault, and decrypt notes in memory.
 
         Files that cannot be decrypted are skipped, counted and reported in
         ``warnings`` rather than locking the user out of the whole vault; they
-        are never overwritten (M7, security rule 8).
+        are never overwritten (M7, security rule 8).  A wrapped key file
+        (section 4.5, M10) needs its passphrase: without one the answer is
+        ``passphrase_required`` so the dialog can ask, and a wrong one is
+        ``wrong_passphrase``.  The passphrase is never stored or echoed.
         """
         space = self._known_space(space_id)
         if space == "plain":
@@ -1363,8 +1597,18 @@ class Api:
 
         key: VaultKey | None = None
         try:
-            key = load_key_file(path)
+            key = load_key_file(path, passphrase=str(passphrase or ""))
             count = store.unlock(key)
+        except PassphraseRequired:
+            return {
+                "error": "passphrase_required",
+                "message": "This key file is protected. Enter its passphrase to unlock.",
+            }
+        except WrongPassphrase:
+            return {
+                "error": "wrong_passphrase",
+                "message": "Wrong passphrase for this key file.",
+            }
         except FileNotFoundError:
             return {"error": "key_not_found", "message": "The selected key file was not found."}
         except WrongVaultError:
@@ -1528,6 +1772,42 @@ class Api:
                 return {"error": "invalid_settings", "message": "Auto-lock minutes must be a number"}
             if not 1.0 <= minutes <= 120.0:
                 return {"error": "invalid_settings", "message": "Auto-lock must be between 1 and 120 minutes"}
+        backup_changes: dict[str, Any] = {}
+        if "backup" in changes:
+            requested = changes["backup"]
+            if not isinstance(requested, Mapping):
+                return {"error": "invalid_settings", "message": "Backup settings must be an object"}
+            # drive_folder_id and last_backup are valid settings keys, but the
+            # app owns them; anything else in the block is refused (12f).
+            unknown_backup = sorted(
+                set(requested) - BACKUP_SETTING_KEYS - {"drive_folder_id", "last_backup"}
+            )
+            if unknown_backup:
+                return {
+                    "error": "invalid_settings",
+                    "message": f"Unknown backup setting(s): {', '.join(unknown_backup)}",
+                }
+            if "interval_minutes" in requested:
+                try:
+                    interval = float(requested["interval_minutes"])
+                except (TypeError, ValueError):
+                    return {"error": "invalid_settings", "message": "Backup interval must be a number"}
+                if not 5.0 <= interval <= 1440.0:
+                    return {
+                        "error": "invalid_settings",
+                        "message": "Auto-backup must be between 5 minutes and 1 day",
+                    }
+                backup_changes["interval_minutes"] = interval
+            if "enabled" in requested:
+                # "Back up every N minutes" only makes sense once signed in,
+                # but the setting is remembered either way so reconnecting
+                # resumes the schedule the user chose.
+                backup_changes["enabled"] = bool(requested["enabled"])
+            # drive_folder_id and last_backup are written by the app only;
+            # anything else in the block is dropped rather than persisted.
+            changes = {key: value for key, value in changes.items() if key != "backup"}
+            if backup_changes:
+                changes["backup"] = backup_changes
         # The notes folder is moved with the native folder dialog
         # (choose_notes_folder), never by a settings write: rule 12f keeps the
         # frontend from naming paths, and a hostile value here could otherwise
@@ -1578,20 +1858,204 @@ class Api:
                 self.autolock.set_minutes(float(changes["autolock_minutes"]))
             except (TypeError, ValueError):
                 pass
+        if backup_changes:
+            self.backup.configure(**self._backup_schedule_settings())
         return updated
 
-    def backup_now(self) -> dict[str, Any]:
-        """Trigger immediate backup (implemented in M8)."""
-        return {"ok": True, "last_backup": "just now"}
+    # ------------------------------------------------------------------
+    # Google Drive backup (section 8)
+    # ------------------------------------------------------------------
+    def _emit(self, event_name: str, data: Any) -> None:
+        """Send one Python-originated event to the frontend (section 4.8)."""
+        emit_event(self.window, event_name, data)
 
+    def _manifest_path(self) -> Path:
+        """``backup_manifest.json`` in the app-settings folder (section 3.2)."""
+        return self.app_dir / MANIFEST_NAME
+
+    def _backup_context(self) -> dict[str, Any]:
+        """Everything the worker needs for one run, read fresh each time."""
+        backup = self.config.get("backup", {})
+        folder_id = backup.get("drive_folder_id") if isinstance(backup, Mapping) else None
+        manifest = BackupManifest(self._manifest_path())
+        manifest.load()
+        return {
+            "notes_root": self.config.notes_root,
+            "manifest": manifest,
+            "folder_id": str(folder_id) if folder_id else None,
+            "on_folder": self._remember_drive_folder,
+        }
+
+    def _backup_schedule_settings(self) -> dict[str, Any]:
+        """The two settings that drive the auto-backup timer."""
+        backup = self.config.get("backup", {})
+        if not isinstance(backup, Mapping):
+            backup = {}
+        try:
+            interval = float(backup.get("interval_minutes", 60))
+        except (TypeError, ValueError):
+            interval = 60.0
+        return {"enabled": bool(backup.get("enabled")), "interval_minutes": interval}
+
+    def _remember_drive_folder(self, folder_id: str) -> None:
+        """Persist the id of the "VaultNotes Backup" folder (section 8.2)."""
+        self.config.update({"backup": {"drive_folder_id": str(folder_id)}})
+
+    def _drive_connected(self) -> bool:
+        """Whether a Google sign-in is stored, without any network call."""
+        return is_connected(self.drive_store)
+
+    def _drive_service(self) -> GoogleDriveClient:
+        """Build a Drive client from the stored refresh token.
+
+        Raises :class:`DriveAuthError` (turned into a ``backup_done`` error by
+        the runner) when the app is not connected or Google refuses the token.
+        """
+        from vaultnotes.backup.gdrive_auth import build_drive_service, get_credentials
+
+        credentials = get_credentials(self.app_dir, store=self.drive_store)
+        return GoogleDriveClient(build_drive_service(credentials))
+
+    def _backup_finished(self, report: BackupReport) -> None:
+        """Stamp the settings with the outcome, after the worker is done."""
+        changes: dict[str, Any] = {}
+        if report.drive_folder_id:
+            changes["drive_folder_id"] = report.drive_folder_id
+        if report.kind == "backup" and report.ok:
+            changes["last_backup"] = report.finished or _now_stamp()
+        if changes:
+            self.config.update({"backup": changes})
+
+    def _auto_backup_due(self) -> None:
+        """Timer callback: back up when the user connected and enabled it."""
+        if not self._drive_connected():
+            return
+        self.backup.start("backup")
+
+    def _backup_state(self) -> dict[str, Any]:
+        """Connection and schedule state for the Drive card and Settings."""
+        backup = self.config.get("backup", {})
+        if not isinstance(backup, Mapping):
+            backup = {}
+        return {
+            "connected": self._drive_connected(),
+            "enabled": bool(backup.get("enabled")),
+            "interval_minutes": backup.get("interval_minutes", 60),
+            "last_backup": backup.get("last_backup"),
+            "has_folder": bool(backup.get("drive_folder_id")),
+            "folder_name": BACKUP_FOLDER_NAME,
+            "running": self.backup.running,
+            "kind": self.backup.kind,
+            "manifest_entries": len(BackupManifest(self._manifest_path())),
+            "client_secret": (self.app_dir / CLIENT_SECRET_NAME).is_file(),
+        }
+
+    @bridge_method
     def connect_drive(self) -> dict[str, Any]:
-        """Connect Google Drive account (implemented in M8)."""
-        return {"ok": True, "connected": True}
+        """Run the Google sign-in flow once and keep only the refresh token.
 
+        The browser window belongs to Python: the frontend just asks for the
+        connection (security rule 12f).
+        """
+        try:
+            result = sign_in(self.app_dir, store=self.drive_store)
+        except DriveAuthError as exc:
+            return _error(exc.code, exc.message)
+        except FileNotFoundError as exc:
+            return _error("client_secret_missing", str(exc))
+        self.backup.configure(**self._backup_schedule_settings())
+        return result
+
+    @bridge_method
     def disconnect_drive(self) -> dict[str, Any]:
-        """Disconnect Google Drive account (implemented in M8)."""
-        return {"ok": True, "connected": False}
+        """Forget the stored token; nothing on Drive is deleted."""
+        from vaultnotes.backup.gdrive_auth import disconnect
 
-    def restore_from_drive(self, target_folder: str) -> dict[str, Any]:
-        """Restore from Google Drive (implemented in M8)."""
-        return {"ok": True, "restored_files": 0}
+        try:
+            result = disconnect(self.drive_store)
+        except DriveAuthError as exc:
+            return _error(exc.code, exc.message)
+        self.backup.stop()
+        self.backup.configure(**self._backup_schedule_settings())
+        return result
+
+    @bridge_method
+    def backup_now(self) -> dict[str, Any]:
+        """Start a one-way backup in the background and answer at once."""
+        if self.backup.running:
+            return _error("busy", "A backup or restore is already running.")
+        if not self._drive_connected():
+            return _error(
+                "not_connected",
+                "Connect Google Drive first (Settings, then 'Connect Google Drive').",
+            )
+        started = self.backup.start("backup")
+        if not started.get("started"):
+            return _error("busy", "A backup or restore is already running.")
+        return {"ok": True, "started": True, "folder": BACKUP_FOLDER_NAME}
+
+    @bridge_method
+    def restore_from_drive(self, target_folder: Path | str | None = None) -> dict[str, Any]:
+        """Download the backup into an empty folder chosen in Python.
+
+        ``target_folder`` is honoured only when no window exists (tests and
+        scripts), exactly like :meth:`choose_notes_folder` - the desktop app
+        always asks the native dialog, so the frontend never sends a path.
+        """
+        if self.backup.running:
+            return _error("busy", "Wait for the running backup to finish first.")
+        if not self._drive_connected():
+            return _error("not_connected", "Connect Google Drive first.")
+
+        if self.window is not None or target_folder is None:
+            selected = self._choose_folder()
+            cancelled_message = "No folder was selected, so nothing was restored."
+        else:
+            if not isinstance(target_folder, (str, Path)) or not str(target_folder).strip():
+                return {"error": "invalid_folder", "message": "That is not a folder path."}
+            candidate = Path(str(target_folder)).expanduser()
+            if not candidate.is_absolute():
+                return {
+                    "error": "invalid_folder",
+                    "message": "Restore needs an absolute folder path.",
+                }
+            selected = candidate.resolve()
+            cancelled_message = "No folder was selected, so nothing was restored."
+        if selected is None:
+            return {"error": "cancelled", "message": cancelled_message}
+        if selected.exists() and any(selected.iterdir()):
+            return {
+                "error": "target_not_empty",
+                "message": "Restore needs an empty folder so nothing of yours is overwritten.",
+            }
+
+        started = self.backup.start("restore", selected)
+        if not started.get("started"):
+            return _error("busy", "A backup or restore is already running.")
+        return {"ok": True, "started": True, "target": str(selected)}
+
+    @bridge_method
+    def prune_drive_backup(self) -> dict[str, Any]:
+        """Delete Drive copies of files removed from this computer over 30 days
+        ago (M10).  Only entries the manifest still remembers are considered.
+        """
+        if self.backup.running:
+            return _error("busy", "Wait for the running backup to finish first.")
+        if not self._drive_connected():
+            return _error("not_connected", "Connect Google Drive first.")
+        from vaultnotes.backup.gdrive_backup import prune_deleted
+
+        context = self._backup_context()
+        try:
+            client = self._drive_service()
+        except DriveAuthError as exc:
+            return _error(exc.code, exc.message)
+        except Exception as exc:  # noqa: BLE001 - the bridge never crashes
+            return _error("network", f"Google Drive could not be reached ({type(exc).__name__}).")
+        try:
+            removed = prune_deleted(context["notes_root"], context["manifest"], client)
+        except BackupError as exc:
+            return _error(exc.code, exc.message)
+        except Exception as exc:  # noqa: BLE001
+            return _error("network", f"The cleanup stopped early ({type(exc).__name__}).")
+        return {"ok": True, "removed": len(removed)}

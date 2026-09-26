@@ -26,13 +26,14 @@ import {
   setEditorCursorToEnd,
   refreshWikilinkDecorations
 } from './ui/editor.js';
-import { initPreview, renderPreview, scrollPreviewTo } from './ui/preview.js';
+import { initPreview, renderPreview, scrollPreviewTo, scrollPreviewToHeading } from './ui/preview.js';
 import { renderBacklinks } from './ui/backlinks.js';
 import { createSealedHero, createEmptyHero, updateSealedDetails } from './ui/sealedVault.js';
 import { createUnlockDialog } from './ui/unlockDialog.js';
 import { createVaultSetupDialog } from './ui/vaultSetup.js';
 import { createCommandPalette } from './ui/commandPalette.js';
 import { createSettingsOverlay } from './ui/settings.js';
+import { createGraphOverlay } from './ui/graphView.js';
 import { toast, initToasts } from './ui/toasts.js';
 import {
   createStatusBar,
@@ -76,8 +77,13 @@ const state = {
   history: [],
   historyIndex: -1,
   titles: [],           // titles this space can link to, from bridge.list_titles
+  plainTitles: [],      // Plain titles, for [[Plain:Title]] links from a vault (M10)
   isBackingUp: false,
-  lastBackup: null
+  lastBackup: null,
+  backup: {
+    connected: false, enabled: false, interval_minutes: 60, last_backup: null,
+    has_folder: false, folder_name: 'VaultNotes Backup', running: false, kind: null
+  }
 };
 
 const THEMES = [
@@ -99,6 +105,7 @@ let unlockDialog = null;
 let vaultSetupDialog = null;
 let commandPalette = null;
 let settingsOverlay = null;
+let graphOverlay = null;
 let moveDialog = null;
 
 // Timers
@@ -169,8 +176,94 @@ async function refreshTitles() {
       state.titles = [];
     }
   }
+  await refreshPlainTitles(space);
   refreshWikilinkDecorations();
   return state.titles;
+}
+
+/**
+ * Titles of the Plain space, so a vault note's [[Plain:Title]] chip can tell a
+ * real note from a typo (M10).  Plain is always open, and a vault's titles are
+ * never consulted from here, so this cannot reveal one (security rule 11).
+ */
+async function refreshPlainTitles(space) {
+  if (!space || space.id === 'plain') {
+    state.plainTitles = state.titles;
+    return state.plainTitles;
+  }
+  try {
+    state.plainTitles = asList(await bridge.list_titles('plain'));
+  } catch (err) {
+    state.plainTitles = [];
+  }
+  return state.plainTitles;
+}
+
+/**
+ * Follow a [[link]] the user clicked - in the preview, or with Ctrl+click in the
+ * editor (M10).  `space` is set for the one cross-space form a vault note may
+ * use, `[[Plain:Title]]`, and then the note is opened by switching spaces.
+ * `heading` asks the preview to scroll to that heading once the note is up.
+ */
+async function openLinkTarget(title, { space = '', heading = '' } = {}) {
+  const current = getActiveSpace();
+  if (!current) return;
+  const spaceId = space || current.id;
+  const target = state.spaces.find(s => s.id === spaceId);
+  if (!target) {
+    toast(`“${title}” cannot be opened from here`, { icon: 'alert' });
+    return;
+  }
+  if (target.locked) {
+    toast(`Unlock ${target.name} first`, { icon: 'lock' });
+    return;
+  }
+
+  // The engine resolves the title, so case, ".md" and an alias behave exactly
+  // as they do in the preview.
+  const result = await bridge.open_note_by_title(spaceId, title, heading || '');
+  if (result?.error) {
+    // Only a missing note in THIS space may be created from a link.
+    if (result.error === 'not_found' && !space) {
+      await createNoteFromLink(title);
+      return;
+    }
+    toast(result.message || `“${title}” is not in ${target.name}`, { icon: 'alert' });
+    return;
+  }
+
+  if (spaceId !== current.id) {
+    await selectSpace(spaceId, result.note_id);
+  } else {
+    await openNote(result.note_id);
+  }
+
+  if (result.heading && state.currentNote) {
+    // The preview renders as the note loads; render it here too so the scroll
+    // has its headings to look at.
+    await renderPreview(spaceId, state.currentNote.body);
+    scrollPreviewToHeading(result.heading);
+  }
+}
+
+/**
+ * Offer to create the note a [[link]] points at.  Creating is always a separate
+ * yes/no step (section 4.7): following a link must never write a file by itself.
+ */
+async function createNoteFromLink(title) {
+  const space = getActiveSpace();
+  if (!space) return;
+  if (space.locked) {
+    toast(`Unlock ${space.name} first`, { icon: 'lock' });
+    return;
+  }
+  const ok = await confirmAction({
+    title: `Create note “${title}”?`,
+    message: `${space.name} has no note with that name yet.`,
+    confirmLabel: 'Create note',
+    iconName: 'plus'
+  });
+  if (ok) await createNote(title);
 }
 
 function pushHistory() {
@@ -827,17 +920,29 @@ function handleEditorChange(newBody) {
    Lock / Unlock Flow
    ================================================================= */
 
+/**
+ * Show the M10 graph of the space on screen.  The data comes from the engine,
+ * so a locked vault has nothing to draw and no title can leak.
+ */
+function openGraphForCurrentSpace() {
+  const space = getActiveSpace();
+  if (!space || !graphOverlay) return;
+  graphOverlay.open(space.id, space);
+}
+
 function openUnlockDialogForSpace(spaceId) {
   const space = state.spaces.find(s => s.id === spaceId);
   if (!space) return;
   unlockDialog?.open(space);
 }
 
-async function handleUnlockComplete(spaceId) {
+async function handleUnlockComplete(spaceId, passphrase = '') {
   const space = state.spaces.find(s => s.id === spaceId);
   if (!space) return { error: 'invalid_space', message: 'Space not found' };
 
-  const result = await bridge.unlock_vault(spaceId);
+  // A wrapped key file (section 4.5) needs its passphrase; it is passed straight
+  // to Python and never stored or echoed by the UI.
+  const result = await bridge.unlock_vault(spaceId, passphrase || '');
   if (result?.error || result?.ok === false) {
     return result;
   }
@@ -937,23 +1042,163 @@ function handleVaultLockedEvent(data = {}) {
 }
 
 /* =================================================================
-   Drive Backup (M8 Hook)
+   Drive Backup (M8: one-way backup of the notes folder)
    ================================================================= */
 
-async function runBackup() {
-  if (state.isBackingUp) return;
-  state.isBackingUp = true;
-  updateBackupProgress('Backing up…', 35);
-  toast('Backing up notes to Google Drive…', { icon: 'cloud' });
+/** "10:02" for today, "3 Sep 10:02" otherwise - the status bar has no room. */
+function formatBackupTime(stamp) {
+  if (!stamp) return 'never';
+  const date = new Date(stamp);
+  if (Number.isNaN(date.getTime())) return String(stamp);
+  const clock = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const today = new Date();
+  const sameDay = date.toDateString() === today.toDateString();
+  return sameDay ? clock : `${date.toLocaleDateString([], { day: 'numeric', month: 'short' })} ${clock}`;
+}
 
-  setTimeout(async () => {
-    const res = await bridge.backup_now();
-    state.isBackingUp = false;
-    state.lastBackup = res.last_backup || 'just now';
-    updateBackupProgress(state.lastBackup, null);
-    updateDriveCard(`Backed up ${state.lastBackup}`);
-    toast('Backup complete. Key files were not uploaded.', { icon: 'check' });
-  }, 1400);
+/** The Drive card, the status bar and Settings all read the same snapshot. */
+function applyBackupState(backup) {
+  if (backup) state.backup = { ...state.backup, ...backup };
+  state.lastBackup = state.backup.last_backup ?? null;
+  state.isBackingUp = Boolean(state.backup.running);
+  paintBackupIdle();
+}
+
+/** Idle wording for the sidebar card and the status bar. */
+function paintBackupIdle() {
+  const { connected, last_backup: last, enabled } = state.backup;
+  if (!connected) {
+    updateDriveCard('Not connected', { off: true });
+    updateBackupProgress('Drive not connected', null);
+    return;
+  }
+  const when = formatBackupTime(last);
+  updateDriveCard(`Backed up ${when}`);
+  updateBackupProgress(`Backed up ${when}${enabled ? '' : ' · auto off'}`, null);
+}
+
+function handleBackupProgress(data = {}) {
+  const total = Number(data.total) || 0;
+  const done = Number(data.done) || 0;
+  state.isBackingUp = true;
+  const fraction = total > 0 ? Math.min(1, done / total) : null;
+  updateBackupProgress(data.label || (data.kind === 'restore' ? 'Restoring…' : 'Backing up…'), fraction);
+  updateDriveCard(data.kind === 'restore' ? 'Restoring…' : 'Backing up…', { busy: true });
+}
+
+async function handleBackupDone(data = {}) {
+  state.isBackingUp = false;
+  const isRestore = data.kind === 'restore';
+  const refreshed = await bridge.get_state();
+  applyBackupState(refreshed.backup);
+  if (data.ok === false) {
+    // Section 8.2: a failed run is a toast plus a status line, never a crash.
+    toast(data.message || `The ${isRestore ? 'restore' : 'backup'} did not finish.`, { icon: 'alert' });
+    updateBackupProgress(isRestore ? 'Restore failed' : 'Backup failed', null);
+    updateDriveCard(state.backup.connected ? `Backed up ${formatBackupTime(state.backup.last_backup)}` : 'Not connected');
+    settingsOverlay?.paintDrive?.(state.backup);
+    return;
+  }
+  settingsOverlay?.paintDrive?.(state.backup);
+  if (isRestore) {
+    const count = Number(data.restored) || 0;
+    toast(`Restored ${count} file${count === 1 ? '' : 's'}. Unlock a vault with its key file to read those notes.`, { icon: 'cloud' });
+    await selectSpace(state.currentSpaceId, null, false);
+  } else {
+    const skipped = Number(data.skipped) || 0;
+    const moved = (Number(data.uploaded) || 0) + (Number(data.updated) || 0);
+    toast(moved ? `Drive: ${moved} file${moved === 1 ? '' : 's'} sent, ${skipped} already up to date. Key files stay home.`
+                : 'Drive was already up to date.', { icon: 'check' });
+  }
+}
+
+async function runBackup() {
+  if (state.isBackingUp) {
+    toast('A backup or restore is already running', { icon: 'cloud' });
+    return;
+  }
+  const res = await bridge.backup_now();
+  if (res?.error) {
+    if (res.error === 'not_connected') {
+      const ok = await confirmAction({
+        title: 'Connect Google Drive first',
+        message: 'VaultNotes needs a one-time Google sign-in before it can back up your notes folder.',
+        confirmLabel: 'Open settings',
+        cancelLabel: 'Later',
+        iconName: 'cloud'
+      });
+      if (ok) settingsOverlay?.open();
+      return;
+    }
+    toast(res.message || 'The backup could not start', { icon: 'alert' });
+    return;
+  }
+  // The engine reports progress through backup_progress / backup_done.
+  state.isBackingUp = true;
+  updateBackupProgress('Starting…', 0);
+  updateDriveCard('Starting…');
+}
+
+async function connectDrive() {
+  const res = await bridge.connect_drive();
+  if (res?.error) {
+    toast(res.message || 'Google sign-in did not complete', { icon: 'alert' });
+  } else {
+    toast('Google Drive connected. Key files are never uploaded.', { icon: 'check' });
+  }
+  const refreshed = await bridge.get_state();
+  applyBackupState(refreshed.backup);
+  return res;
+}
+
+async function disconnectDrive() {
+  const res = await bridge.disconnect_drive();
+  if (res?.error) toast(res.message || 'Could not disconnect', { icon: 'alert' });
+  else toast('Disconnected. Your notes stay on this computer.', { icon: 'cloud' });
+  const refreshed = await bridge.get_state();
+  applyBackupState(refreshed.backup);
+  return res;
+}
+
+async function restoreFromDrive() {
+  const ok = await confirmAction({
+    title: 'Restore from Google Drive?',
+    message: 'Choose an empty folder. VaultNotes downloads the backup there and points the app at it; vault notes stay encrypted until you load their key files.',
+    confirmLabel: 'Choose folder',
+    iconName: 'upload'
+  });
+  if (!ok) return null;
+  const res = await bridge.restore_from_drive();
+  if (res?.error) {
+    if (res.error !== 'cancelled') toast(res.message || 'The restore could not start', { icon: 'alert' });
+    return res;
+  }
+  state.isBackingUp = true;
+  updateBackupProgress('Restoring…', 0);
+  return res;
+}
+
+async function pruneDrive() {
+  const ok = await confirmAction({
+    title: 'Delete old files from Drive?',
+    message: 'VaultNotes will remove the Drive copies of notes you deleted on this computer more than 30 days ago. Files you kept are untouched.',
+    confirmLabel: 'Clean up Drive',
+    danger: true,
+    iconName: 'trash'
+  });
+  if (!ok) return null;
+  const res = await bridge.prune_drive_backup();
+  if (res?.error) toast(res.message || 'The cleanup could not run', { icon: 'alert' });
+  else toast(res.removed ? `Removed ${res.removed} old file${res.removed === 1 ? '' : 's'} from Drive.` : 'Nothing was old enough to remove.', { icon: 'check' });
+  return res;
+}
+
+async function saveBackupSettings(changes) {
+  const res = await bridge.update_settings({ backup: changes });
+  if (res?.error) toast(res.message || 'Those backup settings were not accepted', { icon: 'alert' });
+  const refreshed = await bridge.get_state();
+  applyBackupState(refreshed.backup);
+  return res;
 }
 
 /* =================================================================
@@ -984,7 +1229,26 @@ async function getPaletteCommands() {
     ] : []),
     { label: 'Lock all vaults', hint: 'Ctrl L', icon: 'lock', run: () => lockAllVaults() },
     { label: 'Back up now', hint: 'Ctrl B', icon: 'cloud', run: () => runBackup() },
+    ...(state.backup.connected ? [
+      {
+        label: state.backup.enabled ? 'Auto-backup: every ' + state.backup.interval_minutes + ' min' : 'Auto-backup: off',
+        sub: 'Google Drive',
+        icon: 'clock',
+        run: () => settingsOverlay?.open()
+      },
+      { label: 'Restore from Drive…', sub: 'into an empty folder', icon: 'upload', run: () => restoreFromDrive() },
+      { label: 'Clean up Drive…', sub: 'delete files you removed over 30 days ago', icon: 'trash', run: () => pruneDrive() },
+      { label: 'Disconnect Google Drive', icon: 'cloud', run: () => disconnectDrive() }
+    ] : [
+      { label: 'Connect Google Drive', sub: 'one-time sign-in', icon: 'cloud', run: () => connectDrive() }
+    ]),
     { label: 'Switch view: Edit / Split / Preview', hint: 'Ctrl E', icon: 'columns', run: () => cycleViewMode() },
+    {
+      label: 'Link graph for this space',
+      sub: 'Notes as dots, joined by their links',
+      icon: 'graph',
+      run: () => openGraphForCurrentSpace()
+    },
     ...THEMES.map(t => ({
       label: `Theme: ${t.name}`,
       icon: 'sparkle',
@@ -1202,6 +1466,8 @@ function startAutoLockTimer() {
 async function init() {
   initToasts();
   events.on('vault_locked', handleVaultLockedEvent);
+  events.on('backup_progress', handleBackupProgress);
+  events.on('backup_done', handleBackupDone);
   // Python pushes problems it could not answer a call with (skipped files).
   events.on('error', (data) => {
     if (Array.isArray(data?.warnings)) showWarnings(data.warnings);
@@ -1218,6 +1484,7 @@ async function init() {
   state.notesRoot = appState.notes_root || '';
   state.autolockMinutes = appState.autolock_minutes || state.autolockMinutes;
   state.locksAt = appState.locks_at ?? null;
+  applyBackupState(appState.backup);
   showWarnings(appState.warnings);
 
   // Mount Toolbar
@@ -1244,7 +1511,8 @@ async function init() {
       if (st.needs_setup) vaultSetupDialog?.open();
       else toast('Encrypted and Personal vaults already exist', { icon: 'shield' });
     },
-    onSyncDrive: runBackup
+    onSyncDrive: runBackup,
+    onOpenDriveSettings: () => settingsOverlay?.open()
   });
   sidebarContainer.replaceWith(sidebarEl);
 
@@ -1301,39 +1569,26 @@ async function init() {
     getTitles: () => {
       const space = getActiveSpace();
       return space && !space.locked ? state.titles : [];
-    }
+    },
+    // Only ever Plain, for the [[Plain:Title]] form (M10).
+    getPlainTitles: () => state.plainTitles,
+    // M10: Ctrl+click (Cmd+click) a [[link]] in the editor to open it.
+    onLinkClick: (link) => openLinkTarget(link.target, {
+      space: link.space || '',
+      heading: link.heading || ''
+    })
   });
 
   // Initialize Markdown Preview
   const previewContainer = document.getElementById('preview');
   initPreview(previewContainer, {
-    onOpenNoteByTitle: async (targetTitle) => {
-      const space = getActiveSpace();
-      if (space.locked) return;
-      const notes = asList(await bridge.list_notes(space.id, '', state.sort));
-      state.currentNotes = notes;
-      const wanted = String(targetTitle).trim().toLowerCase().replace(/\.md$/i, '');
-      const match = notes.find(n => n.title.trim().toLowerCase() === wanted);
-      if (match) {
-        openNote(match.id);
-      } else {
-        // The note went away (or the link points at another space).
-        toast(`“${targetTitle}” is not in ${space.name}`, { icon: 'alert' });
-      }
-    },
-    onCreateNotePrompt: async (title) => {
-      const space = getActiveSpace();
-      if (space.locked) {
-        toast(`Unlock ${space.name} first`, { icon: 'lock' });
-        return;
-      }
-      const ok = await confirmAction({
-        title: `Create note “${title}”?`,
-        message: `${space.name} has no note with that name yet.`,
-        confirmLabel: 'Create note',
-        iconName: 'plus'
-      });
-      if (ok) await createNote(title);
+    onOpenNoteByTitle: (targetTitle, options = {}) => openLinkTarget(targetTitle, options),
+    onCreateNotePrompt: (title) => createNoteFromLink(title),
+    // A link to a note that is missing in ANOTHER space: report it, never create
+    // it here, because a note belongs to exactly one space (M10).
+    onMissingNoteInOtherSpace: (title, options = {}) => {
+      const name = state.spaces.find(sp => sp.id === options.space)?.name || 'that space';
+      toast(`“${title}” is not in ${name}. Notes are never created across spaces.`, { icon: 'alert' });
     },
     onExternalLink: (url) => {
       bridge.open_external(url);
@@ -1341,8 +1596,20 @@ async function init() {
     }
   });
 
-  // Mount Overlays (Unlock dialog, Command Palette, Settings)
+  // Mount Overlays (Unlock dialog, Command Palette, Settings, graph)
   const overlaysRoot = document.getElementById('overlays-root');
+
+  graphOverlay = createGraphOverlay({
+    onOpenNote: async (noteId, spaceId) => {
+      graphOverlay.close();
+      if (spaceId && spaceId !== state.currentSpaceId) {
+        await selectSpace(spaceId, noteId);
+      } else {
+        await openNote(noteId);
+      }
+    }
+  });
+  overlaysRoot.appendChild(graphOverlay.element);
 
   unlockDialog = createUnlockDialog({
     onUnlockComplete: handleUnlockComplete,
@@ -1352,8 +1619,8 @@ async function init() {
 
   vaultSetupDialog = createVaultSetupDialog({
     onChooseFolder: () => bridge.choose_notes_folder(),
-    onSetup: async () => {
-      const result = await bridge.initialize_vaults();
+    onSetup: async (passphrases) => {
+      const result = await bridge.initialize_vaults(passphrases);
       if (!result?.error) {
         const refreshed = await bridge.get_state();
         state.spaces = refreshed.spaces;
@@ -1379,6 +1646,13 @@ async function init() {
       autolock_minutes: state.autolockMinutes,
       notes_root: state.notesRoot
     }),
+    getBackup: () => state.backup,
+    onSaveBackup: (changes) => saveBackupSettings(changes),
+    onConnectDrive: () => connectDrive(),
+    onDisconnectDrive: () => disconnectDrive(),
+    onBackupNow: () => runBackup(),
+    onRestoreDrive: () => restoreFromDrive(),
+    onPruneDrive: () => pruneDrive(),
     onSaveSettings: (changes) => {
       if (changes.look?.theme) setTheme(changes.look.theme, true);
       if (changes.look?.effects) setFx(changes.look.effects, true);
@@ -1428,7 +1702,7 @@ async function init() {
   setFx(state.effects, true);
   setEditorFontSize(state.editorFontSize, true);
   setViewMode(state.viewMode);
-  updateBackupProgress(state.lastBackup || 'never', null);
+  paintBackupIdle();
 
   // Select initial space (Plain space with first note)
   await selectSpace('plain', null, false);

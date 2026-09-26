@@ -94,8 +94,9 @@ def test_api_creates_two_external_key_files_and_rejects_inner_key(tmp_path: Path
     config.ensure_folders()
 
     from vaultnotes.api import Api
+    from vaultnotes.backup.gdrive_auth import TokenStore
 
-    api = Api(config=config)
+    api = Api(config=config, app_dir=tmp_path / "appdata", drive_store=TokenStore(memory=True))
     result = api.initialize_vaults()
     assert result["ok"] is True
     assert (tmp_path / "keys" / "encrypted.vnkey").is_file()
@@ -105,7 +106,7 @@ def test_api_creates_two_external_key_files_and_rejects_inner_key(tmp_path: Path
     fresh_config.data["notes_root"] = str(tmp_path / "fresh-notes")
     fresh_config.save()
     fresh_config.ensure_folders()
-    fresh_api = Api(config=fresh_config)
+    fresh_api = Api(config=fresh_config, app_dir=tmp_path / "appdata", drive_store=TokenStore(memory=True))
     bad = fresh_api.create_vault("encrypted", fresh_config.notes_root / "inside.vnkey")
     assert bad["error"] == "key_inside_notes"
     fresh_api.close()

@@ -336,9 +336,80 @@
   text-underline-offset: 3px;
 }
 
+/* A link that named another space and found nothing there (M10): it is shown
+   as missing, and the app never offers to create the note in this space. */
+.preview a[href^="#vn-missing/"] {
+  padding: 1px 7px;
+  border-radius: var(--r-chip);
+  white-space: nowrap;
+  text-decoration: none;
+  cursor: help;
+  color: var(--faint);
+  background: transparent;
+  border: 1px dashed color-mix(in srgb, var(--faint) 45%, transparent);
+  font-style: italic;
+}
+
+/* ---------------------------------------------------------------------
+   ![[embeds]] (M10).  vaultnotes.render inlines the other note inside a
+   labelled card, so it reads as a quote of a note you can jump to.
+   --------------------------------------------------------------------- */
+.vn-embed {
+  display: block;
+  margin: 16px 0;
+  padding: 0 14px 6px;
+  border-radius: var(--r-card);
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--glass-border));
+  background: color-mix(in srgb, var(--accent) 5%, var(--glass));
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.vn-embed-title {
+  display: inline-block;
+  margin: 10px 0 2px;
+  padding: 1px 7px;
+  border-radius: var(--r-chip);
+  font: 600 10px/1.6 var(--font-mono);
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  cursor: pointer;
+}
+
+.vn-embed-title:hover {
+  box-shadow: 0 0 14px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.vn-embed-body > :last-child {
+  margin-bottom: 10px;
+}
+
+/* An embed of a note that is itself embedded stays visually quieter. */
+.vn-embed .vn-embed {
+  background: transparent;
+  box-shadow: none;
+}
+
+/* The heading a [[Note#Heading]] link landed on, flashed so it is findable. */
+.preview h1.is-targeted,
+.preview h2.is-targeted,
+.preview h3.is-targeted,
+.preview h4.is-targeted,
+.preview h5.is-targeted,
+.preview h6.is-targeted {
+  animation: vn-heading-target 1.2s var(--ease);
+}
+
+@keyframes vn-heading-target {
+  from { background: color-mix(in srgb, var(--accent) 34%, transparent); }
+  to   { background: transparent; }
+}
+
 /* Links inside a table cell must not stretch the row apart. */
 .preview td a[href^="#vn-open/"],
-.preview td a[href^="#vn-new/"] {
+.preview td a[href^="#vn-new/"],
+.preview td a[href^="#vn-missing/"] {
   display: inline-block;
   max-width: 100%;
   overflow: hidden;
@@ -348,6 +419,15 @@
 
 /* Effects: Lite and Off drop the glow, keeping only the shape (section 6.7). */
 .fx-lite .preview a[href^="#vn-open/"]:hover,
-.fx-off .preview a[href^="#vn-open/"]:hover {
+.fx-off .preview a[href^="#vn-open/"]:hover,
+.fx-lite .vn-embed-title:hover,
+.fx-off .vn-embed-title:hover {
   box-shadow: none;
+}
+
+.fx-lite .preview h1.is-targeted,
+.fx-lite .preview h2.is-targeted,
+.fx-off .preview h1.is-targeted,
+.fx-off .preview h2.is-targeted {
+  animation: none;
 }

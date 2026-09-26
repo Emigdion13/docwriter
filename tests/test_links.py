@@ -12,8 +12,10 @@ from pathlib import Path
 import pytest
 
 from vaultnotes.api import Api
+from vaultnotes.backup.gdrive_auth import TokenStore
 from vaultnotes.config import Config
 from vaultnotes.links import (
+    EMBED_MARK,
     Link,
     LinkIndex,
     count_links,
@@ -372,7 +374,7 @@ def make_api(tmp_path: Path) -> Api:
     cfg.ensure_folders()
     for sample in cfg.plain_dir.glob("*.md"):
         sample.unlink()
-    return Api(config=cfg)
+    return Api(config=cfg, app_dir=tmp_path / "appdata", drive_store=TokenStore(memory=True))
 
 
 @pytest.fixture
@@ -606,3 +608,102 @@ def test_link_counts_reach_the_note_list(api: Api) -> None:
     listing = {item["id"]: item for item in api.list_notes("plain")}
 
     assert listing["Travel 2026"]["link_count"] == 2
+
+
+# ----------------------------------------------------------------------
+# M10: embeds, heading addresses, and links out to the Plain space
+# ----------------------------------------------------------------------
+def test_parse_embed_and_space_prefix_forms() -> None:
+    body = "![[Travel 2026]] and [[Travel 2026]] plus ![[Note|alias]] and [[Plain:Trip]]"
+    links = parse_links(body)
+
+    assert [link.embedded for link in links] == [True, False, True, False]
+    assert [link.target for link in links] == ["Travel 2026", "Travel 2026", "Note", "Trip"]
+    assert links[2].display == "alias"
+    assert links[3].space == "plain"
+    # An embed that stands on its own line is drawn as a block card.
+    assert [link.alone_on_line for link in links] == [False, False, False, False]
+
+
+def test_embed_on_its_own_line_is_marked_as_a_block() -> None:
+    links = parse_links("intro\n\n![[Travel 2026]]\n\noutro")
+    assert len(links) == 1
+    assert links[0].embedded is True
+    assert links[0].alone_on_line is True
+
+
+def test_links_into_a_vault_are_never_parsed() -> None:
+    """Rule 11: a space may only ever be named when it is the Plain one."""
+    body = "[[Encrypted:Bank]] [[Personal:Codes]] [[personal:Codes]] [[Plain:Trip]]"
+    links = parse_links(body)
+
+    assert [(link.target, link.space) for link in links] == [("Trip", "plain")]
+
+
+def test_preview_address_carries_the_heading_and_the_space() -> None:
+    titles = ["Travel 2026", "Home lab"]
+    out = render_links_for_preview(
+        "[[Travel 2026#Hotels]] [[Home lab]] [[Plain:Trip]] [[Plain:Missing]]",
+        titles,
+        spaces={"plain": ["Trip"]},
+    )
+
+    assert "#vn-open/Travel%202026#Hotels" in out
+    assert "#vn-open/Home%20lab" in out
+    assert "#vn-open/plain/Trip" in out
+    # A missing note in another space must not offer to create it here.
+    assert "#vn-missing/plain/Missing" in out
+    assert "#vn-new/Missing" not in out
+
+
+def test_preview_embeds_use_invisible_markers() -> None:
+
+    titles = ["Travel 2026"]
+    block = render_links_for_preview("![[Travel 2026]]", titles, embeds=True)
+    inline = render_links_for_preview("see ![[Travel 2026]] here", titles, embeds=True)
+    missing = render_links_for_preview("![[Gone]]", titles, embeds=True)
+
+    assert block.strip() == f"{EMBED_MARK}TTravel 2026{EMBED_MARK}"
+    assert inline == f"see {EMBED_MARK}ITravel 2026{EMBED_MARK} here"
+    assert "[Gone](#vn-new/Gone)" in missing
+
+
+def test_embeds_of_missing_or_other_space_notes_stay_links() -> None:
+    titles = ["Travel 2026"]
+    out = render_links_for_preview(
+        "![[Travel 2026]] and ![[Plain:Travel 2026]]",
+        titles,
+        spaces={"plain": ["Travel 2026"]},
+        embeds=True,
+    )
+    # Only the same-space embed is inlined; a cross-space one stays a link.
+    assert out.count(EMBED_MARK) == 2
+    assert f"{EMBED_MARK}ITravel 2026{EMBED_MARK}" in out
+    assert "[Plain:Travel 2026](#vn-open/plain/Travel%202026)" in out
+
+
+def test_rename_keeps_embed_bang_and_plain_prefix() -> None:
+    body = "![[Travel 2026]] and [[Plain:Travel 2026]]\n"
+    renamed, count = rename_links(body, "Travel 2026", "Trip 2026")
+
+    assert count == 2
+    assert renamed == "![[Trip 2026]] and [[Plain:Trip 2026]]\n"
+
+
+def test_rename_keeps_a_heading_suffix_on_an_embed() -> None:
+    body = "![[Travel 2026#Hotels|stay]]"
+    renamed, count = rename_links(body, "Travel 2026", "Trip 2026")
+
+    assert count == 1
+    assert renamed == "![[Trip 2026#Hotels|stay]]"
+
+
+def test_embeds_count_as_links_for_backlinks(api: Api) -> None:
+    write(api, "plain", "Home lab", "# Home lab\n")
+    embed = write(api, "plain", "Notes", "Notes\n\n![[Home lab]]\n")
+
+    assert embed["title"] == "Notes"
+    lab = api.open_note("plain", "Home lab")
+    assert [item["title"] for item in lab["backlinks"]] == ["Notes"]
+    listing = {item["id"]: item for item in api.list_notes("plain")}
+    assert listing["Notes"]["link_count"] == 1

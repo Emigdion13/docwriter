@@ -19,6 +19,7 @@ import pytest
 
 import vaultnotes.storage.vault_store as vault_store_module
 from vaultnotes.api import Api
+from vaultnotes.backup.gdrive_auth import TokenStore
 from vaultnotes.config import Config
 from vaultnotes.crypto.keyfile import generate_key_file, load_key_file
 from vaultnotes.storage.vault_store import DamagedVaultError, VaultStore
@@ -46,7 +47,7 @@ def make_api(tmp_path: Path, with_vaults: bool = True) -> Api:
     cfg.ensure_folders()
     for sample in cfg.plain_dir.glob("*.md"):
         sample.unlink()  # Config seeds sample notes on first run
-    api = Api(config=cfg)
+    api = Api(config=cfg, app_dir=tmp_path / "appdata", drive_store=TokenStore(memory=True))
     if with_vaults:
         created = api.initialize_vaults(
             key_paths={
