@@ -39,30 +39,105 @@ const vaultNotesHighlightStyle = HighlightStyle.define([
 ]);
 
 /**
- * The note title a [[link]] points at: no alias, no #heading, no ".md".
- * Mirrors links.py so the editor and the engine agree on what a target is.
+ * The target part of a `[[...]]` body: everything before an unescaped "|".
+ * An alias is written `[[Note|shown text]]`, and `\|` inside a table cell is a
+ * literal pipe, not the separator (links.py does the same).
  */
+function targetPart(inner) {
+  const text = String(inner ?? "");
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === "|" && text[i - 1] !== "\\") {
+      return text.slice(0, i).trim();
+    }
+  }
+  return text.trim();
+}
+
+/**
+ * What one `[[...]]` points at: `{ target, heading, space }`, mirroring
+ * links.py so the editor and the engine agree (M6, plus M10's `#Heading` and
+ * `Plain:` prefix).  Returns null for a link that must not resolve, which
+ * includes every attempt to name a vault.
+ */
+function parseWikilink(inner) {
+  let part = targetPart(inner);
+  let heading = "";
+  const hash = part.indexOf("#");
+  if (hash !== -1) {
+    heading = part.slice(hash + 1).trim();
+    part = part.slice(0, hash).trim();
+  }
+  let space = "";
+  const colon = part.indexOf(":");
+  if (colon !== -1) {
+    const head = part.slice(0, colon).trim().toLowerCase();
+    const rest = part.slice(colon + 1).trim();
+    if (head !== "plain" || !rest) return null;
+    space = "plain";
+    part = rest;
+  }
+  part = part.replace(/\.md$/i, "").trim();
+  if (!part) return null;
+  return { target: part, heading, space };
+}
+
+/** The title a [[link]] points at: no alias, no #heading, no ".md". */
 function linkTarget(inner) {
-  let target = inner.split("|")[0].replace(/\\\|/g, "|").trim();
-  const hash = target.indexOf("#");
-  if (hash !== -1) target = target.slice(0, hash).trim();
-  return target.replace(/\.md$/i, "").trim();
+  const parsed = parseWikilink(inner);
+  return parsed ? parsed.target : "";
+}
+
+/**
+ * The link under a position in one line of text (M10: Ctrl+click to open).
+ * A link inside inline code is text, not a link, so an odd number of backticks
+ * in front of it means "no link here".
+ */
+function wikilinkAt(lineText, offset) {
+  const text = String(lineText ?? "");
+  const pattern = /(!)?\[\[([^\]\n]+)\]\]/g;
+  let match = pattern.exec(text);
+  while (match !== null) {
+    const from = match.index;
+    const to = from + match[0].length;
+    if (offset >= from && offset <= to) {
+      if (((text.slice(0, from).match(/`/g) || []).length) % 2 === 1) return null;
+      const parsed = parseWikilink(match[2]);
+      if (!parsed) return null;
+      return { ...parsed, embedded: match[1] === "!" };
+    }
+    match = pattern.exec(text);
+  }
+  return null;
 }
 
 // Decorator to style [[wikilinks]] inside CodeMirror.  A link to a note that
 // does not exist in this space is drawn as a dashed chip, exactly like the
 // preview does, so a typo is visible while typing (M6).
 const wikilinkDecorator = new MatchDecorator({
-  regexp: /\[\[([^\]\n]+)\]\]/g,
+  // The optional "!" is part of the chip: an embed is a link too, and hiding
+  // the bang would leave a stray character outside the styled span.
+  regexp: /(!)?\[\[([^\]\n]+)\]\]/g,
   // CodeMirror calls decorate(add, from, to, match, view): `to` is already the
   // end of the match, so it must not be recomputed from the match here.
   decorate(add, from, to, match) {
-    const target = linkTarget(match[1] || "");
-    const known = target && knownTitles().some(title => title.toLowerCase() === target.toLowerCase());
+    const link = parseWikilink(match[2] || "");
+    // "[[Encrypted:Bank]]" and "[[#Heading]]" are not links the engine will
+    // ever follow, so they are left as ordinary text instead of being drawn as
+    // a missing note (which would promise a note that may never exist).
+    if (!link) return;
+    const target = link.target;
+    const list = link.space === "plain" ? plainTitles() : knownTitles();
+    const known = !!target && list.some(title => String(title).toLowerCase() === target.toLowerCase());
+    const classes = ["cm-wikilink"];
+    if (!known) classes.push("is-missing");
+    if (match[1] === "!") classes.push("is-embed");
     add(
       from,
       to,
-      Decoration.mark({ class: known ? "cm-wikilink" : "cm-wikilink is-missing" })
+      Decoration.mark({
+        class: classes.join(" "),
+        title: known ? "Ctrl+click to open this note" : "Ctrl+click to create this note"
+      })
     );
   }
 });
@@ -97,6 +172,7 @@ const wikilinkPlugin = ViewPlugin.define(
 
 let editorView = null;
 let titlesCallback = () => [];
+let plainTitlesCallback = () => [];
 
 /**
  * Titles the current space can link to.  They come from the Bridge API's
@@ -105,6 +181,20 @@ let titlesCallback = () => [];
 function knownTitles() {
   try {
     const titles = titlesCallback ? titlesCallback() : [];
+    return Array.isArray(titles) ? titles : [];
+  } catch (err) {
+    return [];
+  }
+}
+
+/**
+ * Titles of the Plain space, for the one cross-space link form that is legal
+ * (`[[Plain:Title]]`, M10).  Plain is always open, so this never reveals a
+ * vault title (security rule 11).
+ */
+function plainTitles() {
+  try {
+    const titles = plainTitlesCallback ? plainTitlesCallback() : [];
     return Array.isArray(titles) ? titles : [];
   } catch (err) {
     return [];
@@ -147,8 +237,9 @@ function wikilinkCompletionSource(context) {
   };
 }
 
-export function initEditor(container, { onChange, onScroll, getTitles }) {
+export function initEditor(container, { onChange, onScroll, getTitles, getPlainTitles, onLinkClick }) {
   titlesCallback = getTitles || (() => []);
+  plainTitlesCallback = getPlainTitles || (() => []);
 
   const updateListener = EditorView.updateListener.of((update) => {
     if (update.docChanged) {
@@ -164,6 +255,20 @@ export function initEditor(container, { onChange, onScroll, getTitles }) {
   const scrollHandler = EditorView.domEventHandlers({
     scroll(event, view) {
       onScroll?.(view.scrollDOM.scrollTop);
+    },
+    // M10: Ctrl+click (Cmd+click on a Mac) on a [[link]] opens it.  The click
+    // is handled here rather than in the preview because the editor shows the
+    // link as the author wrote it, alias and all.
+    mousedown(event, view) {
+      if (!(event.ctrlKey || event.metaKey) || event.button !== 0 || !onLinkClick) return false;
+      const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+      if (pos == null) return false;
+      const line = view.state.doc.lineAt(pos);
+      const link = wikilinkAt(line.text, pos - line.from);
+      if (!link) return false;
+      event.preventDefault();
+      onLinkClick(link);
+      return true;
     }
   });
 

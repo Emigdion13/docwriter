@@ -26,6 +26,26 @@ export function createVaultSetupDialog({ onSetup, onChooseFolder }) {
       <button class="btn setup-folder" id="setup-folder" type="button">
         ${icon('folder', 15)}Choose notes folder
       </button>
+      <div class="setup-pass">
+        <label class="field">
+          <span>Passphrase for the Encrypted key (optional)</span>
+          <div class="field-row">
+            <input id="setup-pass-encrypted" type="password" autocomplete="off"
+                   placeholder="Leave empty to keep the plain key file">
+          </div>
+        </label>
+        <label class="field">
+          <span>Passphrase for the Personal key (optional)</span>
+          <div class="field-row">
+            <input id="setup-pass-personal" type="password" autocomplete="off"
+                   placeholder="Leave empty to keep the plain key file">
+          </div>
+        </label>
+        <p class="setup-pass-note">
+          A passphrase wraps the key file, so a stolen USB stick unlocks nothing
+          (section 4.5).  There is no recovery: the passphrase is not stored.
+        </p>
+      </div>
       <ol class="setup-steps">
         <li><b>Encrypted</b> and <b>Personal</b> vault folders are created.</li>
         <li>Choose a safe place for each <code>.vnkey</code> file, such as a USB drive.</li>
@@ -57,14 +77,25 @@ export function createVaultSetupDialog({ onSetup, onChooseFolder }) {
   overlay.querySelector('#setup-go').onclick = async () => {
     const button = overlay.querySelector('#setup-go');
     const status = overlay.querySelector('#vault-setup-status');
+
+    const passEncrypted = overlay.querySelector('#setup-pass-encrypted');
+    const passPersonal = overlay.querySelector('#setup-pass-personal');
+    // Both typed twice would be kinder, but the app never stores either one:
+    // a wrong phrase simply fails to unlock, and the boxes clear on close.
+    const passphrases = {};
+    if (passEncrypted.value.trim()) passphrases.encrypted = passEncrypted.value;
+    if (passPersonal.value.trim()) passphrases.personal = passPersonal.value;
+
     button.disabled = true;
     status.textContent = 'Choose a location for the Encrypted key file…';
-    const result = await onSetup?.();
+    const result = await onSetup?.(passphrases);
     if (result?.error) {
       status.textContent = result.message || 'Vault setup could not be completed.';
       button.disabled = false;
       return;
     }
+    passEncrypted.value = '';
+    passPersonal.value = '';
     close();
     button.disabled = false;
   };

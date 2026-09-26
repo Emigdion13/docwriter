@@ -14,10 +14,12 @@ What it provides
 ``rename_links(body, old_title, new_title)``
     Rewrite every form of a link when a note is renamed, keeping the display
     text and the heading.
-``render_links_for_preview(body, titles)``
+``render_links_for_preview(body, titles, *, spaces=None, embeds=False)``
     Rewrite note links into internal Markdown addresses (``#vn-open/`` for a
     note that exists, ``#vn-new/`` for one that does not) before markdown-it
-    renders the preview.
+    renders the preview.  With ``embeds`` on, ``![[Note]]`` becomes an invisible
+    marker that :mod:`vaultnotes.render` swaps for the other note's HTML, and
+    ``spaces`` resolves the M10 cross-space form ``[[Plain:Title]]``.
 ``LinkIndex``
     The in-memory link graph for **one space**: backlinks, outgoing links and
     the title list used by the ``[[`` suggestions.
@@ -33,6 +35,20 @@ Rules implemented (section 4.7 of the build plan)
 * ``[[#Heading]]`` (no note name) is a heading link inside the current note and
   is therefore not a note link.
 
+M10 additions, on top of section 4.7
+------------------------------------
+* ``![[Note]]`` is an **embed**: the target note's content is inlined in the
+  preview.  A missing embed target degrades to the ordinary missing-link chip.
+* ``[[Note#Heading]]`` keeps the heading in the address, so the preview can
+  scroll to it.
+* ``[[Plain:Title]]`` is the one link that may name another space, and only from
+  a vault note outward.  A prefix naming a vault (``[[Encrypted:…]]``,
+  ``[[Personal:…]]``) is refused outright, so a link can never reach into a
+  locked or unlocked vault.  A missing cross-space note is addressed
+  ``#vn-missing/``: the app must not offer to create the note in the wrong space.
+* A rename rewrites the author's syntax (``!``, ``#Heading``, ``|alias``) and
+  only ever touches links in the space being renamed.
+
 Security rule 11: a vault's index exists only in memory while the vault is
 unlocked.  It is never written to disk, and :meth:`LinkIndex.clear` is called
 on lock.
@@ -44,12 +60,11 @@ import re
 import urllib.parse
 from bisect import bisect_right
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
-
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    from vaultnotes.models import Note
+from typing import Any, Iterable, Mapping, Sequence
 
 __all__ = [
+    "CROSS_SPACES",
+    "EMBED_MARK",
     "Link",
     "LinkIndex",
     "parse_links",
@@ -60,8 +75,12 @@ __all__ = [
     "count_links",
     "rename_links_in_body",
     "calculate_backlinks",
+    "EMBED_BLOCK_OPEN",
+    "EMBED_CLOSE",
+    "EMBED_INLINE_OPEN",
     "OPEN_PREFIX",
     "NEW_PREFIX",
+    "MISSING_PREFIX",
 ]
 
 # Destinations starting with any of these are not note links.
@@ -90,7 +109,9 @@ _EXTERNAL_PREFIXES = (
 )
 
 # ``[[target]]``: no "]" and no newline inside, so a link never spans lines.
-_WIKILINK_RE = re.compile(r"\[\[([^\]\n]+)\]\]")
+# A leading ``!`` (``![[target]]``) is the embed form from M10 and travels with
+# the match, so the whole ``![[...]]`` is replaced rather than left as a stray.
+_WIKILINK_RE = re.compile(r"(!)?\[\[([^\]\n]+)\]\]")
 
 # ``[text](destination)``.  The destination excludes whitespace and unbalanced
 # parentheses so that two links on one line stay two separate matches; an
@@ -108,6 +129,26 @@ _BACKTICK_RUN_RE = re.compile(r"(`+)")
 #: Address prefixes the preview click handler routes on (section 4.7).
 OPEN_PREFIX = "#vn-open/"
 NEW_PREFIX = "#vn-new/"
+
+#: M10 additions.  ``#vn-missing/`` is a link to a *different* space that has
+#: no such note: the app must not offer to create it in the wrong place.  A
+#: second path segment inside ``#vn-open/`` names that other space, and a
+#: ``#`` after the title names a heading to scroll to.
+MISSING_PREFIX = "#vn-missing/"
+
+#: The only space a link may name explicitly (section 4.7's "only the same
+#: space" rule, widened in M10 for vault notes pointing at Plain notes).
+#: Nothing may ever link *into* a vault from the outside.
+CROSS_SPACE_PREFIXES = {"plain"}
+CROSS_SPACES = {"plain": "plain"}
+
+#: Invisible markers around an inlined embed, until render.py swaps in HTML.
+#: A block marker sits alone on its line (so the preview can show a card), an
+#: inline one sits inside a sentence.
+EMBED_MARK = "\u2063"
+EMBED_BLOCK_OPEN = f"{EMBED_MARK}T"
+EMBED_INLINE_OPEN = f"{EMBED_MARK}I"
+EMBED_CLOSE = EMBED_MARK
 
 
 # ----------------------------------------------------------------------
@@ -140,11 +181,31 @@ class Link:
     kind: str = "wikilink"
     """``"wikilink"`` for ``[[...]]``, ``"markdown"`` for ``[text](Name.md)``."""
 
+    embedded: bool = False
+    """``![[Note]]`` (M10): the note's content is shown inside the preview."""
+
+    space: str = ""
+    """Explicitly named space (M10: ``[[Plain:Title]]``), else same-space."""
+
+    alone_on_line: bool = False
+    """True when the link is the only content of its line (a block embed)."""
+
     escaped_pipe: bool = False
     """True when the alias separator was written ``\\|`` (inside a table)."""
 
     explicit_display: bool = False
     """True when the author wrote an alias (``[[Target|alias]]``)."""
+
+
+def _is_alone_on_line(text: str, start: int, end: int) -> bool:
+    """Whether ``text[start:end]`` is the only content on its line."""
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end == -1:
+        line_end = len(text)
+    before = text[line_start:start].strip()
+    after = text[end:line_end].strip()
+    return not before and not after
 
 
 # ----------------------------------------------------------------------
@@ -249,8 +310,14 @@ def _fold(title: str) -> str:
 # Parsing
 # ----------------------------------------------------------------------
 def _parse_wikilink(match: re.Match[str]) -> Link | None:
-    """Build a :class:`Link` from a ``[[...]]`` match, or ``None`` to skip it."""
-    inner = match.group(1)
+    """Build a :class:`Link` from a ``[[...]]`` match, or ``None`` to skip it.
+
+    ``![[...]]`` is marked ``embedded``, and a ``Plain:`` prefix is recorded in
+    ``space`` (M10).  A prefix naming a vault is refused, because links must
+    never reach into an encrypted space (security rule 11).
+    """
+    inner = match.group(2)
+    embedded = match.group(1) == "!"
     if not inner.strip():
         return None
 
@@ -273,6 +340,18 @@ def _parse_wikilink(match: re.Match[str]) -> Link | None:
         name_part, heading = target_part.split("#", 1)
         name_part, heading = name_part.strip(), heading.strip()
 
+    # M10: ``[[Plain:Title]]`` names another space explicitly.
+    space = ""
+    if ":" in name_part:
+        head, _, rest = name_part.partition(":")
+        if head.strip().lower() in CROSS_SPACE_PREFIXES and rest.strip():
+            space = CROSS_SPACES[head.strip().lower()]
+            name_part = rest.strip()
+        else:
+            # ``[[Personal:Secrets]]`` and friends must never resolve, so the
+            # whole link is dropped: it stays readable text in the note.
+            return None
+
     target = _strip_md_suffix(name_part).strip()
     if not target:
         # ``[[#Heading]]`` points inside the current note: not a note link.
@@ -289,6 +368,9 @@ def _parse_wikilink(match: re.Match[str]) -> Link | None:
         kind="wikilink",
         escaped_pipe=escaped_pipe,
         explicit_display=alias is not None,
+        embedded=embedded,
+        space=space,
+        alone_on_line=_is_alone_on_line(match.string, match.start(), match.end()),
     )
 
 
@@ -454,7 +536,35 @@ def _encode_title(title: str) -> str:
     return urllib.parse.quote(title, safe="")
 
 
-def _replacement_for_preview(link: Link, lookup: Mapping[str, tuple[str, str]]) -> str:
+def _preview_address(link: Link, entry: tuple[str, str] | None) -> str:
+    """The ``#vn-...`` address one link points at (section 4.7 + M10).
+
+    * a note that exists → ``#vn-open/<title>``, and ``#vn-open/<space>/<title>``
+      when the link named another space (``[[Plain:Title]]``)
+    * a missing note in this space → ``#vn-new/<title>`` (offer to create it)
+    * a missing note in *another* space → ``#vn-missing/<space>/<title>``, so
+      the app never offers to create the note in the wrong place
+    * a heading is kept after a ``#`` so the preview can scroll to it (M10)
+    """
+    space_part = f"{link.space}/" if link.space else ""
+    if entry is not None:
+        payload = _encode_title(entry[0])
+        prefix = OPEN_PREFIX
+    else:
+        payload = _encode_title(link.target)
+        prefix = MISSING_PREFIX if link.space else NEW_PREFIX
+    address = f"{prefix}{space_part}{payload}"
+    if link.heading:
+        address += f"#{_encode_title(link.heading)}"
+    return address
+
+
+def _replacement_for_preview(
+    link: Link,
+    lookup: Mapping[str, tuple[str, str]],
+    *,
+    embeds: bool = False,
+) -> str:
     """Markdown text that replaces one link in the preview source."""
     if link.kind == "markdown":
         # Keep the author's own link text (it may hold inline formatting);
@@ -464,17 +574,30 @@ def _replacement_for_preview(link: Link, lookup: Mapping[str, tuple[str, str]]) 
         text = _escape_link_text(link.display)
 
     entry = lookup.get(_fold(link.target))
-    if entry is not None:
-        canonical, _note_id = entry
-        return f"[{text}]({OPEN_PREFIX}{_encode_title(canonical)})"
-    return f"[{text}]({NEW_PREFIX}{_encode_title(link.target)})"
+    if link.embedded:
+        # M10: an embed of an existing note becomes an invisible marker that
+        # ``render.py`` swaps for the other note's rendered body.  An embed of
+        # a missing note degrades to the same chip a plain link would show.
+        if embeds and entry is not None and not link.space:
+            opener = EMBED_BLOCK_OPEN if link.alone_on_line else EMBED_INLINE_OPEN
+            return f"{opener}{_escape_link_text(entry[0])}{EMBED_CLOSE}"
+        return f"[{text}]({_preview_address(link, entry)})"
+    return f"[{text}]({_preview_address(link, entry)})"
 
 
-def render_links_for_preview(body: str, titles: Any) -> str:
+def render_links_for_preview(
+    body: str,
+    titles: Any,
+    *,
+    spaces: Mapping[str, Any] | None = None,
+    embeds: bool = False,
+) -> str:
     """Rewrite note links into internal addresses for the preview pane.
 
     * a note that exists becomes ``[shown text](#vn-open/<title>)``
     * a note that does not exist becomes ``[shown text](#vn-new/<title>)``
+    * ``![[Note]]`` becomes an embed marker when ``embeds`` is on (M10)
+    * ``[[Plain:Title]]`` resolves against ``spaces["plain"]`` (M10)
 
     Code blocks, inline code, images and external links are left untouched.
     """
@@ -486,11 +609,15 @@ def render_links_for_preview(body: str, titles: Any) -> str:
         return body
 
     lookup = _resolver(titles)
+    other = {str(name): _resolver(titles_list) for name, titles_list in (spaces or {}).items()}
     pieces: list[str] = []
     cursor = 0
     for link in links:
         pieces.append(body[cursor : link.start])
-        pieces.append(_replacement_for_preview(link, lookup))
+        target_lookup = other.get(link.space, lookup) if link.space else lookup
+        pieces.append(
+            _replacement_for_preview(link, target_lookup, embeds=embeds)
+        )
         cursor = link.end
     pieces.append(body[cursor:])
     return "".join(pieces)
@@ -504,16 +631,20 @@ def _replacement_for_rename(link: Link, new_title: str) -> str:
     the canonical form does not need it.
     """
     heading = f"#{link.heading}" if link.heading else ""
+    # M10: a rename must keep the syntax the author used, or the rewritten link
+    # would quietly change meaning (or stop working).
+    space_part = "Plain:" if link.space == "plain" else ""
+    embed_mark = "!" if link.embedded else ""
     if link.kind == "markdown":
         text = link.raw[1 : link.raw.index("]")] if "]" in link.raw else link.display
         destination = _encode_title(f"{new_title}.md")
         return f"[{text}]({destination}{heading})"
 
     if not link.explicit_display:
-        return f"[[{new_title}{heading}]]"
+        return f"{embed_mark}[[{space_part}{new_title}{heading}]]"
     separator = "\\|" if link.escaped_pipe else "|"
     alias = link.display.replace("|", "\\|") if link.escaped_pipe else link.display
-    return f"[[{new_title}{heading}{separator}{alias}]]"
+    return f"{embed_mark}[[{space_part}{new_title}{heading}{separator}{alias}]]"
 
 
 def rename_links(body: str, old_title: str, new_title: str) -> tuple[str, int]:

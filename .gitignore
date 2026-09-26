@@ -10,6 +10,9 @@ src/vaultnotes/web/
 # Packaging output
 build/
 dist/
+# The icon files are generated from the design logo by packaging/make_icon.py
+packaging/vaultnotes.png
+packaging/vaultnotes.ico
 
 # Key files must never be committed
 *.vnkey

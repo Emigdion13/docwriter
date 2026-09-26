@@ -8,6 +8,10 @@ import { isCalm } from './effects.js';
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+/**
+ * The unlock dialog: key file choice, the M10 passphrase box for a wrapped key
+ * file (section 4.5), and the ring animation around the real unlock call.
+ */
 export function createUnlockDialog({ onUnlockComplete, onBrowseKey }) {
   const overlay = document.createElement('div');
   overlay.className = 'overlay';
@@ -33,6 +37,13 @@ export function createUnlockDialog({ onUnlockComplete, onBrowseKey }) {
         <div class="field-row">
           <input id="unlock-key" readonly>
           <button class="btn" id="unlock-browse" type="button">Browse…</button>
+        </div>
+      </label>
+      <label class="field" id="unlock-pass-field" hidden>
+        <span>Key file passphrase</span>
+        <div class="field-row">
+          <input id="unlock-pass" type="password" autocomplete="off"
+                 placeholder="Protects the key file, never stored">
         </div>
       </label>
       <label class="check-row">
@@ -75,11 +86,23 @@ export function createUnlockDialog({ onUnlockComplete, onBrowseKey }) {
     const dialog = overlay.querySelector('#unlock-dialog');
     const statusEl = overlay.querySelector('#unlock-status');
     const goBtn = overlay.querySelector('#unlock-go');
+    const passField = overlay.querySelector('#unlock-pass-field');
+    const passInput = overlay.querySelector('#unlock-pass');
+    const passphrase = passInput.value.trim();
 
     const wait = ms => sleep(isCalm() ? 0 : ms);
 
     goBtn.disabled = true;
     dialog.classList.add('working');
+
+    // A wrapped key file needs its passphrase before anything can be checked.
+    if (!passphrase && currentSpace.key_wrapped) {
+      passField.hidden = false;
+      statusEl.textContent = 'This key file is protected. Enter its passphrase to unlock.';
+      goBtn.disabled = false;
+      passInput.focus();
+      return;
+    }
 
     statusEl.textContent = 'Checking the key matches this vault…';
     await wait(450);
@@ -90,11 +113,19 @@ export function createUnlockDialog({ onUnlockComplete, onBrowseKey }) {
 
     // Python performs the actual file read, vault-id check, verifier check and
     // decryption.  The UI never receives a key path from the browser.
-    const result = await onUnlockComplete?.(currentSpace.id);
+    const result = await onUnlockComplete?.(currentSpace.id, passphrase);
     if (result?.error || result?.ok === false) {
       dialog.classList.remove('working', 'done');
       statusEl.textContent = result.message || 'Unable to unlock this vault.';
       goBtn.disabled = false;
+      if (result.error === 'passphrase_required' || result.error === 'wrong_passphrase') {
+        // The key file turned out to be protected (or the phrase was wrong):
+        // ask in the dialog, which is the only place a passphrase may be typed.
+        passField.hidden = false;
+        currentSpace.key_wrapped = true;
+        passInput.focus();
+        if (result.error === 'wrong_passphrase') passInput.select();
+      }
       return;
     }
 
@@ -118,11 +149,20 @@ export function createUnlockDialog({ onUnlockComplete, onBrowseKey }) {
       dialog.classList.remove('working', 'done');
       dialog.style.setProperty('--c', `var(${space.colorVar || '--accent'})`);
 
+      const passField = overlay.querySelector('#unlock-pass-field');
+      const passInput = overlay.querySelector('#unlock-pass');
+      // The passphrase box appears only for a wrapped key file; the typed
+      // passphrase never outlives this dialog.
+      passField.hidden = !space.key_wrapped;
+      passInput.value = '';
+
       titleEl.textContent = `Unlock ${space.name}`;
       keyInput.value = space.key_path
         ? space.key_path.split(/[\\/]/).pop()
         : `Choose ${space.name.toLowerCase()}.vnkey…`;
-      statusEl.textContent = 'Your key file stays on this computer. It is never uploaded.';
+      statusEl.textContent = space.key_wrapped
+        ? 'This key file is protected by a passphrase. Neither is ever uploaded.'
+        : 'Your key file stays on this computer. It is never uploaded.';
       goBtn.disabled = false;
 
       overlay.classList.add('open');
