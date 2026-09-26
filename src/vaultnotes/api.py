@@ -14,9 +14,15 @@ from vaultnotes.autolock import AutoLock
 from vaultnotes.config import Config, get_config
 from vaultnotes.crypto.keyfile import KeyFileError, VaultKey, generate_key_file, load_key_file
 from vaultnotes.events import emit_event
-from vaultnotes.links import calculate_backlinks, count_links, rename_links_in_body
+from vaultnotes.links import (
+    calculate_backlinks,
+    count_links,
+    find_links_in_body,
+    rename_links_in_body,
+)
 from vaultnotes.render import render_preview
-from vaultnotes.storage.plain_store import PlainStore, make_snippet
+from vaultnotes.storage.atomic import atomic_write
+from vaultnotes.storage.plain_store import PlainStore, make_snippet, sanitize_title
 from vaultnotes.storage.vault_store import (
     DamagedVaultError,
     VaultLockedError,
@@ -148,6 +154,7 @@ class Api:
             "last_backup": self.config.get("backup", {}).get("last_backup"),
             "needs_setup": needs_setup,
             "locks_at": self.autolock.locks_at,
+            "notes_root": str(self.config.notes_root),
         }
 
     @staticmethod
@@ -384,13 +391,269 @@ class Api:
         except VaultStoreError as exc:
             return {"error": "locked", "message": str(exc)}
 
+    def _is_known_space(self, space_id: str) -> bool:
+        """Whether a space id exists (Plain or a configured vault)."""
+        return space_id == "plain" or space_id in self.vault_stores
+
+    def _read_any_note(self, space_id: str, note_id: str) -> Any:
+        """Read a note from Plain or an unlocked vault.
+
+        Raises VaultLockedError, FileNotFoundError, or ValueError for a bad
+        vault note id.
+        """
+        if space_id == "plain":
+            return self.plain_store.read_note(note_id)
+        store = self._vault(space_id)
+        if store is None:  # pragma: no cover - callers validate the space first
+            raise FileNotFoundError(f"Space not found: {space_id}")
+        return store.read_note(note_id)
+
+    def _count_broken_links_on_move(self, space_id: str, note: Any) -> int:
+        """Count same-space links that break when a note leaves its space.
+
+        Links never cross spaces, so moving a note breaks both the notes
+        that link to it and the note's own links to its old neighbours. A
+        note linking to itself keeps working after the move and is excluded.
+        """
+        if space_id == "plain":
+            notes = self.plain_store.list_notes()
+        else:
+            store = self._vault(space_id)
+            if store is None or store.locked:
+                return 0
+            notes = store.list_notes()
+        backlinks = calculate_backlinks(notes, note.title)
+        titles = {item.title.strip().casefold() for item in notes}
+        own_title = note.title.strip().casefold()
+        outgoing = sum(
+            1
+            for target in find_links_in_body(note.body)
+            if target.strip().casefold() in titles and target.strip().casefold() != own_title
+        )
+        return len(backlinks) + outgoing
+
     def move_note(self, space_id: str, note_id: str, target_space_id: str) -> dict[str, Any]:
-        """Moving notes is intentionally deferred to M5."""
-        if target_space_id in SPACE_DEFINITIONS:
-            target = self._vault(target_space_id)
-            if target is None or target.locked:
-                return {"error": "locked", "message": f"Target vault {target_space_id} is locked"}
-        return {"error": "not_implemented", "message": "Moving notes between spaces is available in M5"}
+        """Move a note between spaces, encrypting or decrypting as needed.
+
+        The note is created in the target space first; the source copy is
+        only removed afterwards, so a failure never loses the note. Returns
+        ``{new_id, title, broken_links}`` where ``broken_links`` counts the
+        same-space links that stop working because of the move.
+        """
+        if not self._is_known_space(space_id):
+            return self._invalid_space(space_id)
+        if not self._is_known_space(target_space_id):
+            return self._invalid_space(target_space_id)
+        if space_id == target_space_id:
+            return {"error": "same_space", "message": "The note is already in that space"}
+        source_store = self._vault(space_id)
+        if source_store is not None and source_store.locked:
+            return {"error": "locked", "message": "Unlock the source vault first"}
+        target_store = self._vault(target_space_id)
+        if target_store is not None and target_store.locked:
+            return {
+                "error": "locked",
+                "message": f"Unlock {SPACE_DEFINITIONS[target_space_id]['name']} first",
+            }
+
+        try:
+            source = self._read_any_note(space_id, note_id)
+        except FileNotFoundError:
+            return {"error": "not_found", "message": f"Note not found: {note_id}"}
+        except ValueError as exc:
+            return {"error": "invalid_note", "message": str(exc)}
+        except VaultLockedError:
+            return {"error": "locked", "message": "Vault is locked"}
+
+        broken_links = self._count_broken_links_on_move(space_id, source)
+
+        # Create the target copy first. A second save preserves the exact
+        # body even when the source body is empty (creation would otherwise
+        # insert a default "# Title" heading).
+        try:
+            if target_space_id == "plain":
+                created = self.plain_store.create_note(title=source.title, body=source.body)
+                if created.body != source.body:
+                    created = self.plain_store.save_note(created.id, source.body)
+            else:
+                assert target_store is not None  # narrowed by the checks above
+                created = target_store.create_note(title=source.title, body=source.body)
+                if created.body != source.body:
+                    created = target_store.save_note(created.id, source.body)
+        except (ValueError, OSError, VaultStoreError) as exc:
+            return {"error": "move_failed", "message": f"Could not move the note: {exc}"}
+
+        # The target copy exists; now remove the source without using trash,
+        # because a move is not a delete.
+        try:
+            if space_id == "plain":
+                source_path = self.plain_store._resolve_note_path(note_id)  # noqa: SLF001 - same package
+                if not source_path.is_file():
+                    raise FileNotFoundError(f"Note not found: {note_id}")
+                source_path.unlink()
+            else:
+                assert source_store is not None  # narrowed by the checks above
+                source_store._require_unlocked()  # noqa: SLF001 - same package
+                source_store._notes.pop(source.id, None)  # noqa: SLF001 - same package
+                source_file = source_store._note_path(source.id)  # noqa: SLF001 - same package
+                if source_file.is_file():
+                    source_file.unlink()
+        except (FileNotFoundError, ValueError, OSError, VaultStoreError) as exc:
+            # The note now lives in the target space; report the leftover
+            # source copy instead of pretending the move was clean.
+            return {
+                "error": "move_partial",
+                "message": f"Note copied to the new space, but the original could not be removed: {exc}",
+                "new_id": created.id,
+                "title": created.title,
+                "broken_links": broken_links,
+            }
+
+        self.autolock.touch() if self._any_vault_unlocked() else None
+        return {"new_id": created.id, "title": created.title, "broken_links": broken_links}
+
+    def purge_note(self, space_id: str, note_id: str) -> dict[str, Any]:
+        """Permanently delete a trashed note (cannot be undone)."""
+        try:
+            if space_id == "plain":
+                title = self.plain_store.purge_note(note_id)
+            else:
+                store = self._vault(space_id)
+                if store is None:
+                    return self._invalid_space(space_id)
+                if store.locked:
+                    return {"error": "locked", "message": "Vault is locked"}
+                title = store.purge_note(note_id)
+            return {"ok": True, "title": title}
+        except FileNotFoundError:
+            return {"error": "not_found", "message": f"Note not found in trash: {note_id}"}
+        except (ValueError, VaultStoreError) as exc:
+            return {"error": "invalid_note", "message": str(exc)}
+
+    def empty_trash(self, space_id: str) -> dict[str, Any]:
+        """Permanently delete every trashed note in one space."""
+        if space_id == "plain":
+            return {"ok": True, "purged": self.plain_store.empty_trash()}
+        store = self._vault(space_id)
+        if store is None:
+            return self._invalid_space(space_id)
+        if store.locked:
+            return {"error": "locked", "message": "Vault is locked"}
+        try:
+            return {"ok": True, "purged": store.empty_trash()}
+        except VaultStoreError as exc:
+            return {"error": "locked", "message": str(exc)}
+
+    # ------------------------------------------------------------------
+    # Markdown import and export (.md files)
+    # ------------------------------------------------------------------
+    def import_notes(
+        self,
+        space_id: str,
+        file_paths: list[Path | str] | None = None,
+    ) -> dict[str, Any]:
+        """Import ``.md`` files into Plain or an unlocked vault.
+
+        The frontend calls this without paths, causing Python to open the
+        native file picker itself (the frontend never sends file paths).
+        ``file_paths`` exists only for headless callers and tests.
+        """
+        if not self._is_known_space(space_id):
+            return self._invalid_space(space_id)
+        store = self._vault(space_id)
+        if store is not None and store.locked:
+            return {"error": "locked", "message": "Unlock the vault first"}
+
+        if file_paths is None:
+            selected = self._choose_import_files()
+            if not selected:
+                return {"error": "cancelled", "message": "No files were selected."}
+            candidates = selected
+        else:
+            candidates = [Path(each).expanduser() for each in file_paths]
+        if not candidates:
+            return {"error": "cancelled", "message": "No files were selected."}
+
+        imported: list[dict[str, str]] = []
+        skipped: list[dict[str, str]] = []
+        for candidate in candidates:
+            path = Path(candidate).expanduser()
+            if path.suffix.lower() != ".md":
+                skipped.append({"name": path.name, "reason": "not a .md file"})
+                continue
+            if not path.is_file():
+                skipped.append({"name": path.name, "reason": "file not found"})
+                continue
+            try:
+                if path.stat().st_size > 5 * 1024 * 1024:
+                    skipped.append({"name": path.name, "reason": "larger than 5 MB"})
+                    continue
+                body = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                skipped.append({"name": path.name, "reason": str(exc)})
+                continue
+            title = sanitize_title(path.stem) or path.stem
+            try:
+                if space_id == "plain":
+                    note = self.plain_store.create_note(title=title, body=body)
+                    if note.body != body:
+                        note = self.plain_store.save_note(note.id, body)
+                else:
+                    assert store is not None  # narrowed by the checks above
+                    note = store.create_note(title=title, body=body)
+                    if note.body != body:
+                        note = store.save_note(note.id, body)
+            except (ValueError, OSError, VaultStoreError) as exc:
+                skipped.append({"name": path.name, "reason": str(exc)})
+                continue
+            imported.append({"id": note.id, "title": note.title})
+
+        self.autolock.touch() if self._any_vault_unlocked() else None
+        return {"ok": True, "imported": imported, "skipped": skipped}
+
+    def export_note(
+        self,
+        space_id: str,
+        note_id: str,
+        dest_path: Path | str | None = None,
+    ) -> dict[str, Any]:
+        """Export one note to a ``.md`` file chosen by a native Save dialog.
+
+        The frontend warns before calling this for vault notes ("This saves
+        an unencrypted copy."). ``dest_path`` exists only for headless
+        callers and tests.
+        """
+        if not self._is_known_space(space_id):
+            return self._invalid_space(space_id)
+        store = self._vault(space_id)
+        if store is not None and store.locked:
+            return {"error": "locked", "message": "Vault is locked"}
+        try:
+            note = self._read_any_note(space_id, note_id)
+        except FileNotFoundError:
+            return {"error": "not_found", "message": f"Note not found: {note_id}"}
+        except ValueError as exc:
+            return {"error": "invalid_note", "message": str(exc)}
+        except VaultLockedError:
+            return {"error": "locked", "message": "Vault is locked"}
+
+        suggested = f"{sanitize_title(note.title)}.md"
+        if dest_path is None:
+            selected = self._choose_export_file(suggested)
+            if selected is None:
+                return {"error": "cancelled", "message": "Export was cancelled."}
+            destination = selected
+        else:
+            destination = Path(dest_path).expanduser()
+            if destination.is_dir():
+                destination = destination / suggested
+        if destination.suffix.lower() != ".md":
+            destination = destination.with_name(destination.name + ".md")
+        try:
+            atomic_write(destination, note.body.encode("utf-8"))
+        except OSError as exc:
+            return {"error": "export_failed", "message": f"Could not write the file: {exc}"}
+        return {"ok": True, "name": destination.name}
 
     # ------------------------------------------------------------------
     # Markdown links and preview
@@ -439,6 +702,47 @@ class Api:
         except Exception:
             # Native dialog failures are presented as a normal user-facing
             # error by the caller rather than crashing the bridge.
+            return None
+
+    def _choose_import_files(self) -> list[Path]:
+        """Open a native multi-select picker for ``.md`` files to import."""
+        if self.window is None:
+            return []
+        try:
+            import webview  # type: ignore
+
+            selected = self.window.create_file_dialog(
+                webview.OPEN_DIALOG,
+                allow_multiple=True,
+                file_types=("Markdown (*.md)", "*.md"),
+            )
+            if not selected:
+                return []
+            if isinstance(selected, (str, Path)):
+                selected = [selected]
+            return [Path(str(each)).expanduser() for each in selected]
+        except Exception:
+            return []
+
+    def _choose_export_file(self, suggested_name: str) -> Path | None:
+        """Open a native Save dialog for exporting one ``.md`` file."""
+        if self.window is None:
+            return None
+        try:
+            import webview  # type: ignore
+
+            selected = self.window.create_file_dialog(
+                webview.SAVE_DIALOG,
+                allow_multiple=False,
+                file_types=("Markdown (*.md)", "*.md"),
+                save_filename=suggested_name,
+            )
+            if isinstance(selected, (list, tuple)):
+                selected = selected[0] if selected else None
+            if not selected:
+                return None
+            return Path(str(selected)).expanduser()
+        except Exception:
             return None
 
     def _choose_folder(self) -> Path | None:
@@ -701,6 +1005,39 @@ class Api:
         if not isinstance(changes, dict):
             return {"error": "invalid_settings", "message": "Settings changes must be an object"}
 
+        # Validate look and auto-lock values before persisting anything, so
+        # a crafted bridge call cannot corrupt the settings file.
+        look = changes.get("look")
+        if look is not None:
+            if not isinstance(look, dict):
+                return {"error": "invalid_settings", "message": "Look settings must be an object"}
+            if "theme" in look and look["theme"] not in ("nebula", "synthwave", "arctic"):
+                return {"error": "invalid_settings", "message": "Unknown theme"}
+            if "effects" in look and look["effects"] not in ("full", "lite", "off"):
+                return {"error": "invalid_settings", "message": "Unknown effects level"}
+            if "view_mode" in look and look["view_mode"] not in ("edit", "split", "preview"):
+                return {"error": "invalid_settings", "message": "Unknown view mode"}
+            if "editor_font_size" in look:
+                try:
+                    font_size = float(look["editor_font_size"])
+                except (TypeError, ValueError):
+                    return {"error": "invalid_settings", "message": "Editor font size must be a number"}
+                if not 10.0 <= font_size <= 20.0:
+                    return {"error": "invalid_settings", "message": "Editor font size must be between 10 and 20"}
+        if "autolock_minutes" in changes:
+            try:
+                minutes = float(changes["autolock_minutes"])
+            except (TypeError, ValueError):
+                return {"error": "invalid_settings", "message": "Auto-lock minutes must be a number"}
+            if not 1.0 <= minutes <= 120.0:
+                return {"error": "invalid_settings", "message": "Auto-lock must be between 1 and 120 minutes"}
+        if "notes_root" in changes:
+            candidate = Path(str(changes["notes_root"])).expanduser()
+            if not str(changes["notes_root"]).strip():
+                return {"error": "invalid_settings", "message": "Notes folder cannot be empty"}
+            if candidate.is_file():
+                return {"error": "invalid_settings", "message": "Notes folder cannot be a file"}
+
         candidate_root = Path(str(changes.get("notes_root", self.config.notes_root))).expanduser().resolve()
         entries = changes.get("vaults", self.config.get("vaults", []))
         if isinstance(entries, list):
@@ -728,6 +1065,7 @@ class Api:
         if notes_root_changed:
             for store in self.vault_stores.values():
                 store.lock()
+            self.autolock.clear()
             self.plain_store = PlainStore(self.config.plain_dir)
             self._pending_key_paths.clear()
             self._build_vault_stores()

@@ -1,6 +1,7 @@
 /* =================================================================
    NOTE LIST  (frontend/src/ui/noteList.js)
-   Middle panel: Search bar, note cards list, encrypted noise mode
+   Middle panel: Search bar, sort/import/trash actions, note cards list,
+   trash view with restore, encrypted noise mode.
    ================================================================= */
 
 import { icon } from '../icons.js';
@@ -16,7 +17,17 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
-export function createNoteList({ onSelectNote, onNewNote, onSearchInput }) {
+export function createNoteList({
+  onSelectNote,
+  onNewNote,
+  onSearchInput,
+  onSortToggle,
+  onImport,
+  onTrashToggle,
+  onRestoreNote,
+  onPurgeNote,
+  onEmptyTrash
+}) {
   const section = document.createElement('section');
   section.className = 'notelist glass';
   section.setAttribute('aria-label', 'Notes');
@@ -27,9 +38,20 @@ export function createNoteList({ onSelectNote, onNewNote, onSearchInput }) {
         <div class="nl-title" id="list-title">Notes</div>
         <div class="nl-count" id="list-count">0 notes</div>
       </div>
-      <button class="btn icon primary" id="new-note" aria-label="New note" title="New note (Ctrl N)">
-        ${icon('plus', 17)}
-      </button>
+      <div class="nl-actions">
+        <button class="btn icon small" id="sort-toggle" aria-label="Toggle sort order" title="Sort: Modified">
+          ${icon('sort', 15)}
+        </button>
+        <button class="btn icon small" id="import-btn" aria-label="Import .md files" title="Import .md files">
+          ${icon('upload', 15)}
+        </button>
+        <button class="btn icon small" id="trash-toggle" aria-label="Show trash" title="Show trash">
+          ${icon('trash', 15)}
+        </button>
+        <button class="btn icon primary" id="new-note" aria-label="New note" title="New note (Ctrl N)">
+          ${icon('plus', 17)}
+        </button>
+      </div>
     </div>
     <label class="search">
       ${icon('search', 15)}
@@ -39,6 +61,9 @@ export function createNoteList({ onSelectNote, onNewNote, onSearchInput }) {
   `;
 
   section.querySelector('#new-note').onclick = () => onNewNote?.();
+  section.querySelector('#sort-toggle').onclick = () => onSortToggle?.();
+  section.querySelector('#import-btn').onclick = () => onImport?.();
+  section.querySelector('#trash-toggle').onclick = () => onTrashToggle?.();
 
   const searchInput = section.querySelector('#search');
   searchInput.addEventListener('input', () => {
@@ -46,6 +71,19 @@ export function createNoteList({ onSelectNote, onNewNote, onSearchInput }) {
   });
 
   section.querySelector('#notes').addEventListener('click', (e) => {
+    const actionBtn = e.target.closest('[data-trash-action]');
+    if (actionBtn) {
+      e.stopPropagation();
+      const noteId = actionBtn.closest('[data-note]')?.dataset.note;
+      if (!noteId) return;
+      if (actionBtn.dataset.trashAction === 'restore') onRestoreNote?.(noteId);
+      else if (actionBtn.dataset.trashAction === 'purge') onPurgeNote?.(noteId);
+      return;
+    }
+    if (e.target.closest('#empty-trash-btn')) {
+      onEmptyTrash?.();
+      return;
+    }
     const noteEl = e.target.closest('.note');
     if (noteEl) {
       const noteId = noteEl.dataset.note;
@@ -56,10 +94,31 @@ export function createNoteList({ onSelectNote, onNewNote, onSearchInput }) {
   return section;
 }
 
+function setHeaderButtons({ sort = 'modified', trashMode = false, locked = false }) {
+  const sortBtn = document.getElementById('sort-toggle');
+  const importBtn = document.getElementById('import-btn');
+  const trashBtn = document.getElementById('trash-toggle');
+  const newBtn = document.getElementById('new-note');
+  if (sortBtn) {
+    sortBtn.classList.toggle('on', sort === 'title');
+    sortBtn.title = sort === 'title' ? 'Sort: Title (A–Z)' : 'Sort: Modified (newest first)';
+    sortBtn.setAttribute('aria-label', sortBtn.title);
+    sortBtn.disabled = locked || trashMode;
+  }
+  if (importBtn) importBtn.disabled = locked;
+  if (trashBtn) {
+    trashBtn.classList.toggle('on', trashMode);
+    trashBtn.title = trashMode ? 'Back to notes' : 'Show trash';
+    trashBtn.setAttribute('aria-label', trashBtn.title);
+    trashBtn.disabled = locked;
+  }
+  if (newBtn) newBtn.disabled = locked || trashMode;
+}
+
 /**
  * Renders notes or encrypted noise into the list panel.
  */
-export function renderNotes(space, notes, activeNoteId, animate = true) {
+export function renderNotes(space, notes, activeNoteId, animate = true, opts = {}) {
   clearInterval(noiseInterval);
   const titleEl = document.getElementById('list-title');
   const countEl = document.getElementById('list-count');
@@ -69,6 +128,7 @@ export function renderNotes(space, notes, activeNoteId, animate = true) {
   if (!notesContainer) return;
 
   if (titleEl) titleEl.textContent = space.name;
+  setHeaderButtons({ sort: opts.sort || 'modified', trashMode: false, locked: space.locked });
 
   if (space.locked) {
     if (searchInput) {
@@ -122,7 +182,7 @@ export function renderNotes(space, notes, activeNoteId, animate = true) {
 
     return `
       <button class="note ${isActive ? 'active' : ''} ${animate ? '' : 'still'}"
-              data-note="${n.id}"
+              data-note="${escapeHtml(n.id)}"
               style="animation-delay:${delay}ms">
         <span class="t">${escapeHtml(n.title)}</span>
         <span class="s">${escapeHtml(n.snippet || '')}</span>
@@ -133,4 +193,56 @@ export function renderNotes(space, notes, activeNoteId, animate = true) {
       </button>
     `;
   }).join('');
+}
+
+/**
+ * Renders the trash view: trashed notes with Restore / Delete forever.
+ */
+export function renderTrash(space, trashEntries) {
+  clearInterval(noiseInterval);
+  const titleEl = document.getElementById('list-title');
+  const countEl = document.getElementById('list-count');
+  const searchInput = document.getElementById('search');
+  const notesContainer = document.getElementById('notes');
+
+  if (!notesContainer) return;
+
+  if (titleEl) titleEl.textContent = `${space.name} · Trash`;
+  if (searchInput) searchInput.disabled = true;
+  setHeaderButtons({ trashMode: true, locked: false });
+
+  const count = trashEntries.length;
+  if (countEl) {
+    countEl.textContent = count
+      ? `${count} note${count === 1 ? '' : 's'} in trash`
+      : 'Trash is empty';
+  }
+
+  if (!count) {
+    notesContainer.innerHTML = `
+      <div class="empty-list">
+        <div class="trash-empty-ic">${icon('trash', 26)}</div>
+        <p>Nothing in trash.<br>Deleted notes can be restored here.</p>
+      </div>`;
+    return;
+  }
+
+  notesContainer.innerHTML = trashEntries.map((n) => `
+    <div class="note trash-note" data-note="${escapeHtml(n.id)}">
+      <span class="t">${escapeHtml(n.title)}</span>
+      <span class="m"><span>${escapeHtml(n.modified || '')}</span></span>
+      <span class="trash-row-actions">
+        <button class="btn small" data-trash-action="restore" title="Restore “${escapeHtml(n.title)}”">
+          ${icon('undo', 13)}<span>Restore</span>
+        </button>
+        <button class="btn icon small danger-ghost" data-trash-action="purge" title="Delete “${escapeHtml(n.title)}” forever">
+          ${icon('x', 13)}
+        </button>
+      </span>
+    </div>
+  `).join('') + `
+    <button class="ghost-btn trash-empty-all" id="empty-trash-btn">
+      ${icon('trash', 14)}<span>Empty trash</span>
+    </button>
+  `;
 }

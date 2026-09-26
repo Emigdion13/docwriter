@@ -1,0 +1,195 @@
+/* =================================================================
+   DIALOGS  (frontend/src/ui/dialogs.js)
+   Reusable confirm dialog and the Move-note dialog (M5).
+   ================================================================= */
+
+import { icon } from '../icons.js';
+
+/**
+ * Shows a confirm dialog and resolves true when the user confirms.
+ * @param {object} opts - { title, message, confirmLabel, danger, iconName }
+ * @returns {Promise<boolean>}
+ */
+export function confirmAction({ title, message, confirmLabel = 'Confirm', danger = false, iconName = 'alert' }) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+
+    overlay.innerHTML = `
+      <div class="dialog confirm-dialog ${danger ? 'is-danger' : ''}">
+        <div class="confirm-mark">${icon(iconName, 26)}</div>
+        <h3></h3>
+        <p class="dlg-sub"></p>
+        <div class="dlg-actions">
+          <button class="btn" type="button" data-x="cancel">Cancel</button>
+          <button class="btn ${danger ? 'danger' : 'primary'}" type="button" data-x="ok"></button>
+        </div>
+      </div>
+    `;
+    overlay.querySelector('h3').textContent = title;
+    overlay.querySelector('.dlg-sub').textContent = message;
+    const okBtn = overlay.querySelector('[data-x="ok"]');
+    okBtn.textContent = confirmLabel;
+
+    const done = (value) => {
+      overlay.classList.remove('open');
+      setTimeout(() => overlay.remove(), 260);
+      resolve(value);
+    };
+
+    overlay.querySelector('[data-x="cancel"]').onclick = () => done(false);
+    okBtn.onclick = () => done(true);
+    overlay.addEventListener('mousedown', (e) => {
+      if (e.target === overlay) done(false);
+    });
+    overlay.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') done(false);
+      if (e.key === 'Enter') done(true);
+    });
+
+    document.getElementById('overlays-root')?.appendChild(overlay);
+    requestAnimationFrame(() => overlay.classList.add('open'));
+    setTimeout(() => overlay.querySelector('[data-x="cancel"]')?.focus(), 60);
+  });
+}
+
+/**
+ * Creates the Move-note dialog. open() resolves the chosen target space id
+ * (or null when cancelled).
+ */
+export function createMoveDialog() {
+  const overlay = document.createElement('div');
+  overlay.className = 'overlay';
+  overlay.id = 'ov-move';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.setAttribute('aria-labelledby', 'move-title');
+
+  overlay.innerHTML = `
+    <div class="dialog move-dialog">
+      <h3 id="move-title">Move note</h3>
+      <p class="dlg-sub" id="move-sub"></p>
+      <div class="move-targets" id="move-targets" role="radiogroup" aria-label="Target space"></div>
+      <div class="move-warnings" id="move-warnings"></div>
+      <div class="dlg-actions">
+        <button class="btn" id="move-cancel" type="button">Cancel</button>
+        <button class="btn primary" id="move-go" type="button">
+          ${icon('move', 15)}Move note
+        </button>
+      </div>
+    </div>
+  `;
+
+  let resolver = null;
+  let selectedTarget = null;
+
+  const close = (value) => {
+    overlay.classList.remove('open');
+    if (resolver) {
+      resolver(value);
+      resolver = null;
+    }
+  };
+
+  overlay.querySelector('#move-cancel').onclick = () => close(null);
+  overlay.querySelector('#move-go').onclick = () => close(selectedTarget);
+  overlay.addEventListener('mousedown', (e) => {
+    if (e.target === overlay) close(null);
+  });
+  overlay.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') close(null);
+    if (e.key === 'Enter' && selectedTarget) close(selectedTarget);
+  });
+
+  function renderWarnings(sourceSpace, targetSpace, incomingLinks, outgoingLinks) {
+    const box = overlay.querySelector('#move-warnings');
+    const parts = [];
+    if (incomingLinks > 0 || outgoingLinks > 0) {
+      const bits = [];
+      if (incomingLinks > 0) bits.push(`${incomingLinks} incoming link${incomingLinks === 1 ? '' : 's'}`);
+      if (outgoingLinks > 0) bits.push(`${outgoingLinks} outgoing link${outgoingLinks === 1 ? '' : 's'}`);
+      parts.push(`
+        <div class="setup-warning">
+          ${icon('alert', 15)}
+          <span><b>${bits.join(' and ')}</b> will break. Links only work within the same space.</span>
+        </div>`);
+    }
+    if (sourceSpace.kind === 'vault' && targetSpace.id === 'plain') {
+      parts.push(`
+        <div class="setup-warning">
+          ${icon('unlock', 15)}
+          <span>The note will be stored <b>unencrypted</b> in Plain.</span>
+        </div>`);
+    } else if (sourceSpace.id === 'plain' && targetSpace.kind === 'vault') {
+      parts.push(`
+        <div class="move-info">
+          ${icon('lock', 15)}
+          <span>The note will be <b>encrypted</b> in ${targetSpace.name}.</span>
+        </div>`);
+    }
+    box.innerHTML = parts.join('');
+  }
+
+  return {
+    element: overlay,
+    open({ spaces, currentSpaceId, noteTitle, incomingLinks = 0, outgoingLinks = 0 }) {
+      const source = spaces.find(s => s.id === currentSpaceId);
+      const targets = spaces.filter(s => s.id !== currentSpaceId);
+      const firstOpen = targets.find(t => !t.locked) || null;
+      selectedTarget = firstOpen?.id || null;
+
+      overlay.querySelector('#move-sub').textContent =
+        `Move “${noteTitle}” from ${source?.name || 'this space'} to:`;
+
+      const list = overlay.querySelector('#move-targets');
+      list.innerHTML = '';
+      targets.forEach((t) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'move-target' + (t.id === selectedTarget ? ' sel' : '');
+        btn.disabled = t.locked;
+        btn.setAttribute('role', 'radio');
+        btn.setAttribute('aria-checked', String(t.id === selectedTarget));
+        btn.style.setProperty('--c', `var(${t.colorVar || '--accent'})`);
+        btn.innerHTML = `
+          <span class="ic">${icon(t.kind === 'plain' ? 'file' : t.locked ? 'lock' : 'unlock', 16)}</span>
+          <span class="txt"><span class="nm"></span><span class="sub"></span></span>
+        `;
+        btn.querySelector('.nm').textContent = t.name;
+        btn.querySelector('.sub').textContent = t.locked
+          ? 'Locked — unlock it first'
+          : t.kind === 'plain' ? 'Unencrypted' : 'Encrypted';
+        btn.onclick = () => {
+          if (t.locked) return;
+          selectedTarget = t.id;
+          list.querySelectorAll('.move-target').forEach(el => {
+            const on = el === btn;
+            el.classList.toggle('sel', on);
+            el.setAttribute('aria-checked', String(on));
+          });
+          renderWarnings(source, t, incomingLinks, outgoingLinks);
+        };
+        list.appendChild(btn);
+      });
+
+      const goBtn = overlay.querySelector('#move-go');
+      goBtn.disabled = !selectedTarget;
+      if (!targets.some(t => !t.locked)) {
+        overlay.querySelector('#move-warnings').innerHTML = `
+          <div class="setup-warning">
+            ${icon('lock', 15)}
+            <span>Every other space is locked. Unlock a vault to move this note.</span>
+          </div>`;
+      } else {
+        renderWarnings(source, targets.find(t => t.id === selectedTarget), incomingLinks, outgoingLinks);
+      }
+
+      overlay.classList.add('open');
+      setTimeout(() => (selectedTarget ? goBtn : overlay.querySelector('#move-cancel'))?.focus(), 60);
+      return new Promise((resolve) => { resolver = resolve; });
+    },
+    close: () => close(null)
+  };
+}

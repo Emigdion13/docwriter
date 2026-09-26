@@ -22,6 +22,7 @@
   --font-display: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
   --font-ui: "Inter", "Segoe UI", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  --editor-font-size: 13.5px;
   --ease: cubic-bezier(.2, .8, .2, 1);
   --r-panel: 18px;
   --r-card: 13px;
