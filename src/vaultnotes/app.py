@@ -1,7 +1,6 @@
 """VaultNotes app shell.
 
-Creates the single pywebview window. In M1 there is no Python Bridge API
-yet (the frontend fakes it in bridge.js); milestone M2 wires api.Api() in.
+Creates the single pywebview window and wires the Python Bridge API.
 """
 
 from __future__ import annotations
@@ -10,6 +9,10 @@ import sys
 from pathlib import Path
 
 import webview
+from filelock import FileLock, Timeout
+
+from vaultnotes.api import Api
+from vaultnotes.config import get_app_dir, get_config
 
 # Directory that "npm run build" fills (frontend/vite.config.js -> build.outDir).
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -22,8 +25,7 @@ def _frontend_target(dev: bool) -> str:
     """Return what the window should load.
 
     With --dev: the Vite dev server URL (hot reload for CSS/JS).
-    Otherwise: the built index.html, served by pywebview's own local
-    server, which only serves the static files in web/.
+    Otherwise: the built index.html, served by pywebview's local server.
     """
     if dev:
         return DEV_URL
@@ -45,19 +47,40 @@ def _frontend_target(dev: bool) -> str:
 
 def main(dev: bool = False) -> None:
     """Open the VaultNotes window and block until it is closed."""
-    webview.create_window(
-        "VaultNotes",
-        url=_frontend_target(dev),
-        width=1280,
-        height=800,
-        min_size=(1000, 640),
-        # Match --bg of the Nebula theme so the window never flashes white
-        # while the page loads.
-        background_color="#06070d",
-        # Security rule 12d: no persistent storage in the webview.
-        private_mode=True,
-        # Developer tools only in --dev mode (security rule 12g).
-        debug=dev,
-        # M2 will pass js_api=api.Api() here; M1's UI talks to a fake bridge.
-    )
-    webview.start()
+    app_dir = get_app_dir()
+    lock_file = app_dir / "app.lock"
+    lock = FileLock(lock_file, timeout=0.1)
+
+    try:
+        lock.acquire()
+    except Timeout:
+        sys.stderr.write("VaultNotes: another copy of the app is already running.\n")
+        raise SystemExit(0)
+
+    try:
+        config = get_config()
+        api = Api(config=config)
+
+        window = webview.create_window(
+            "VaultNotes",
+            url=_frontend_target(dev),
+            width=1280,
+            height=800,
+            min_size=(1000, 640),
+            background_color="#06070d",
+            js_api=api,
+        )
+        api.set_window(window)
+        try:
+            webview.start(debug=dev, private_mode=True)
+        except Exception as e:
+            sys.stderr.write(
+                f"VaultNotes: could not start GUI window: {e}\n"
+                "On Windows, Microsoft Edge WebView2 is used automatically.\n"
+                "On Linux, install python3-gi / GTK or PyQt.\n"
+            )
+    finally:
+        try:
+            lock.release()
+        except Exception:
+            pass

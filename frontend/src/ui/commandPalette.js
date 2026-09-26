@@ -47,9 +47,9 @@ export function createCommandPalette({ getCommands, onExecuteCommand }) {
     overlay.classList.remove('open');
   };
 
-  const renderList = () => {
+  const renderList = async () => {
     const query = input.value.trim().toLowerCase();
-    const allCommands = getCommands ? getCommands() : [];
+    const allCommands = getCommands ? await getCommands() : [];
 
     items = allCommands.filter(c =>
       !query ||
@@ -125,10 +125,10 @@ export function createCommandPalette({ getCommands, onExecuteCommand }) {
 
   return {
     element: overlay,
-    open() {
+    async open() {
       input.value = '';
       selectedIndex = 0;
-      renderList();
+      await renderList();
       overlay.classList.add('open');
       setTimeout(() => input.focus(), 40);
     },

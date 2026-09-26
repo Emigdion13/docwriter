@@ -39,7 +39,7 @@ export function initPreview(container, handlers = {}) {
 }
 
 /**
- * Renders Markdown into the preview container safely.
+ * Renders Markdown into the preview container safely with DOMPurify.
  */
 export async function renderPreview(spaceId, body) {
   if (!previewContainer) return;
@@ -50,8 +50,15 @@ export async function renderPreview(spaceId, body) {
 
   const rawHtml = await bridge.render_preview(spaceId, body);
   const cleanHtml = DOMPurify.sanitize(rawHtml, {
-    ADD_TAGS: ['span', 'code', 'pre', 'article', 'blockquote', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'ul', 'li', 'a', 'strong', 'em', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p'],
-    ADD_ATTR: ['class', 'href', 'target', 'rel', 'title', 'data-note', 'data-new', 'data-ext']
+    ADD_TAGS: [
+      'span', 'code', 'pre', 'article', 'blockquote', 'table', 'thead',
+      'tbody', 'tr', 'th', 'td', 'ul', 'li', 'a', 'strong', 'em',
+      'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'input', 'hr'
+    ],
+    ADD_ATTR: [
+      'class', 'href', 'target', 'rel', 'title', 'data-note', 'data-new',
+      'data-ext', 'type', 'checked', 'disabled'
+    ]
   });
 
   previewContainer.innerHTML = cleanHtml;
