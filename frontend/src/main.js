@@ -22,6 +22,7 @@ import { initPreview, renderPreview, scrollPreviewTo } from './ui/preview.js';
 import { renderBacklinks } from './ui/backlinks.js';
 import { createSealedHero, createEmptyHero, updateSealedDetails } from './ui/sealedVault.js';
 import { createUnlockDialog } from './ui/unlockDialog.js';
+import { createVaultSetupDialog } from './ui/vaultSetup.js';
 import { createCommandPalette } from './ui/commandPalette.js';
 import { createSettingsOverlay } from './ui/settings.js';
 import { toast, initToasts } from './ui/toasts.js';
@@ -57,6 +58,7 @@ const state = {
   effects: 'full',
   autolockMinutes: 10,
   lastActivity: Date.now(),
+  locksAt: null,
   history: [],
   historyIndex: -1,
   isBackingUp: false,
@@ -79,12 +81,14 @@ const VIEWS = ['edit', 'split', 'preview'];
 
 // UI component references
 let unlockDialog = null;
+let vaultSetupDialog = null;
 let commandPalette = null;
 let settingsOverlay = null;
 
 // Timers
 let saveTimer = null;
 let previewDebounceTimer = null;
+let lastTouchSent = 0;
 
 /* =================================================================
    State Helpers
@@ -490,10 +494,17 @@ function openUnlockDialogForSpace(spaceId) {
 
 async function handleUnlockComplete(spaceId) {
   const space = state.spaces.find(s => s.id === spaceId);
-  if (!space) return;
+  if (!space) return { error: 'invalid_space', message: 'Space not found' };
 
-  await bridge.unlock_vault(spaceId);
-  space.locked = false;
+  const result = await bridge.unlock_vault(spaceId);
+  if (result?.error || result?.ok === false) {
+    return result;
+  }
+
+  state.locksAt = result?.locks_at ?? state.locksAt;
+  const refreshed = await bridge.get_state();
+  state.spaces = refreshed.spaces;
+  state.locksAt = refreshed.locks_at ?? state.locksAt;
 
   await selectSpace(space.id);
 
@@ -506,8 +517,10 @@ async function handleUnlockComplete(spaceId) {
   const ws = document.getElementById('workspace');
   if (ws) replay(ws, 'revealing');
 
-  const count = space.note_count ?? space.notes?.length ?? 0;
-  toast(`${space.name} unlocked. ${count} notes decrypted in memory only.`, { icon: 'unlock' });
+  const unlockedSpace = state.spaces.find(s => s.id === spaceId) || space;
+  const count = result.count ?? unlockedSpace.note_count ?? 0;
+  toast(`${unlockedSpace.name} unlocked. ${count} notes decrypted in memory only.`, { icon: 'unlock' });
+  return result;
 }
 
 async function lockAllVaults(auto = false) {
@@ -528,7 +541,8 @@ async function lockAllVaults(auto = false) {
     if (ws) ws.classList.remove('sealing');
   }
 
-  await bridge.lock_all();
+  const lockResult = await bridge.lock_all();
+  state.locksAt = null;
   state.spaces.forEach(s => {
     if (s.kind === 'vault') s.locked = true;
   });
@@ -537,11 +551,40 @@ async function lockAllVaults(auto = false) {
   if (active.kind === 'vault') {
     state.currentNoteId = null;
     state.currentNote = null;
+    setEditorContent('');
+    renderPreview(active.id, '');
+    renderBacklinks(document.getElementById('backlinks'), [], '', () => {});
     renderNotes(active, [], null, false);
     renderWorkspace();
   }
 
   toast('All vaults locked. Decrypted notes removed from memory.', { icon: 'lock' });
+}
+
+/* =================================================================
+   Python-originated lock events
+   ================================================================= */
+
+function handleVaultLockedEvent(data = {}) {
+  const ids = data.space_ids || (data.space_id ? [data.space_id] : []);
+  if (!ids.length) return;
+  ids.forEach(id => {
+    const space = state.spaces.find(s => s.id === id);
+    if (space) space.locked = true;
+  });
+  state.locksAt = null;
+  renderSpaces(state.spaces, state.currentSpaceId);
+  const active = getActiveSpace();
+  if (active?.kind === 'vault' && active.locked) {
+    state.currentNoteId = null;
+    state.currentNote = null;
+    state.currentNotes = [];
+    setEditorContent('');
+    renderPreview(active.id, '');
+    renderBacklinks(document.getElementById('backlinks'), [], '', () => {});
+    renderNotes(active, [], null, false);
+    renderWorkspace();
+  }
 }
 
 /* =================================================================
@@ -600,6 +643,26 @@ async function getPaletteCommands() {
         colorVar: s.colorVar,
         run: () => openUnlockDialogForSpace(s.id)
       });
+    } else if (s.kind === 'vault') {
+      commands.push({
+        label: `Lock ${s.name}`,
+        sub: 'Remove decrypted notes from memory',
+        icon: 'lock',
+        colorVar: s.colorVar,
+        run: () => bridge.lock_vault(s.id)
+      });
+      const notes = (s.id === state.currentSpaceId && state.currentNotes.length)
+        ? state.currentNotes
+        : await bridge.list_notes(s.id);
+      notes.forEach(n => {
+        commands.push({
+          label: n.title,
+          sub: s.name,
+          icon: 'unlock',
+          colorVar: s.colorVar,
+          run: () => selectSpace(s.id, n.id)
+        });
+      });
     } else {
       const notes = (s.id === state.currentSpaceId && state.currentNotes.length)
         ? state.currentNotes
@@ -626,6 +689,15 @@ async function getPaletteCommands() {
 function setupShortcuts() {
   const onActivity = () => {
     state.lastActivity = Date.now();
+    const hasOpenVault = state.spaces.some(s => s.kind === 'vault' && !s.locked);
+    if (hasOpenVault && Date.now() - lastTouchSent >= 15000) {
+      lastTouchSent = Date.now();
+      bridge.touch().then(result => {
+        if (result && Object.prototype.hasOwnProperty.call(result, 'locks_at')) {
+          state.locksAt = result.locks_at;
+        }
+      }).catch(() => {});
+    }
   };
 
   ['keydown', 'mousedown', 'mousemove', 'wheel'].forEach(ev => {
@@ -736,22 +808,21 @@ function setupShortcuts() {
 }
 
 function startAutoLockTimer() {
-  const totalMs = state.autolockMinutes * 60 * 1000;
   setInterval(() => {
     const openVaults = state.spaces.filter(s => s.kind === 'vault' && !s.locked);
-    if (!openVaults.length) {
+    const totalMs = state.autolockMinutes * 60 * 1000;
+    if (!openVaults.length || !state.locksAt) {
       updateLockCountdown([], 0, totalMs);
       return;
     }
 
-    const elapsed = Date.now() - state.lastActivity;
-    const remaining = Math.max(0, totalMs - elapsed);
-
+    const remaining = Math.max(0, state.locksAt - Date.now());
     if (remaining === 0) {
+      // Python is the authority and normally sends vault_locked first.  This
+      // is only a UI fallback if a bridge event is delayed.
       lockAllVaults(true);
       return;
     }
-
     updateLockCountdown(openVaults, remaining, totalMs);
   }, 1000);
 }
@@ -762,6 +833,7 @@ function startAutoLockTimer() {
 
 async function init() {
   initToasts();
+  events.on('vault_locked', handleVaultLockedEvent);
 
   // Load state from bridge
   const appState = await bridge.get_state();
@@ -769,6 +841,8 @@ async function init() {
   state.theme = appState.look?.theme || 'nebula';
   state.effects = appState.look?.effects || 'full';
   state.viewMode = appState.look?.view_mode || 'split';
+  state.autolockMinutes = appState.autolock_minutes || state.autolockMinutes;
+  state.locksAt = appState.locks_at ?? null;
 
   // Mount Toolbar
   const toolbarContainer = document.getElementById('toolbar');
@@ -785,7 +859,7 @@ async function init() {
   const sidebarContainer = document.getElementById('sidebar');
   const sidebarEl = createSidebar({
     onSelectSpace: (id) => selectSpace(id),
-    onNewVault: () => toast('“New vault…” creates another vault with its own key file', { icon: 'shield' }),
+    onNewVault: () => vaultSetupDialog?.open(),
     onSyncDrive: runBackup
   });
   sidebarContainer.replaceWith(sidebarEl);
@@ -869,9 +943,24 @@ async function init() {
 
   unlockDialog = createUnlockDialog({
     onUnlockComplete: handleUnlockComplete,
-    onBrowseKey: () => toast('The real app opens a file picker here', { icon: 'key' })
+    onBrowseKey: (spaceId) => bridge.choose_key_file(spaceId)
   });
   overlaysRoot.appendChild(unlockDialog.element);
+
+  vaultSetupDialog = createVaultSetupDialog({
+    onChooseFolder: () => bridge.choose_notes_folder(),
+    onSetup: async () => {
+      const result = await bridge.initialize_vaults();
+      if (!result?.error) {
+        const refreshed = await bridge.get_state();
+        state.spaces = refreshed.spaces;
+        renderSpaces(state.spaces, state.currentSpaceId);
+        updateSealedDetails(getActiveSpace());
+      }
+      return result;
+    }
+  });
+  overlaysRoot.appendChild(vaultSetupDialog.element);
 
   commandPalette = createCommandPalette({
     getCommands: getPaletteCommands
@@ -886,7 +975,13 @@ async function init() {
     onSaveSettings: (changes) => {
       if (changes.look?.theme) setTheme(changes.look.theme, true);
       if (changes.look?.effects) setFx(changes.look.effects, true);
-      if (changes.autolock_minutes) state.autolockMinutes = changes.autolock_minutes;
+      if (changes.autolock_minutes) {
+        state.autolockMinutes = changes.autolock_minutes;
+        bridge.update_settings({ autolock_minutes: changes.autolock_minutes })
+          .then(() => bridge.touch())
+          .then(result => { state.locksAt = result?.locks_at ?? null; })
+          .catch(() => {});
+      }
       toast('Settings saved', { icon: 'check' });
     }
   });
@@ -901,6 +996,10 @@ async function init() {
   // Select initial space (Plain space with first note)
   await selectSpace('plain', null, false);
   pushHistory();
+
+  if (appState.needs_setup) {
+    vaultSetupDialog?.open();
+  }
 
   // Setup global shortcuts and autolock timer
   setupShortcuts();

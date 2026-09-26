@@ -1,6 +1,6 @@
 /* =================================================================
    UNLOCK DIALOG  (frontend/src/ui/unlockDialog.js)
-   Signature unlock ring animation and vault decryption flow.
+   Signature unlock ring animation and real native-key unlock flow.
    ================================================================= */
 
 import { icon } from '../icons.js';
@@ -58,7 +58,17 @@ export function createUnlockDialog({ onUnlockComplete, onBrowseKey }) {
   });
 
   overlay.querySelector('#unlock-cancel').onclick = closeDialog;
-  overlay.querySelector('#unlock-browse').onclick = () => onBrowseKey?.();
+  overlay.querySelector('#unlock-browse').onclick = async () => {
+    const result = await onBrowseKey?.(currentSpace?.id);
+    const statusEl = overlay.querySelector('#unlock-status');
+    const keyInput = overlay.querySelector('#unlock-key');
+    if (result?.ok) {
+      keyInput.value = result.name || 'Selected key file';
+      statusEl.textContent = 'Key selected. It will be checked against this vault.';
+    } else if (result?.message) {
+      statusEl.textContent = result.message;
+    }
+  };
 
   overlay.querySelector('#unlock-go').onclick = async () => {
     if (!currentSpace) return;
@@ -74,16 +84,25 @@ export function createUnlockDialog({ onUnlockComplete, onBrowseKey }) {
     statusEl.textContent = 'Checking the key matches this vault…';
     await wait(450);
 
-    const noteCount = currentSpace.note_count ?? currentSpace.notes?.length ?? 4;
+    const noteCount = currentSpace.note_count ?? currentSpace.notes?.length ?? 0;
     statusEl.textContent = `Decrypting ${noteCount} notes into memory…`;
-    await wait(550);
+    await wait(350);
+
+    // Python performs the actual file read, vault-id check, verifier check and
+    // decryption.  The UI never receives a key path from the browser.
+    const result = await onUnlockComplete?.(currentSpace.id);
+    if (result?.error || result?.ok === false) {
+      dialog.classList.remove('working', 'done');
+      statusEl.textContent = result.message || 'Unable to unlock this vault.';
+      goBtn.disabled = false;
+      return;
+    }
 
     dialog.classList.add('done');
     statusEl.textContent = 'Unlocked';
     await wait(380);
 
     closeDialog();
-    onUnlockComplete?.(currentSpace.id);
   };
 
   return {
@@ -100,7 +119,9 @@ export function createUnlockDialog({ onUnlockComplete, onBrowseKey }) {
       dialog.style.setProperty('--c', `var(${space.colorVar || '--accent'})`);
 
       titleEl.textContent = `Unlock ${space.name}`;
-      keyInput.value = space.key_path || `E:\\keys\\${space.name.toLowerCase()}.vnkey`;
+      keyInput.value = space.key_path
+        ? space.key_path.split(/[\\/]/).pop()
+        : `Choose ${space.name.toLowerCase()}.vnkey…`;
       statusEl.textContent = 'Your key file stays on this computer. It is never uploaded.';
       goBtn.disabled = false;
 

@@ -1294,6 +1294,72 @@
   gap: 8px;
 }
 
+/* First-run vault setup */
+.setup-dialog {
+  text-align: left;
+}
+
+.setup-mark {
+  width: 58px;
+  height: 58px;
+  display: grid;
+  place-items: center;
+  margin: 0 auto 16px;
+  border-radius: 18px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  box-shadow: 0 0 30px -8px color-mix(in srgb, var(--accent) 75%, transparent);
+}
+
+.setup-dialog h3,
+.setup-dialog .dlg-sub {
+  text-align: center;
+}
+
+.setup-folder {
+  width: 100%;
+  margin-top: 2px;
+}
+
+.setup-steps {
+  display: grid;
+  gap: 10px;
+  margin: 20px 0;
+  padding-left: 22px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.setup-steps b {
+  color: var(--text);
+}
+
+.setup-steps code {
+  color: var(--accent);
+  font: 500 11px var(--font-mono);
+}
+
+.setup-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-bottom: 22px;
+  padding: 10px 11px;
+  border-radius: 10px;
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning) 22%, transparent);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.setup-warning .i {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
 /* Command palette overlay */
 .overlay.palette {
   place-items: start center;
