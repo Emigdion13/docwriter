@@ -255,10 +255,37 @@ export const bridge = {
     return s && !s.locked ? s.notes.map(n => n.title) : [];
   },
 
+  async choose_key_file(space_id) {
+    const api = await waitForBridge();
+    if (api?.choose_key_file) return await api.choose_key_file(space_id);
+    return { error: 'key_not_found', message: 'The native file picker is available in the desktop app.' };
+  },
+
+  async create_vault(space_id) {
+    const api = await waitForBridge();
+    if (api?.create_vault) return await api.create_vault(space_id);
+    return { error: 'setup_unavailable', message: 'Vault setup is available in the desktop app.' };
+  },
+
+  async choose_notes_folder() {
+    const api = await waitForBridge();
+    if (api?.choose_notes_folder) return await api.choose_notes_folder();
+    return { error: 'setup_unavailable', message: 'Folder selection is available in the desktop app.' };
+  },
+
+  async initialize_vaults() {
+    const api = await waitForBridge();
+    if (api?.initialize_vaults) return await api.initialize_vaults();
+    return { error: 'setup_unavailable', message: 'Vault setup is available in the desktop app.' };
+  },
+
   async unlock_vault(space_id) {
     const api = await waitForBridge();
     if (api?.unlock_vault) return await api.unlock_vault(space_id);
-    return { error: 'locked', message: 'Vault unlock will be implemented in M4' };
+    const s = mockSpaces.find(x => x.id === space_id);
+    if (!s) return { error: 'invalid_space', message: 'Space not found' };
+    s.locked = false;
+    return { ok: true, count: s.notes.length, locks_at: Date.now() + 600000 };
   },
 
   async lock_vault(space_id) {

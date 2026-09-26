@@ -147,11 +147,50 @@ class Config:
         return self.data
 
     def get_vault_key_path(self, vault_name: str) -> str:
+        """Return the remembered key-file path for a configured vault."""
         vaults = self.data.get("vaults", [])
         for v in vaults:
             if v.get("name", "").lower() == vault_name.lower():
-                return v.get("key_path", "")
+                return str(v.get("key_path", "") or "")
         return ""
+
+    def get_vault(self, vault_id_or_name: str) -> dict[str, Any] | None:
+        """Return a configured vault entry by id/name, without exposing secrets."""
+        wanted = str(vault_id_or_name).casefold()
+        for vault in self.data.get("vaults", []):
+            name = str(vault.get("name", ""))
+            folder = str(vault.get("folder", ""))
+            # The built-in space ids are the lower-case folder names.  Accept
+            # the display name as well because settings use display names.
+            if wanted in {name.casefold(), Path(folder).name.casefold(), folder.casefold()}:
+                return vault
+        return None
+
+    def vault_dir(self, vault_id_or_name: str) -> Path:
+        """Resolve a configured vault folder below :attr:`notes_root`."""
+        vault = self.get_vault(vault_id_or_name)
+        if vault is None:
+            raise KeyError(f"Vault not found: {vault_id_or_name}")
+        folder = Path(str(vault.get("folder", "")))
+        if folder.is_absolute():
+            # Settings are user-editable, but a vault must remain in the notes
+            # root just like key-file paths must remain outside it.
+            candidate = folder.resolve()
+        else:
+            candidate = (self.notes_root / folder).resolve()
+        try:
+            candidate.relative_to(self.notes_root.resolve())
+        except ValueError as exc:
+            raise ValueError("Vault folder must be inside the notes root") from exc
+        return candidate
+
+    def set_vault_key_path(self, vault_id_or_name: str, key_path: Path | str) -> None:
+        """Remember a key-file location after it has passed API validation."""
+        vault = self.get_vault(vault_id_or_name)
+        if vault is None:
+            raise KeyError(f"Vault not found: {vault_id_or_name}")
+        vault["key_path"] = str(Path(key_path).resolve())
+        self.save()
 
     def ensure_folders(self) -> None:
         """Create necessary directories under notes_root."""

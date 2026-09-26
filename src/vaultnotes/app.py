@@ -79,6 +79,8 @@ def main(dev: bool = False) -> None:
                 "On Windows, Microsoft Edge WebView2 is used automatically.\n"
                 "On Linux, install python3-gi / GTK or PyQt.\n"
             )
+        finally:
+            api.close()
     finally:
         try:
             lock.release()
