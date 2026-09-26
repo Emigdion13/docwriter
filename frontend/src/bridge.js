@@ -120,7 +120,9 @@ export const bridge = {
         note_count: s.notes.length
       })),
       look: { theme: 'nebula', effects: 'full', view_mode: 'split', editor_font_size: 13.5 },
-      last_backup: null
+      last_backup: null,
+      notes_root: 'Documents/VaultNotes',
+      needs_setup: false
     };
   },
 
@@ -239,7 +241,49 @@ export const bridge = {
   async move_note(space_id, note_id, target_space_id) {
     const api = await waitForBridge();
     if (api?.move_note) return await api.move_note(space_id, note_id, target_space_id);
-    return { error: 'locked', message: 'Target space is locked' };
+    const src = mockSpaces.find(x => x.id === space_id);
+    const dst = mockSpaces.find(x => x.id === target_space_id);
+    if (!src || !dst) return { error: 'invalid_space', message: 'Space not found' };
+    if (space_id === target_space_id) return { error: 'same_space', message: 'The note is already in that space' };
+    if (src.locked || dst.locked) return { error: 'locked', message: 'Unlock the vault first' };
+    const idx = src.notes.findIndex(x => x.id === note_id);
+    if (idx === -1) return { error: 'not_found', message: 'Note not found' };
+    const [moved] = src.notes.splice(idx, 1);
+    dst.notes.unshift(moved);
+    return { new_id: moved.id, title: moved.title, broken_links: 0 };
+  },
+
+  async import_notes(space_id) {
+    const api = await waitForBridge();
+    if (api?.import_notes) return await api.import_notes(space_id);
+    return { error: 'import_unavailable', message: 'Import is available in the desktop app.' };
+  },
+
+  async export_note(space_id, note_id) {
+    const api = await waitForBridge();
+    if (api?.export_note) return await api.export_note(space_id, note_id);
+    return { error: 'export_unavailable', message: 'Export is available in the desktop app.' };
+  },
+
+  async purge_note(space_id, note_id) {
+    const api = await waitForBridge();
+    if (api?.purge_note) return await api.purge_note(space_id, note_id);
+    const s = mockSpaces.find(x => x.id === space_id);
+    if (!s) return { error: 'not_found', message: 'Space not found' };
+    const idx = s.trash.findIndex(x => x.id === note_id);
+    if (idx === -1) return { error: 'not_found', message: 'Note not in trash' };
+    const [gone] = s.trash.splice(idx, 1);
+    return { ok: true, title: gone.title };
+  },
+
+  async empty_trash(space_id) {
+    const api = await waitForBridge();
+    if (api?.empty_trash) return await api.empty_trash(space_id);
+    const s = mockSpaces.find(x => x.id === space_id);
+    if (!s) return { error: 'not_found', message: 'Space not found' };
+    const purged = s.trash.length;
+    s.trash = [];
+    return { ok: true, purged };
   },
 
   async render_preview(space_id, body) {

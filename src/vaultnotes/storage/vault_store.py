@@ -641,6 +641,44 @@ class VaultStore:
         self._notes[clean_id] = restored
         return _copy_note(restored)
 
+    def purge_note(self, note_id: str | uuid.UUID) -> str:
+        """Permanently delete an encrypted trash entry (cannot be undone).
+
+        Removes both the ``.vnote`` file and its decrypted in-memory copy.
+        Returns the purged note's title. Raises FileNotFoundError when the
+        note is not in trash.
+        """
+        self._require_unlocked()
+        clean_id = _note_id(note_id)
+        try:
+            note = self._trash_notes[clean_id]
+        except KeyError as exc:
+            raise FileNotFoundError(f"Note not found in trash: {note_id}") from exc
+        source = self._note_path(clean_id, trash=True)
+        if source.is_file():
+            source.unlink()
+        del self._trash_notes[clean_id]
+        return note.title
+
+    def empty_trash(self) -> int:
+        """Permanently delete every encrypted trash entry. Returns the count."""
+        self._require_unlocked()
+        count = 0
+        for note_id in list(self._trash_notes.keys()):
+            try:
+                self.purge_note(note_id)
+                count += 1
+            except (FileNotFoundError, ValueError, OSError):
+                pass
+        # Also remove any orphaned .vnote files with no in-memory entry.
+        for orphan in self._iter_note_paths(self.trash_dir):
+            try:
+                orphan.unlink()
+                count += 1
+            except OSError:
+                pass
+        return count
+
     def list_notes(self, query: str = "", sort: str = "modified") -> list[Note]:
         """List decrypted active notes, optionally filtering title and body."""
         self._require_unlocked()
@@ -681,6 +719,7 @@ class VaultStore:
     rename = rename_note
     delete = delete_note
     restore = restore_note
+    purge = purge_note
     list = list_notes
 
     # ------------------------------------------------------------------

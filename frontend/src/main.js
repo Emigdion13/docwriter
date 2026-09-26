@@ -16,7 +16,8 @@ import { bridge, events } from './bridge.js';
 // UI Modules
 import { createToolbar, updateToolbarView, updateToolbarTheme } from './ui/toolbar.js';
 import { createSidebar, renderSpaces, updateDriveCard } from './ui/sidebar.js';
-import { createNoteList, renderNotes } from './ui/noteList.js';
+import { createNoteList, renderNotes, renderTrash } from './ui/noteList.js';
+import { confirmAction, createMoveDialog } from './ui/dialogs.js';
 import { initEditor, setEditorContent, getEditorContent, focusEditor, setEditorCursorToEnd } from './ui/editor.js';
 import { initPreview, renderPreview, scrollPreviewTo } from './ui/preview.js';
 import { renderBacklinks } from './ui/backlinks.js';
@@ -53,9 +54,14 @@ const state = {
   currentNoteId: null,
   currentNote: null,
   currentNotes: [],
+  currentTrash: [],
+  trashMode: false,
+  sort: 'modified', // 'modified' | 'title'
   viewMode: 'split', // 'edit' | 'split' | 'preview'
   theme: 'nebula',
   effects: 'full',
+  editorFontSize: 13.5,
+  notesRoot: '',
   autolockMinutes: 10,
   lastActivity: Date.now(),
   locksAt: null,
@@ -84,6 +90,7 @@ let unlockDialog = null;
 let vaultSetupDialog = null;
 let commandPalette = null;
 let settingsOverlay = null;
+let moveDialog = null;
 
 // Timers
 let saveTimer = null;
@@ -191,6 +198,44 @@ function cycleViewMode() {
   setViewMode(VIEWS[nextIdx]);
 }
 
+function setEditorFontSize(px, quiet = false) {
+  const size = Math.min(20, Math.max(10, Number(px) || 13.5));
+  state.editorFontSize = size;
+  document.documentElement.style.setProperty('--editor-font-size', `${size}px`);
+  bridge.update_settings({ look: { editor_font_size: size } });
+  if (!quiet) toast(`Editor font size: ${size}px`, { icon: 'edit' });
+}
+
+function toggleSort() {
+  if (state.trashMode || getActiveSpace()?.locked) return;
+  state.sort = state.sort === 'modified' ? 'title' : 'modified';
+  refreshNoteList(false);
+  toast(state.sort === 'title' ? 'Sort: Title (A–Z)' : 'Sort: Modified (newest first)', { icon: 'sort' });
+}
+
+async function refreshSpaces() {
+  const stateData = await bridge.get_state();
+  state.spaces = stateData.spaces;
+  state.locksAt = stateData.locks_at ?? state.locksAt;
+  state.notesRoot = stateData.notes_root || state.notesRoot;
+  renderSpaces(state.spaces, state.currentSpaceId);
+}
+
+async function refreshNoteList(animate = false) {
+  const space = getActiveSpace();
+  if (!space || space.locked) {
+    if (space) renderNotes(space, [], null, false, { sort: state.sort });
+    return;
+  }
+  if (state.trashMode) {
+    await refreshTrash();
+    return;
+  }
+  const notes = await bridge.list_notes(space.id, document.getElementById('search')?.value || '', state.sort);
+  state.currentNotes = notes;
+  renderNotes(space, notes, state.currentNoteId, animate, { sort: state.sort });
+}
+
 /* =================================================================
    Space & Note Navigation
    ================================================================= */
@@ -213,6 +258,7 @@ async function selectSpace(spaceId, targetNoteId = null, animate = true) {
   await flushSave();
   const prevSpaceId = state.currentSpaceId;
   state.currentSpaceId = spaceId;
+  state.trashMode = false;
   const space = getActiveSpace();
 
   setAccentColor(space.colorVar || '--accent');
@@ -225,12 +271,12 @@ async function selectSpace(spaceId, targetNoteId = null, animate = true) {
     state.currentNoteId = null;
     state.currentNote = null;
     state.currentNotes = [];
-    renderNotes(space, [], null, animate);
+    renderNotes(space, [], null, animate, { sort: state.sort });
     renderWorkspace();
     return;
   }
 
-  const notes = await bridge.list_notes(space.id, searchInput?.value || '');
+  const notes = await bridge.list_notes(space.id, searchInput?.value || '', state.sort);
   state.currentNotes = notes;
 
   if (!targetNoteId && notes.length > 0) {
@@ -238,7 +284,7 @@ async function selectSpace(spaceId, targetNoteId = null, animate = true) {
   }
   state.currentNoteId = targetNoteId;
 
-  renderNotes(space, notes, state.currentNoteId, animate);
+  renderNotes(space, notes, state.currentNoteId, animate, { sort: state.sort });
   await loadAndDisplayNote(state.currentNoteId);
 
   if (animate && prevSpaceId !== spaceId) {
@@ -249,12 +295,13 @@ async function selectSpace(spaceId, targetNoteId = null, animate = true) {
 
 async function openNote(noteId) {
   await flushSave();
+  state.trashMode = false;
   state.currentNoteId = noteId;
   const space = getActiveSpace();
-  const notes = await bridge.list_notes(space.id, document.getElementById('search')?.value || '');
+  const notes = await bridge.list_notes(space.id, document.getElementById('search')?.value || '', state.sort);
   state.currentNotes = notes;
 
-  renderNotes(space, notes, state.currentNoteId, false);
+  renderNotes(space, notes, state.currentNoteId, false, { sort: state.sort });
   await loadAndDisplayNote(noteId);
 
   const panes = document.getElementById('panes');
@@ -347,10 +394,7 @@ async function createNote(initialTitle = 'Untitled') {
     return;
   }
 
-  // Refresh spaces list count
-  const stateData = await bridge.get_state();
-  state.spaces = stateData.spaces;
-  renderSpaces(state.spaces, state.currentSpaceId);
+  await refreshSpaces();
 
   // Switch view to split if in preview mode
   if (state.viewMode === 'preview') {
@@ -391,9 +435,9 @@ async function renameNote(newTitle) {
     state.currentNoteId = res.id;
   }
 
-  const notes = await bridge.list_notes(space.id, document.getElementById('search')?.value || '');
+  const notes = await bridge.list_notes(space.id, document.getElementById('search')?.value || '', state.sort);
   state.currentNotes = notes;
-  renderNotes(space, notes, note.id, false);
+  renderNotes(space, notes, note.id, false, { sort: state.sort });
   renderWorkspace();
 
   const msg = res.links_updated
@@ -416,21 +460,18 @@ async function deleteNote() {
   }
 
   const deletedNote = res.deleted;
-  const notes = await bridge.list_notes(space.id, document.getElementById('search')?.value || '');
+  const notes = await bridge.list_notes(space.id, document.getElementById('search')?.value || '', state.sort);
   state.currentNotes = notes;
   const nextNote = notes[0] || null;
 
-  // Refresh state
-  const stateData = await bridge.get_state();
-  state.spaces = stateData.spaces;
-  renderSpaces(state.spaces, state.currentSpaceId);
+  await refreshSpaces();
 
   if (nextNote) {
     await openNote(nextNote.id);
   } else {
     state.currentNoteId = null;
     state.currentNote = null;
-    renderNotes(space, [], null, false);
+    renderNotes(space, notes, null, false, { sort: state.sort });
     renderWorkspace();
   }
 
@@ -439,14 +480,208 @@ async function deleteNote() {
     action: 'Undo',
     onAction: async () => {
       await bridge.restore_note(space.id, deletedNote.id);
-      const updatedState = await bridge.get_state();
-      state.spaces = updatedState.spaces;
-      renderSpaces(state.spaces, state.currentSpaceId);
-      if (state.currentSpaceId === space.id) {
+      await refreshSpaces();
+      if (state.currentSpaceId === space.id && !state.trashMode) {
         await openNote(deletedNote.id);
+      } else if (state.trashMode) {
+        await refreshTrash();
       }
     }
   });
+}
+
+/* =================================================================
+   Trash View
+   ================================================================= */
+
+async function refreshTrash() {
+  const space = getActiveSpace();
+  if (!space || space.locked) return;
+  const trash = await bridge.list_trash(space.id);
+  state.currentTrash = Array.isArray(trash) ? trash : [];
+  renderTrash(space, state.currentTrash);
+}
+
+async function toggleTrashMode() {
+  const space = getActiveSpace();
+  if (!space || space.locked) return;
+  await flushSave();
+  state.trashMode = !state.trashMode;
+  if (state.trashMode) {
+    await refreshTrash();
+    state.currentNoteId = null;
+    state.currentNote = null;
+    renderWorkspace();
+  } else {
+    const searchInput = document.getElementById('search');
+    if (searchInput) searchInput.value = '';
+    await refreshNoteList(false);
+    const first = state.currentNotes[0];
+    if (first) {
+      state.currentNoteId = first.id;
+      await loadAndDisplayNote(first.id);
+      renderNotes(space, state.currentNotes, first.id, false, { sort: state.sort });
+    } else {
+      renderWorkspace();
+    }
+  }
+}
+
+async function restoreTrashedNote(noteId) {
+  const space = getActiveSpace();
+  const res = await bridge.restore_note(space.id, noteId);
+  if (res.error) {
+    toast(res.message, { icon: 'trash' });
+    return;
+  }
+  await refreshSpaces();
+  await refreshTrash();
+  toast(`Restored “${res.note?.title || 'note'}”`, { icon: 'undo' });
+}
+
+async function purgeTrashedNote(noteId) {
+  const space = getActiveSpace();
+  const entry = state.currentTrash.find(t => t.id === noteId);
+  const ok = await confirmAction({
+    title: 'Delete forever?',
+    message: `“${entry?.title || 'This note'}” will be permanently deleted. This cannot be undone.`,
+    confirmLabel: 'Delete forever',
+    danger: true,
+    iconName: 'trash'
+  });
+  if (!ok) return;
+  const res = await bridge.purge_note(space.id, noteId);
+  if (res.error) {
+    toast(res.message, { icon: 'trash' });
+    return;
+  }
+  await refreshTrash();
+  toast(`Permanently deleted “${res.title || 'note'}”`, { icon: 'trash' });
+}
+
+async function emptyTrash() {
+  const space = getActiveSpace();
+  if (!state.currentTrash.length) return;
+  const ok = await confirmAction({
+    title: 'Empty trash?',
+    message: `${state.currentTrash.length} note${state.currentTrash.length === 1 ? '' : 's'} in ${space.name} will be permanently deleted. This cannot be undone.`,
+    confirmLabel: 'Empty trash',
+    danger: true,
+    iconName: 'trash'
+  });
+  if (!ok) return;
+  const res = await bridge.empty_trash(space.id);
+  if (res.error) {
+    toast(res.message, { icon: 'trash' });
+    return;
+  }
+  await refreshTrash();
+  toast(`Emptied trash (${res.purged} note${res.purged === 1 ? '' : 's'})`, { icon: 'trash' });
+}
+
+/* =================================================================
+   Move / Import / Export
+   ================================================================= */
+
+async function moveCurrentNote() {
+  const space = getActiveSpace();
+  const note = state.currentNote;
+  if (!note || space.locked || state.trashMode) return;
+  await flushSave();
+
+  const links = await bridge.count_links_to(space.id, note.id);
+  const incoming = links?.count || 0;
+  const outgoing = note.link_count || 0;
+
+  const targetId = await moveDialog?.open({
+    spaces: state.spaces,
+    currentSpaceId: space.id,
+    noteTitle: note.title,
+    incomingLinks: incoming,
+    outgoingLinks: outgoing
+  });
+  if (!targetId) return;
+
+  const res = await bridge.move_note(space.id, note.id, targetId);
+  if (res.error) {
+    toast(res.message, { icon: 'move' });
+    return;
+  }
+
+  const target = state.spaces.find(s => s.id === targetId);
+  await refreshSpaces();
+  await selectSpace(targetId, res.new_id, false);
+  pushHistory();
+
+  const broken = res.broken_links || 0;
+  const brokenMsg = broken ? ` ${broken} link${broken === 1 ? '' : 's'} broke.` : '';
+  toast(`Moved “${res.title}” to ${target?.name || 'new space'}.${brokenMsg}`, {
+    icon: 'move',
+    action: 'Undo',
+    onAction: async () => {
+      const undo = await bridge.move_note(targetId, res.new_id, space.id);
+      await refreshSpaces();
+      if (undo.error) {
+        toast(undo.message, { icon: 'move' });
+        return;
+      }
+      await selectSpace(space.id, undo.new_id, false);
+    }
+  });
+}
+
+async function importNotes() {
+  const space = getActiveSpace();
+  if (!space || space.locked) {
+    toast(`Unlock ${space?.name || 'the vault'} first`, { icon: 'lock' });
+    return;
+  }
+  const res = await bridge.import_notes(space.id);
+  if (res.error === 'cancelled' || res.error === 'key_not_found') return;
+  if (res.error) {
+    toast(res.message, { icon: 'upload' });
+    return;
+  }
+  const imported = res.imported || [];
+  const skipped = res.skipped || [];
+  await refreshSpaces();
+  if (state.trashMode) state.trashMode = false;
+  const searchInput = document.getElementById('search');
+  if (searchInput) searchInput.value = '';
+  if (imported.length) {
+    await selectSpace(space.id, imported[0].id, false);
+  } else {
+    await refreshNoteList(false);
+  }
+  let msg = imported.length
+    ? `Imported ${imported.length} note${imported.length === 1 ? '' : 's'}`
+    : 'Nothing was imported';
+  if (skipped.length) msg += ` (${skipped.length} skipped)`;
+  toast(msg, { icon: 'upload' });
+}
+
+async function exportCurrentNote() {
+  const space = getActiveSpace();
+  const note = state.currentNote;
+  if (!note || space.locked || state.trashMode) return;
+  await flushSave();
+  if (space.kind === 'vault') {
+    const ok = await confirmAction({
+      title: 'Export unencrypted copy?',
+      message: 'This saves an unencrypted copy of the note that anyone can read.',
+      confirmLabel: 'Export',
+      danger: false,
+      iconName: 'download'
+    });
+    if (!ok) return;
+  }
+  const res = await bridge.export_note(space.id, note.id);
+  if (res.error === 'cancelled') return;
+  if (res.error) {
+    toast(res.message, { icon: 'download' });
+    return;
+  }
+  toast(`Exported ${res.name}`, { icon: 'download' });
 }
 
 function handleEditorChange(newBody) {
@@ -455,13 +690,14 @@ function handleEditorChange(newBody) {
   state.currentNote.body = newBody;
   setSavingState(true);
 
-  // Debounced live preview update
+  // Debounced live preview update (~300 ms after typing stops)
   clearTimeout(previewDebounceTimer);
   previewDebounceTimer = setTimeout(() => {
+    if (!state.currentNote) return;
     renderPreview(state.currentSpaceId, newBody);
     const backlinksContainer = document.getElementById('backlinks');
     renderBacklinks(backlinksContainer, state.currentNote.backlinks, state.currentNote.title, (id) => openNote(id));
-  }, 150);
+  }, 300);
 
   // Auto-save debounce (1s)
   clearTimeout(saveTimer);
@@ -475,9 +711,9 @@ function handleEditorChange(newBody) {
       if (meta) {
         meta.textContent = `Edited ${res.modified} · ${wordCount(newBody)} words`;
       }
-      const notes = await bridge.list_notes(state.currentSpaceId, document.getElementById('search')?.value || '');
+      const notes = await bridge.list_notes(state.currentSpaceId, document.getElementById('search')?.value || '', state.sort);
       state.currentNotes = notes;
-      renderNotes(getActiveSpace(), notes, state.currentNote.id, false);
+      renderNotes(getActiveSpace(), notes, state.currentNote.id, false, { sort: state.sort });
     }
   }, 1000);
 }
@@ -551,10 +787,11 @@ async function lockAllVaults(auto = false) {
   if (active.kind === 'vault') {
     state.currentNoteId = null;
     state.currentNote = null;
+    state.trashMode = false;
     setEditorContent('');
     renderPreview(active.id, '');
     renderBacklinks(document.getElementById('backlinks'), [], '', () => {});
-    renderNotes(active, [], null, false);
+    renderNotes(active, [], null, false, { sort: state.sort });
     renderWorkspace();
   }
 
@@ -579,10 +816,11 @@ function handleVaultLockedEvent(data = {}) {
     state.currentNoteId = null;
     state.currentNote = null;
     state.currentNotes = [];
+    state.trashMode = false;
     setEditorContent('');
     renderPreview(active.id, '');
     renderBacklinks(document.getElementById('backlinks'), [], '', () => {});
-    renderNotes(active, [], null, false);
+    renderNotes(active, [], null, false, { sort: state.sort });
     renderWorkspace();
   }
 }
@@ -612,8 +850,27 @@ async function runBackup() {
    ================================================================= */
 
 async function getPaletteCommands() {
+  const space = getActiveSpace();
+  const hasOpenNote = !!state.currentNote && !space?.locked && !state.trashMode;
   const commands = [
     { label: 'New note', hint: 'Ctrl N', icon: 'plus', run: () => createNote() },
+    ...(hasOpenNote ? [
+      { label: `Move “${state.currentNote.title}” to another space…`, sub: space.name, icon: 'move', run: () => moveCurrentNote() },
+      { label: `Export “${state.currentNote.title}” to .md`, sub: space.name, icon: 'download', run: () => exportCurrentNote() }
+    ] : []),
+    ...(!space?.locked ? [
+      { label: `Import .md files into ${space?.name || 'this space'}…`, icon: 'upload', run: () => importNotes() },
+      {
+        label: state.trashMode ? `Back to ${space?.name || ''} notes` : `Show ${space?.name || ''} trash`,
+        icon: 'trash',
+        run: () => toggleTrashMode()
+      },
+      {
+        label: state.sort === 'title' ? 'Sort: Modified (newest first)' : 'Sort: Title (A–Z)',
+        icon: 'sort',
+        run: () => toggleSort()
+      }
+    ] : []),
     { label: 'Lock all vaults', hint: 'Ctrl L', icon: 'lock', run: () => lockAllVaults() },
     { label: 'Back up now', hint: 'Ctrl B', icon: 'cloud', run: () => runBackup() },
     { label: 'Switch view: Edit / Split / Preview', hint: 'Ctrl E', icon: 'columns', run: () => cycleViewMode() },
@@ -643,40 +900,34 @@ async function getPaletteCommands() {
         colorVar: s.colorVar,
         run: () => openUnlockDialogForSpace(s.id)
       });
-    } else if (s.kind === 'vault') {
+      // Locked vault titles never appear here (security rule 11).
+      continue;
+    }
+    if (s.kind === 'vault') {
       commands.push({
         label: `Lock ${s.name}`,
         sub: 'Remove decrypted notes from memory',
         icon: 'lock',
         colorVar: s.colorVar,
-        run: () => bridge.lock_vault(s.id)
-      });
-      const notes = (s.id === state.currentSpaceId && state.currentNotes.length)
-        ? state.currentNotes
-        : await bridge.list_notes(s.id);
-      notes.forEach(n => {
-        commands.push({
-          label: n.title,
-          sub: s.name,
-          icon: 'unlock',
-          colorVar: s.colorVar,
-          run: () => selectSpace(s.id, n.id)
-        });
-      });
-    } else {
-      const notes = (s.id === state.currentSpaceId && state.currentNotes.length)
-        ? state.currentNotes
-        : await bridge.list_notes(s.id);
-      notes.forEach(n => {
-        commands.push({
-          label: n.title,
-          sub: s.name,
-          icon: s.kind === 'plain' ? 'file' : 'unlock',
-          colorVar: s.colorVar,
-          run: () => selectSpace(s.id, n.id)
-        });
+        run: async () => {
+          await bridge.lock_vault(s.id);
+          handleVaultLockedEvent({ space_id: s.id });
+          toast(`Locked ${s.name}. Decrypted notes removed from memory.`, { icon: 'lock' });
+        }
       });
     }
+    const notes = (s.id === state.currentSpaceId && state.currentNotes.length)
+      ? state.currentNotes
+      : await bridge.list_notes(s.id, '', state.sort);
+    (Array.isArray(notes) ? notes : []).forEach(n => {
+      commands.push({
+        label: n.title,
+        sub: s.name,
+        icon: s.kind === 'plain' ? 'file' : 'unlock',
+        colorVar: s.colorVar,
+        run: () => selectSpace(s.id, n.id)
+      });
+    });
   }
 
   return commands;
@@ -738,9 +989,9 @@ function setupShortcuts() {
           if (meta) {
             meta.textContent = `Edited ${res.modified} · ${wordCount(body)} words`;
           }
-          const notes = await bridge.list_notes(state.currentSpaceId, document.getElementById('search')?.value || '');
+          const notes = await bridge.list_notes(state.currentSpaceId, document.getElementById('search')?.value || '', state.sort);
           state.currentNotes = notes;
-          renderNotes(getActiveSpace(), notes, state.currentNote.id, false);
+          renderNotes(getActiveSpace(), notes, state.currentNote.id, false, { sort: state.sort });
           toast('Saved', { icon: 'check' });
         }
       }
@@ -799,7 +1050,11 @@ function setupShortcuts() {
   });
 
   document.getElementById('move')?.addEventListener('click', () => {
-    toast('Move to another space: re-encrypts the note and warns about broken links', { icon: 'move' });
+    moveCurrentNote();
+  });
+
+  document.getElementById('export')?.addEventListener('click', () => {
+    exportCurrentNote();
   });
 
   document.getElementById('trash')?.addEventListener('click', () => {
@@ -841,6 +1096,8 @@ async function init() {
   state.theme = appState.look?.theme || 'nebula';
   state.effects = appState.look?.effects || 'full';
   state.viewMode = appState.look?.view_mode || 'split';
+  state.editorFontSize = appState.look?.editor_font_size || 13.5;
+  state.notesRoot = appState.notes_root || '';
   state.autolockMinutes = appState.autolock_minutes || state.autolockMinutes;
   state.locksAt = appState.locks_at ?? null;
 
@@ -859,7 +1116,15 @@ async function init() {
   const sidebarContainer = document.getElementById('sidebar');
   const sidebarEl = createSidebar({
     onSelectSpace: (id) => selectSpace(id),
-    onNewVault: () => vaultSetupDialog?.open(),
+    onNewVault: async () => {
+      // The setup dialog creates any missing built-in vaults. When both
+      // vaults already exist there is nothing to set up in v1.
+      const st = await bridge.get_state();
+      state.spaces = st.spaces;
+      renderSpaces(state.spaces, state.currentSpaceId);
+      if (st.needs_setup) vaultSetupDialog?.open();
+      else toast('Encrypted and Personal vaults already exist', { icon: 'shield' });
+    },
     onSyncDrive: runBackup
   });
   sidebarContainer.replaceWith(sidebarEl);
@@ -871,12 +1136,18 @@ async function init() {
     onNewNote: () => createNote(),
     onSearchInput: async (q) => {
       const space = getActiveSpace();
-      if (!space.locked) {
-        const notes = await bridge.list_notes(space.id, q);
+      if (!space.locked && !state.trashMode) {
+        const notes = await bridge.list_notes(space.id, q, state.sort);
         state.currentNotes = notes;
-        renderNotes(space, notes, state.currentNoteId, false);
+        renderNotes(space, notes, state.currentNoteId, false, { sort: state.sort });
       }
-    }
+    },
+    onSortToggle: () => toggleSort(),
+    onImport: () => importNotes(),
+    onTrashToggle: () => toggleTrashMode(),
+    onRestoreNote: (noteId) => restoreTrashedNote(noteId),
+    onPurgeNote: (noteId) => purgeTrashedNote(noteId),
+    onEmptyTrash: () => emptyTrash()
   });
   noteListContainer.replaceWith(noteListEl);
 
@@ -918,7 +1189,7 @@ async function init() {
   initPreview(previewContainer, {
     onOpenNoteByTitle: async (targetTitle) => {
       const space = getActiveSpace();
-      const notes = await bridge.list_notes(space.id);
+      const notes = await bridge.list_notes(space.id, '', state.sort);
       state.currentNotes = notes;
       const match = notes.find(n => n.title.toLowerCase() === targetTitle.toLowerCase());
       if (match) {
@@ -967,14 +1238,19 @@ async function init() {
   });
   overlaysRoot.appendChild(commandPalette.element);
 
+  moveDialog = createMoveDialog();
+  overlaysRoot.appendChild(moveDialog.element);
+
   settingsOverlay = createSettingsOverlay({
     getSettings: () => ({
-      look: { theme: state.theme, effects: state.effects },
-      autolock_minutes: state.autolockMinutes
+      look: { theme: state.theme, effects: state.effects, editor_font_size: state.editorFontSize },
+      autolock_minutes: state.autolockMinutes,
+      notes_root: state.notesRoot
     }),
     onSaveSettings: (changes) => {
       if (changes.look?.theme) setTheme(changes.look.theme, true);
       if (changes.look?.effects) setFx(changes.look.effects, true);
+      if (changes.look?.editor_font_size) setEditorFontSize(changes.look.editor_font_size, true);
       if (changes.autolock_minutes) {
         state.autolockMinutes = changes.autolock_minutes;
         bridge.update_settings({ autolock_minutes: changes.autolock_minutes })
@@ -983,6 +1259,33 @@ async function init() {
           .catch(() => {});
       }
       toast('Settings saved', { icon: 'check' });
+    },
+    onChooseFolder: async () => {
+      await flushSave();
+      const result = await bridge.choose_notes_folder();
+      if (result?.error) {
+        if (result.error !== 'cancelled') toast(result.message, { icon: 'folder' });
+        return result;
+      }
+      // The notes root changed: vaults are locked and stores rebuilt.
+      // Reset the workspace and start over in Plain.
+      clearTimeout(saveTimer);
+      saveTimer = null;
+      state.currentNoteId = null;
+      state.currentNote = null;
+      state.currentNotes = [];
+      state.trashMode = false;
+      state.history = [];
+      state.historyIndex = -1;
+      state.locksAt = null;
+      const refreshed = await bridge.get_state();
+      state.spaces = refreshed.spaces;
+      state.notesRoot = refreshed.notes_root || '';
+      renderSpaces(state.spaces, state.currentSpaceId);
+      await selectSpace('plain', null, false);
+      pushHistory();
+      toast(`Notes folder: ${result.name || state.notesRoot}`, { icon: 'folder' });
+      return result;
     }
   });
   overlaysRoot.appendChild(settingsOverlay.element);
@@ -990,6 +1293,7 @@ async function init() {
   // Set initial theme, effects, view
   setTheme(state.theme, true);
   setFx(state.effects, true);
+  setEditorFontSize(state.editorFontSize, true);
   setViewMode(state.viewMode);
   updateBackupProgress(state.lastBackup || 'never', null);
 

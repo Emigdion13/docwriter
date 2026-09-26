@@ -268,6 +268,32 @@ class PlainStore:
             created=format_timestamp(getattr(stat, "st_birthtime", stat.st_ctime)),
         )
 
+    def purge_note(self, note_id: str) -> str:
+        """Permanently delete a note from .trash/ (cannot be undone).
+
+        Returns the purged note's title. Raises FileNotFoundError when the
+        note is not in trash.
+        """
+        trash_path = self._resolve_note_path(note_id, in_trash=True)
+        if not trash_path.is_file():
+            raise FileNotFoundError(f"Note not in trash: {note_id}")
+        title = trash_path.stem
+        trash_path.unlink()
+        return title
+
+    def empty_trash(self) -> int:
+        """Permanently delete every note in .trash/. Returns the count."""
+        count = 0
+        if self.trash_dir.is_dir():
+            for p in list(self.trash_dir.iterdir()):
+                if p.is_file() and p.suffix.lower() == ".md":
+                    try:
+                        p.unlink()
+                        count += 1
+                    except OSError:
+                        pass
+        return count
+
     def list_notes(self, query: str = "", sort: str = "modified") -> list[Note]:
         """List active notes with optional search query and sorting."""
         notes: list[tuple[Note, float]] = []
@@ -341,4 +367,5 @@ class PlainStore:
     rename = rename_note
     delete = delete_note
     restore = restore_note
+    purge = purge_note
     list = list_notes
