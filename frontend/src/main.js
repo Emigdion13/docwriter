@@ -38,7 +38,6 @@ import {
   scrambleOut,
   setAccentColor,
   setEffectsLevel,
-  getEffectsLevel,
   replay,
   isCalm
 } from './ui/effects.js';
@@ -49,9 +48,10 @@ import {
 
 const state = {
   spaces: [],
-  currentSpaceId: 'encrypted',
-  currentNoteId: 'e1',
+  currentSpaceId: 'plain',
+  currentNoteId: null,
   currentNote: null,
+  currentNotes: [],
   viewMode: 'split', // 'edit' | 'split' | 'preview'
   theme: 'nebula',
   effects: 'full',
@@ -60,7 +60,7 @@ const state = {
   history: [],
   historyIndex: -1,
   isBackingUp: false,
-  lastBackup: '10:02'
+  lastBackup: null
 };
 
 const THEMES = [
@@ -191,7 +191,22 @@ function cycleViewMode() {
    Space & Note Navigation
    ================================================================= */
 
+async function flushSave() {
+  if (saveTimer && state.currentNote && !getActiveSpace()?.locked) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    const body = getEditorContent();
+    setSavingState(true);
+    const res = await bridge.save_note(state.currentSpaceId, state.currentNote.id, body);
+    setSavingState(false);
+    if (!res.error) {
+      state.currentNote.modified = res.modified;
+    }
+  }
+}
+
 async function selectSpace(spaceId, targetNoteId = null, animate = true) {
+  await flushSave();
   const prevSpaceId = state.currentSpaceId;
   state.currentSpaceId = spaceId;
   const space = getActiveSpace();
@@ -205,12 +220,15 @@ async function selectSpace(spaceId, targetNoteId = null, animate = true) {
   if (space.locked) {
     state.currentNoteId = null;
     state.currentNote = null;
+    state.currentNotes = [];
     renderNotes(space, [], null, animate);
     renderWorkspace();
     return;
   }
 
   const notes = await bridge.list_notes(space.id, searchInput?.value || '');
+  state.currentNotes = notes;
+
   if (!targetNoteId && notes.length > 0) {
     targetNoteId = notes[0].id;
   }
@@ -226,9 +244,11 @@ async function selectSpace(spaceId, targetNoteId = null, animate = true) {
 }
 
 async function openNote(noteId) {
+  await flushSave();
   state.currentNoteId = noteId;
   const space = getActiveSpace();
   const notes = await bridge.list_notes(space.id, document.getElementById('search')?.value || '');
+  state.currentNotes = notes;
 
   renderNotes(space, notes, state.currentNoteId, false);
   await loadAndDisplayNote(noteId);
@@ -310,6 +330,7 @@ function renderWorkspace() {
    ================================================================= */
 
 async function createNote(initialTitle = 'Untitled') {
+  await flushSave();
   const space = getActiveSpace();
   if (space.locked) {
     toast(`Unlock ${space.name} first`, { icon: 'lock' });
@@ -327,7 +348,7 @@ async function createNote(initialTitle = 'Untitled') {
   state.spaces = stateData.spaces;
   renderSpaces(state.spaces, state.currentSpaceId);
 
-  // Switch view to split if preview
+  // Switch view to split if in preview mode
   if (state.viewMode === 'preview') {
     setViewMode('split');
   }
@@ -343,12 +364,14 @@ async function renameNote(newTitle) {
   const note = state.currentNote;
   if (!note || space.locked) return;
 
-  const trimmed = newTitle.trim();
-  if (!trimmed || trimmed === note.title) {
+  const trimmed = (newTitle || '').trim();
+  if (!trimmed) {
     const titleInput = document.getElementById('title');
     if (titleInput) titleInput.value = note.title;
     return;
   }
+
+  if (trimmed === note.title) return;
 
   const res = await bridge.rename_note(space.id, note.id, trimmed, true);
   if (res.error) {
@@ -359,7 +382,13 @@ async function renameNote(newTitle) {
   }
 
   note.title = res.title;
+  if (res.id) {
+    note.id = res.id;
+    state.currentNoteId = res.id;
+  }
+
   const notes = await bridge.list_notes(space.id, document.getElementById('search')?.value || '');
+  state.currentNotes = notes;
   renderNotes(space, notes, note.id, false);
   renderWorkspace();
 
@@ -374,6 +403,8 @@ async function deleteNote() {
   const note = state.currentNote;
   if (!note || space.locked) return;
 
+  await flushSave();
+
   const res = await bridge.delete_note(space.id, note.id);
   if (res.error) {
     toast(res.message, { icon: 'trash' });
@@ -382,6 +413,7 @@ async function deleteNote() {
 
   const deletedNote = res.deleted;
   const notes = await bridge.list_notes(space.id, document.getElementById('search')?.value || '');
+  state.currentNotes = notes;
   const nextNote = notes[0] || null;
 
   // Refresh state
@@ -440,6 +472,7 @@ function handleEditorChange(newBody) {
         meta.textContent = `Edited ${res.modified} · ${wordCount(newBody)} words`;
       }
       const notes = await bridge.list_notes(state.currentSpaceId, document.getElementById('search')?.value || '');
+      state.currentNotes = notes;
       renderNotes(getActiveSpace(), notes, state.currentNote.id, false);
     }
   }, 1000);
@@ -473,7 +506,7 @@ async function handleUnlockComplete(spaceId) {
   const ws = document.getElementById('workspace');
   if (ws) replay(ws, 'revealing');
 
-  const count = space.note_count ?? space.notes?.length ?? 4;
+  const count = space.note_count ?? space.notes?.length ?? 0;
   toast(`${space.name} unlocked. ${count} notes decrypted in memory only.`, { icon: 'unlock' });
 }
 
@@ -501,44 +534,41 @@ async function lockAllVaults(auto = false) {
   });
 
   renderSpaces(state.spaces, state.currentSpaceId);
-  await selectSpace(state.currentSpaceId, null, false);
+  if (active.kind === 'vault') {
+    state.currentNoteId = null;
+    state.currentNote = null;
+    renderNotes(active, [], null, false);
+    renderWorkspace();
+  }
 
-  const msg = auto
-    ? `Vaults locked after ${state.autolockMinutes} minutes without activity`
-    : `Locked ${openVaults.map(s => s.name).join(' and ')}. Keys removed from memory.`;
-  toast(msg, { icon: 'lock' });
+  toast('All vaults locked. Decrypted notes removed from memory.', { icon: 'lock' });
 }
 
 /* =================================================================
-   Backup Flow
+   Drive Backup (M8 Hook)
    ================================================================= */
 
 async function runBackup() {
   if (state.isBackingUp) return;
   state.isBackingUp = true;
+  updateBackupProgress('Backing up…', 35);
+  toast('Backing up notes to Google Drive…', { icon: 'cloud' });
 
-  updateDriveCard('Backing up…');
-  const total = 12;
-  const calm = isCalm();
-
-  for (let i = 1; i <= total; i++) {
-    updateBackupProgress(`Backing up ${i}/${total}`, i / total);
-    await new Promise(r => setTimeout(r, calm ? 20 : 120));
-  }
-
-  state.lastBackup = 'just now';
-  state.isBackingUp = false;
-
-  updateDriveCard(`Backed up ${state.lastBackup}`);
-  updateBackupProgress(state.lastBackup, null);
-  toast('Backup complete. Encrypted notes were uploaded still encrypted.', { icon: 'cloud' });
+  setTimeout(async () => {
+    const res = await bridge.backup_now();
+    state.isBackingUp = false;
+    state.lastBackup = res.last_backup || 'just now';
+    updateBackupProgress(state.lastBackup, null);
+    updateDriveCard(`Backed up ${state.lastBackup}`);
+    toast('Backup complete. Key files were not uploaded.', { icon: 'check' });
+  }, 1400);
 }
 
 /* =================================================================
-   Commands Palette List Provider
+   Command Palette Provider
    ================================================================= */
 
-function getPaletteCommands() {
+async function getPaletteCommands() {
   const commands = [
     { label: 'New note', hint: 'Ctrl N', icon: 'plus', run: () => createNote() },
     { label: 'Lock all vaults', hint: 'Ctrl L', icon: 'lock', run: () => lockAllVaults() },
@@ -561,7 +591,7 @@ function getPaletteCommands() {
     }
   ];
 
-  state.spaces.forEach(s => {
+  for (const s of state.spaces) {
     if (s.locked) {
       commands.push({
         label: `Unlock ${s.name}`,
@@ -571,7 +601,10 @@ function getPaletteCommands() {
         run: () => openUnlockDialogForSpace(s.id)
       });
     } else {
-      (s.notes || []).forEach(n => {
+      const notes = (s.id === state.currentSpaceId && state.currentNotes.length)
+        ? state.currentNotes
+        : await bridge.list_notes(s.id);
+      notes.forEach(n => {
         commands.push({
           label: n.title,
           sub: s.name,
@@ -581,7 +614,7 @@ function getPaletteCommands() {
         });
       });
     }
-  });
+  }
 
   return commands;
 }
@@ -599,7 +632,7 @@ function setupShortcuts() {
     window.addEventListener(ev, onActivity, { passive: true });
   });
 
-  window.addEventListener('keydown', (e) => {
+  window.addEventListener('keydown', async (e) => {
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
 
@@ -620,8 +653,25 @@ function setupShortcuts() {
       runBackup();
     } else if (mod && key === 's') {
       e.preventDefault();
-      setSavingState(false);
-      toast('Saved', { icon: 'check' });
+      if (state.currentNote && !getActiveSpace().locked) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
+        const body = getEditorContent();
+        setSavingState(true);
+        const res = await bridge.save_note(state.currentSpaceId, state.currentNote.id, body);
+        setSavingState(false);
+        if (!res.error) {
+          state.currentNote.modified = res.modified;
+          const meta = document.getElementById('meta');
+          if (meta) {
+            meta.textContent = `Edited ${res.modified} · ${wordCount(body)} words`;
+          }
+          const notes = await bridge.list_notes(state.currentSpaceId, document.getElementById('search')?.value || '');
+          state.currentNotes = notes;
+          renderNotes(getActiveSpace(), notes, state.currentNote.id, false);
+          toast('Saved', { icon: 'check' });
+        }
+      }
     } else if (mod && key === 'f') {
       e.preventDefault();
       const searchInput = document.getElementById('search');
@@ -749,6 +799,7 @@ async function init() {
       const space = getActiveSpace();
       if (!space.locked) {
         const notes = await bridge.list_notes(space.id, q);
+        state.currentNotes = notes;
         renderNotes(space, notes, state.currentNoteId, false);
       }
     }
@@ -784,7 +835,7 @@ async function init() {
     getTitles: () => {
       const space = getActiveSpace();
       if (space.locked) return [];
-      return (space.notes || []).map(n => n.title);
+      return (state.currentNotes || []).map(n => n.title);
     }
   });
 
@@ -794,6 +845,7 @@ async function init() {
     onOpenNoteByTitle: async (targetTitle) => {
       const space = getActiveSpace();
       const notes = await bridge.list_notes(space.id);
+      state.currentNotes = notes;
       const match = notes.find(n => n.title.toLowerCase() === targetTitle.toLowerCase());
       if (match) {
         openNote(match.id);
@@ -844,10 +896,10 @@ async function init() {
   setTheme(state.theme, true);
   setFx(state.effects, true);
   setViewMode(state.viewMode);
-  updateBackupProgress(state.lastBackup, null);
+  updateBackupProgress(state.lastBackup || 'never', null);
 
-  // Select initial space (Encrypted with note e1)
-  await selectSpace('encrypted', 'e1', false);
+  // Select initial space (Plain space with first note)
+  await selectSpace('plain', null, false);
   pushHistory();
 
   // Setup global shortcuts and autolock timer
