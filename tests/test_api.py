@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+import json
 from pathlib import Path
 import pytest
 from vaultnotes.api import Api
@@ -297,3 +299,277 @@ def test_api_settings_validation(api: Api) -> None:
     )
     assert ok["look"]["editor_font_size"] == 15
     assert ok["autolock_minutes"] == 1
+
+
+# ----------------------------------------------------------------------
+# Milestone M7: bad inputs to the Bridge API return errors and never crash
+# ----------------------------------------------------------------------
+
+# Values a broken or hostile frontend could hand us.  pywebview passes whatever
+# JavaScript sent, so none of these may reach the stores unchecked.
+HOSTILE_VALUES = [
+    None,
+    0,
+    -1,
+    3.5,
+    True,
+    "",
+    "   ",
+    [],
+    {},
+    (),
+    "../../etc/passwd",
+    "..\\..\\windows\\system32",
+    "/absolute/path",
+    "\x00nul",
+    "a" * 5000,
+    "😀🚀",
+    {"error": "not a space"},
+]
+
+BRIDGE_METHODS_TAKING_A_SPACE = [
+    "list_notes",
+    "open_note",
+    "create_note",
+    "save_note",
+    "rename_note",
+    "count_links_to",
+    "delete_note",
+    "restore_note",
+    "list_trash",
+    "purge_note",
+    "empty_trash",
+    "move_note",
+    "import_notes",
+    "export_note",
+    "render_preview",
+    "list_titles",
+    "unlock_vault",
+    "lock_vault",
+    "choose_key_file",
+    "create_vault",
+    "note_links",
+]
+
+
+def assert_bridge_shape(result: object, allow_text: bool = False) -> None:
+    """Every Bridge API answer is JSON data, and an error carries a message.
+
+    ``render_preview`` is the one endpoint that returns an HTML string instead
+    of a structure (section 4.8), hence ``allow_text``.
+    """
+    allowed = (dict, list, str) if allow_text else (dict, list)
+    assert isinstance(result, allowed), result
+    json.dumps(result)  # must be serializable back to JavaScript
+    if isinstance(result, dict) and "error" in result:
+        assert isinstance(result["error"], str) and result["error"]
+        assert isinstance(result.get("message"), str) and result.get("message")
+
+
+@pytest.mark.parametrize("hostile", HOSTILE_VALUES)
+def test_unknown_spaces_are_refused(api: Api, hostile: object) -> None:
+    for name in BRIDGE_METHODS_TAKING_A_SPACE:
+        method = getattr(api, name)
+        assert_bridge_shape(method(hostile))
+        assert_bridge_shape(method(hostile, hostile))
+        assert_bridge_shape(method(hostile, hostile, hostile))
+        assert_bridge_shape(method(hostile, hostile, hostile, hostile))
+
+
+@pytest.mark.parametrize("hostile", HOSTILE_VALUES)
+def test_bad_note_ids_and_bodies_are_refused(api: Api, hostile: object) -> None:
+    api.create_note("plain", "Real note")
+    notes_before = len(api.list_notes("plain"))
+    files_before = len(list(api.config.plain_dir.glob("*.md")))
+
+    assert_bridge_shape(api.open_note("plain", hostile))
+    assert_bridge_shape(api.save_note("plain", hostile, hostile))
+    assert_bridge_shape(api.save_note("plain", "Real note", hostile))
+    assert_bridge_shape(api.rename_note("plain", hostile, hostile))
+    assert_bridge_shape(api.rename_note("plain", "Real note", hostile))
+    assert_bridge_shape(api.delete_note("plain", hostile))
+    assert_bridge_shape(api.count_links_to("plain", hostile))
+    assert_bridge_shape(api.move_note("plain", hostile, "encrypted"))
+    assert_bridge_shape(api.render_preview("plain", hostile), allow_text=True)
+    assert_bridge_shape(api.note_links("plain", hostile))
+
+    # Nothing was lost, duplicated or written outside the space.  A value like
+    # 0 is a *valid* title, so the sequence above may legitimately rename the
+    # note and then delete it - but a delete only ever moves it to the trash.
+    listing = api.list_notes("plain")
+    assert isinstance(listing, list)
+    assert len(listing) + len(api.list_trash("plain")) == notes_before
+    on_disk = len(list(api.config.plain_dir.glob("*.md"))) + len(
+        list((api.config.plain_dir / ".trash").glob("*.md"))
+    )
+    assert on_disk == files_before
+    assert not list(api.config.notes_root.parent.glob("*.md"))
+
+
+@pytest.mark.parametrize("hostile", HOSTILE_VALUES)
+def test_settings_reject_hostile_changes(api: Api, hostile: object) -> None:
+    before = api.get_settings()
+    result = api.update_settings(hostile)  # type: ignore[arg-type]
+    assert_bridge_shape(result)
+    if hostile == {}:
+        # An empty change is a harmless no-op rather than an error.
+        assert result == before
+        return
+    assert result.get("error") == "invalid_settings"
+    # The stored settings were not touched.
+    assert api.get_settings() == before
+
+
+def test_settings_reject_unknown_keys(api: Api) -> None:
+    """Only documented settings may be written (section 4.6)."""
+    assert api.update_settings({"error": "injected"}).get("error") == "invalid_settings"
+    assert api.update_settings({"look": {"theme": "arctic"}, "junk": 1}).get("error") == "invalid_settings"
+    # A valid change still goes through.
+    assert api.update_settings({"look": {"theme": "arctic"}})["look"]["theme"] == "arctic"
+
+
+def test_key_paths_must_stay_outside_the_notes_folder(api: Api) -> None:
+    inside = api.config.notes_root / "keys" / "encrypted.vnkey"
+    result = api.create_vault("encrypted", inside)
+    assert result.get("error") == "key_inside_notes"
+
+    outside = api.config.settings_file.parent / "keys" / "encrypted.vnkey"
+    assert api.create_vault("encrypted", outside).get("ok") is True
+    assert api.create_vault("encrypted", outside).get("error") == "already_exists"
+
+
+def test_settings_cannot_move_the_notes_folder(api: Api, tmp_path: Path, monkeypatch) -> None:
+    """The notes folder is chosen with a dialog, never by a settings write.
+
+    A relative or junk value would otherwise be resolved against the current
+    working directory and created there (security rule 12f).
+    """
+    root_before = api.config.notes_root
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+
+    for hostile in HOSTILE_VALUES + [".", "notes", "~/somewhere", str(root_before)]:
+        result = api.update_settings({"notes_root": hostile})
+        assert result.get("error") == "invalid_settings", hostile
+        assert api.config.notes_root == root_before
+
+    # Nothing at all appeared in the working directory while that was tried.
+    assert list(cwd.iterdir()) == []
+    assert api.update_settings({"notes_root": str(tmp_path / "elsewhere")}).get("error") == "invalid_settings"
+
+
+def test_headless_folder_choice_rejects_junk_paths(api: Api, tmp_path: Path, monkeypatch) -> None:
+    """Without a window a caller may name a folder - but only a real one."""
+    root_before = api.config.notes_root
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+
+    for hostile in HOSTILE_VALUES:
+        result = api.choose_notes_folder(hostile)
+        assert_bridge_shape(result)
+        if hostile is None:
+            assert result.get("error") == "cancelled"
+            continue
+        absolute = isinstance(hostile, (str, Path)) and Path(str(hostile)).expanduser().is_absolute()
+        if not absolute:
+            # Not a path at all: refused before anything touches the disk.
+            assert result.get("error") == "invalid_folder", hostile
+        else:
+            # An absolute path is a real request; the OS may still say no
+            # (permission denied), which comes back as a clean io_error.
+            assert result.get("error") in {"io_error", "key_inside_notes", None}, hostile
+
+    # No stray folders, and the notes root did not move.
+    assert list(cwd.iterdir()) == []
+    assert api.config.notes_root == root_before
+
+    # A real absolute folder still works for headless callers.
+    target = tmp_path / "notes-elsewhere"
+    assert api.choose_notes_folder(target).get("ok") is True
+    assert api.config.notes_root == target.resolve()
+
+
+def test_native_pickers_report_a_clean_error_without_a_window(api: Api) -> None:
+    # No pywebview window (tests, or a headless start): the user is told what
+    # happened instead of getting a crash or a silent no-op.
+    assert api.choose_notes_folder().get("error") == "cancelled"
+    assert api.import_notes("plain").get("error") == "cancelled"
+    api.create_note("plain", "Exportable")
+    assert api.export_note("plain", "Exportable").get("error") == "cancelled"
+
+
+# The Bridge API surface (section 4.8) plus the endpoints this app adds.
+BRIDGE_SURFACE = [
+    "get_state",
+    "list_notes",
+    "open_note",
+    "create_note",
+    "save_note",
+    "rename_note",
+    "count_links_to",
+    "delete_note",
+    "restore_note",
+    "list_trash",
+    "move_note",
+    "render_preview",
+    "list_titles",
+    "unlock_vault",
+    "lock_vault",
+    "lock_all",
+    "touch",
+    "open_external",
+    "get_settings",
+    "update_settings",
+    "backup_now",
+    "connect_drive",
+    "disconnect_drive",
+    "restore_from_drive",
+    "purge_note",
+    "empty_trash",
+    "import_notes",
+    "export_note",
+    "note_links",
+    "choose_key_file",
+]
+
+
+def test_no_bridge_endpoint_raises(api_with_vaults: Api) -> None:
+    """The safety net: no endpoint may let an exception reach pywebview.
+
+    ``choose_notes_folder``, ``create_vault`` and ``initialize_vaults`` take a
+    path for headless callers, so they are covered by their own tests instead of
+    being swept with hostile values here.
+    """
+    api = api_with_vaults
+    checked = 0
+
+    for name in BRIDGE_SURFACE:
+        method = getattr(api, name, None)
+        assert callable(method), f"{name} is missing from the Bridge API"
+        arity = len(inspect.signature(method).parameters)
+        for hostile in (None, 0, "", [], {}, "../../x", "a" * 5000):
+            assert_bridge_shape(method(*((hostile,) * arity)), allow_text=True)
+            checked += 1
+
+    assert checked == len(BRIDGE_SURFACE) * 7
+
+
+def test_bridge_surface_matches_the_documented_api() -> None:
+    """Every documented endpoint exists; nothing public is left untested."""
+    public = {
+        name
+        for name in vars(Api)
+        if not name.startswith("_") and callable(getattr(Api, name))
+    }
+    documented = set(BRIDGE_SURFACE) | {
+        # path-taking setup endpoints, covered by their own tests
+        "choose_notes_folder",
+        "create_vault",
+        "initialize_vaults",
+        # lifecycle helpers used by run.py / app.py rather than by JavaScript
+        "set_window",
+        "close",
+    }
+    assert public - documented == set(), f"untested public methods: {sorted(public - documented)}"

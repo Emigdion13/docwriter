@@ -140,10 +140,21 @@ class Config:
 
     def update(self, changes: dict[str, Any]) -> dict[str, Any]:
         """Deep update settings and persist to disk."""
-        self._deep_update(self.data, changes)
-        self.save()
         if "notes_root" in changes:
+            # A relative or non-text root would be resolved against whatever
+            # the current working directory happens to be, so it is refused
+            # before anything is written or created.
+            raw = changes["notes_root"]
+            if not isinstance(raw, (str, Path)) or not str(raw).strip():
+                raise ValueError("Notes folder must be a folder path")
+            if not Path(str(raw).strip()).expanduser().is_absolute():
+                raise ValueError("Notes folder must be an absolute path")
+        self._deep_update(self.data, changes)
+        if "notes_root" in changes:
+            # Create the folders first: if the disk refuses (permission, full,
+            # drive removed) settings.json still names the old, working root.
             self.ensure_folders()
+        self.save()
         return self.data
 
     def get_vault_key_path(self, vault_name: str) -> str:

@@ -18,7 +18,14 @@ import { createToolbar, updateToolbarView, updateToolbarTheme } from './ui/toolb
 import { createSidebar, renderSpaces, updateDriveCard } from './ui/sidebar.js';
 import { createNoteList, renderNotes, renderTrash } from './ui/noteList.js';
 import { confirmAction, createMoveDialog } from './ui/dialogs.js';
-import { initEditor, setEditorContent, getEditorContent, focusEditor, setEditorCursorToEnd } from './ui/editor.js';
+import {
+  initEditor,
+  setEditorContent,
+  getEditorContent,
+  focusEditor,
+  setEditorCursorToEnd,
+  refreshWikilinkDecorations
+} from './ui/editor.js';
 import { initPreview, renderPreview, scrollPreviewTo } from './ui/preview.js';
 import { renderBacklinks } from './ui/backlinks.js';
 import { createSealedHero, createEmptyHero, updateSealedDetails } from './ui/sealedVault.js';
@@ -30,6 +37,7 @@ import { toast, initToasts } from './ui/toasts.js';
 import {
   createStatusBar,
   setSavingState,
+  setSaveError,
   updateLockCountdown,
   updateBackupProgress,
   setStatusBarTheme,
@@ -67,6 +75,7 @@ const state = {
   locksAt: null,
   history: [],
   historyIndex: -1,
+  titles: [],           // titles this space can link to, from bridge.list_titles
   isBackingUp: false,
   lastBackup: null
 };
@@ -108,6 +117,60 @@ function getActiveSpace() {
 function wordCount(text) {
   if (!text) return 0;
   return text.replace(/[#*`>|[\]-]/g, ' ').split(/\s+/).filter(Boolean).length;
+}
+
+/**
+ * Bridge calls that should return a list can come back as an error object
+ * ({error, message}) instead.  Turning that into an empty list plus a toast
+ * keeps the UI alive when Python refuses a request (M7).
+ */
+function asList(result) {
+  if (Array.isArray(result)) return result;
+  if (result && typeof result === 'object' && result.error) {
+    toast(result.message || 'VaultNotes could not read that space', { icon: 'alert' });
+  }
+  return [];
+}
+
+/**
+ * Shows the warnings Python reports about files it had to skip (M7).
+ */
+function showWarnings(warnings) {
+  if (!Array.isArray(warnings) || !warnings.length) return;
+  warnings.forEach(message => toast(String(message), { icon: 'alert' }));
+}
+
+/**
+ * A failed save must never look like a saved note: the text is still in the
+ * editor, so say so in the status bar and in a toast (M7).
+ */
+function reportSaveError(result) {
+  const message = result?.message || 'The note could not be saved. Your text is still in the editor.';
+  setSaveError(message);
+  toast(message, { icon: 'alert' });
+}
+
+/**
+ * Reloads the titles the [[ suggestions and the editor chips may use.
+ * They come from list_titles, which returns nothing for a locked vault, so a
+ * locked space can never leak a title into the editor (security rule 11).
+ */
+async function refreshTitles() {
+  const space = getActiveSpace();
+  if (!space || space.locked) {
+    state.titles = [];
+  } else {
+    try {
+      state.titles = asList(await bridge.list_titles(space.id));
+    } catch (err) {
+      // A missing bridge (or a vault that locked mid-call) must not leave the
+      // suggestions showing titles from the previous space.
+      console.error('Could not load note titles:', err);
+      state.titles = [];
+    }
+  }
+  refreshWikilinkDecorations();
+  return state.titles;
 }
 
 function pushHistory() {
@@ -231,7 +294,7 @@ async function refreshNoteList(animate = false) {
     await refreshTrash();
     return;
   }
-  const notes = await bridge.list_notes(space.id, document.getElementById('search')?.value || '', state.sort);
+  const notes = asList(await bridge.list_notes(space.id, document.getElementById('search')?.value || '', state.sort));
   state.currentNotes = notes;
   renderNotes(space, notes, state.currentNoteId, animate, { sort: state.sort });
 }
@@ -247,10 +310,12 @@ async function flushSave() {
     const body = getEditorContent();
     setSavingState(true);
     const res = await bridge.save_note(state.currentSpaceId, state.currentNote.id, body);
-    setSavingState(false);
-    if (!res.error) {
-      state.currentNote.modified = res.modified;
+    if (res?.error) {
+      reportSaveError(res);
+      return;
     }
+    setSavingState(false);
+    state.currentNote.modified = res.modified;
   }
 }
 
@@ -271,12 +336,16 @@ async function selectSpace(spaceId, targetNoteId = null, animate = true) {
     state.currentNoteId = null;
     state.currentNote = null;
     state.currentNotes = [];
+    state.titles = [];
+    refreshWikilinkDecorations();
     renderNotes(space, [], null, animate, { sort: state.sort });
     renderWorkspace();
     return;
   }
 
-  const notes = await bridge.list_notes(space.id, searchInput?.value || '', state.sort);
+  await refreshTitles();
+
+  const notes = asList(await bridge.list_notes(space.id, searchInput?.value || '', state.sort));
   state.currentNotes = notes;
 
   if (!targetNoteId && notes.length > 0) {
@@ -298,7 +367,7 @@ async function openNote(noteId) {
   state.trashMode = false;
   state.currentNoteId = noteId;
   const space = getActiveSpace();
-  const notes = await bridge.list_notes(space.id, document.getElementById('search')?.value || '', state.sort);
+  const notes = asList(await bridge.list_notes(space.id, document.getElementById('search')?.value || '', state.sort));
   state.currentNotes = notes;
 
   renderNotes(space, notes, state.currentNoteId, false, { sort: state.sort });
@@ -395,6 +464,7 @@ async function createNote(initialTitle = 'Untitled') {
   }
 
   await refreshSpaces();
+  await refreshTitles();
 
   // Switch view to split if in preview mode
   if (state.viewMode === 'preview') {
@@ -421,7 +491,23 @@ async function renameNote(newTitle) {
 
   if (trimmed === note.title) return;
 
-  const res = await bridge.rename_note(space.id, note.id, trimmed, true);
+  // "Update N links in other notes?"  The count comes from the link index, so
+  // it only ever covers this space - links never cross spaces (section 7).
+  const linked = await bridge.count_links_to(space.id, note.id);
+  const incoming = linked?.count || 0;
+  let updateLinks = false;
+  if (incoming > 0) {
+    updateLinks = await confirmAction({
+      title: `Update ${incoming} link${incoming === 1 ? '' : 's'} in other notes?`,
+      message: `${incoming} note${incoming === 1 ? '' : 's'} in ${space.name} link to “${note.title}”. `
+        + `Rewrite ${incoming === 1 ? 'it' : 'them'} to “${trimmed}”? Aliases and #headings are kept.`,
+      confirmLabel: 'Update links',
+      cancelLabel: 'Rename only',
+      iconName: 'link'
+    });
+  }
+
+  const res = await bridge.rename_note(space.id, note.id, trimmed, updateLinks);
   if (res.error) {
     toast(res.message, { icon: 'file' });
     const titleInput = document.getElementById('title');
@@ -435,15 +521,20 @@ async function renameNote(newTitle) {
     state.currentNoteId = res.id;
   }
 
-  const notes = await bridge.list_notes(space.id, document.getElementById('search')?.value || '', state.sort);
+  const notes = asList(await bridge.list_notes(space.id, document.getElementById('search')?.value || '', state.sort));
   state.currentNotes = notes;
   renderNotes(space, notes, note.id, false, { sort: state.sort });
   renderWorkspace();
+  await refreshTitles();
 
-  const msg = res.links_updated
-    ? `Renamed. Updated ${res.links_updated} link${res.links_updated > 1 ? 's' : ''} in other notes.`
-    : 'Renamed';
-  toast(msg, { icon: 'link' });
+  if (incoming > 0 && !updateLinks) {
+    toast(`Renamed. ${incoming} link${incoming === 1 ? '' : 's'} still point at the old title.`, { icon: 'link' });
+  } else {
+    const msg = res.links_updated
+      ? `Renamed. Updated ${res.links_updated} link${res.links_updated > 1 ? 's' : ''} in other notes.`
+      : 'Renamed';
+    toast(msg, { icon: 'link' });
+  }
 }
 
 async function deleteNote() {
@@ -460,7 +551,7 @@ async function deleteNote() {
   }
 
   const deletedNote = res.deleted;
-  const notes = await bridge.list_notes(space.id, document.getElementById('search')?.value || '', state.sort);
+  const notes = asList(await bridge.list_notes(space.id, document.getElementById('search')?.value || '', state.sort));
   state.currentNotes = notes;
   const nextNote = notes[0] || null;
 
@@ -475,12 +566,15 @@ async function deleteNote() {
     renderWorkspace();
   }
 
+  await refreshTitles();
+
   toast(`Moved “${deletedNote.title}” to trash`, {
     icon: 'trash',
     action: 'Undo',
     onAction: async () => {
       await bridge.restore_note(space.id, deletedNote.id);
       await refreshSpaces();
+      await refreshTitles();
       if (state.currentSpaceId === space.id && !state.trashMode) {
         await openNote(deletedNote.id);
       } else if (state.trashMode) {
@@ -497,7 +591,7 @@ async function deleteNote() {
 async function refreshTrash() {
   const space = getActiveSpace();
   if (!space || space.locked) return;
-  const trash = await bridge.list_trash(space.id);
+  const trash = asList(await bridge.list_trash(space.id));
   state.currentTrash = Array.isArray(trash) ? trash : [];
   renderTrash(space, state.currentTrash);
 }
@@ -536,6 +630,8 @@ async function restoreTrashedNote(noteId) {
   }
   await refreshSpaces();
   await refreshTrash();
+  // A restored note can be linked to again straight away.
+  await refreshTitles();
   toast(`Restored “${res.note?.title || 'note'}”`, { icon: 'undo' });
 }
 
@@ -589,9 +685,13 @@ async function moveCurrentNote() {
   if (!note || space.locked || state.trashMode) return;
   await flushSave();
 
-  const links = await bridge.count_links_to(space.id, note.id);
-  const incoming = links?.count || 0;
-  const outgoing = note.link_count || 0;
+  // Counted from the link index: only links that actually resolve in this
+  // space break, which is the same number Python reports after the move.
+  const linkInfo = await bridge.note_links(space.id, note.id);
+  const incoming = Array.isArray(linkInfo?.backlinks) ? linkInfo.backlinks.length : 0;
+  const outgoing = Array.isArray(linkInfo?.outgoing)
+    ? linkInfo.outgoing.filter(link => link.resolved).length
+    : 0;
 
   const targetId = await moveDialog?.open({
     spaces: state.spaces,
@@ -611,6 +711,7 @@ async function moveCurrentNote() {
   const target = state.spaces.find(s => s.id === targetId);
   await refreshSpaces();
   await selectSpace(targetId, res.new_id, false);
+  await refreshTitles();
   pushHistory();
 
   const broken = res.broken_links || 0;
@@ -645,6 +746,7 @@ async function importNotes() {
   const imported = res.imported || [];
   const skipped = res.skipped || [];
   await refreshSpaces();
+  await refreshTitles();
   if (state.trashMode) state.trashMode = false;
   const searchInput = document.getElementById('search');
   if (searchInput) searchInput.value = '';
@@ -704,17 +806,20 @@ function handleEditorChange(newBody) {
   saveTimer = setTimeout(async () => {
     if (!state.currentNote) return;
     const res = await bridge.save_note(state.currentSpaceId, state.currentNote.id, newBody);
-    setSavingState(false);
-    if (!res.error) {
-      state.currentNote.modified = res.modified;
-      const meta = document.getElementById('meta');
-      if (meta) {
-        meta.textContent = `Edited ${res.modified} · ${wordCount(newBody)} words`;
-      }
-      const notes = await bridge.list_notes(state.currentSpaceId, document.getElementById('search')?.value || '', state.sort);
-      state.currentNotes = notes;
-      renderNotes(getActiveSpace(), notes, state.currentNote.id, false, { sort: state.sort });
+    if (res?.error) {
+      // Keep the text on screen; the next keystroke retries the save.
+      reportSaveError(res);
+      return;
     }
+    setSavingState(false);
+    state.currentNote.modified = res.modified;
+    const meta = document.getElementById('meta');
+    if (meta) {
+      meta.textContent = `Edited ${res.modified} · ${wordCount(newBody)} words`;
+    }
+    const notes = asList(await bridge.list_notes(state.currentSpaceId, document.getElementById('search')?.value || '', state.sort));
+    state.currentNotes = notes;
+    renderNotes(getActiveSpace(), notes, state.currentNote.id, false, { sort: state.sort });
   }, 1000);
 }
 
@@ -743,6 +848,7 @@ async function handleUnlockComplete(spaceId) {
   state.locksAt = refreshed.locks_at ?? state.locksAt;
 
   await selectSpace(space.id);
+  await refreshTitles();
 
   // Signature decrypt reveal animation
   const noteTitleEls = document.querySelectorAll('#notes .note .t');
@@ -756,6 +862,8 @@ async function handleUnlockComplete(spaceId) {
   const unlockedSpace = state.spaces.find(s => s.id === spaceId) || space;
   const count = result.count ?? unlockedSpace.note_count ?? 0;
   toast(`${unlockedSpace.name} unlocked. ${count} notes decrypted in memory only.`, { icon: 'unlock' });
+  // Damaged files were skipped instead of losing the whole vault (M7).
+  showWarnings(result.warnings);
   return result;
 }
 
@@ -795,6 +903,7 @@ async function lockAllVaults(auto = false) {
     renderWorkspace();
   }
 
+  await refreshTitles();
   toast('All vaults locked. Decrypted notes removed from memory.', { icon: 'lock' });
 }
 
@@ -805,6 +914,8 @@ async function lockAllVaults(auto = false) {
 function handleVaultLockedEvent(data = {}) {
   const ids = data.space_ids || (data.space_id ? [data.space_id] : []);
   if (!ids.length) return;
+  // Titles of a locked vault must disappear from the suggestions at once.
+  refreshTitles();
   ids.forEach(id => {
     const space = state.spaces.find(s => s.id === id);
     if (space) space.locked = true;
@@ -918,7 +1029,7 @@ async function getPaletteCommands() {
     }
     const notes = (s.id === state.currentSpaceId && state.currentNotes.length)
       ? state.currentNotes
-      : await bridge.list_notes(s.id, '', state.sort);
+      : asList(await bridge.list_notes(s.id, '', state.sort));
     (Array.isArray(notes) ? notes : []).forEach(n => {
       commands.push({
         label: n.title,
@@ -982,14 +1093,16 @@ function setupShortcuts() {
         const body = getEditorContent();
         setSavingState(true);
         const res = await bridge.save_note(state.currentSpaceId, state.currentNote.id, body);
-        setSavingState(false);
-        if (!res.error) {
+        if (res?.error) {
+          reportSaveError(res);
+        } else {
+          setSavingState(false);
           state.currentNote.modified = res.modified;
           const meta = document.getElementById('meta');
           if (meta) {
             meta.textContent = `Edited ${res.modified} · ${wordCount(body)} words`;
           }
-          const notes = await bridge.list_notes(state.currentSpaceId, document.getElementById('search')?.value || '', state.sort);
+          const notes = asList(await bridge.list_notes(state.currentSpaceId, document.getElementById('search')?.value || '', state.sort));
           state.currentNotes = notes;
           renderNotes(getActiveSpace(), notes, state.currentNote.id, false, { sort: state.sort });
           toast('Saved', { icon: 'check' });
@@ -1089,6 +1202,11 @@ function startAutoLockTimer() {
 async function init() {
   initToasts();
   events.on('vault_locked', handleVaultLockedEvent);
+  // Python pushes problems it could not answer a call with (skipped files).
+  events.on('error', (data) => {
+    if (Array.isArray(data?.warnings)) showWarnings(data.warnings);
+    else if (data?.message) toast(String(data.message), { icon: 'alert' });
+  });
 
   // Load state from bridge
   const appState = await bridge.get_state();
@@ -1100,6 +1218,7 @@ async function init() {
   state.notesRoot = appState.notes_root || '';
   state.autolockMinutes = appState.autolock_minutes || state.autolockMinutes;
   state.locksAt = appState.locks_at ?? null;
+  showWarnings(appState.warnings);
 
   // Mount Toolbar
   const toolbarContainer = document.getElementById('toolbar');
@@ -1137,7 +1256,7 @@ async function init() {
     onSearchInput: async (q) => {
       const space = getActiveSpace();
       if (!space.locked && !state.trashMode) {
-        const notes = await bridge.list_notes(space.id, q, state.sort);
+        const notes = asList(await bridge.list_notes(space.id, q, state.sort));
         state.currentNotes = notes;
         renderNotes(space, notes, state.currentNoteId, false, { sort: state.sort });
       }
@@ -1177,10 +1296,11 @@ async function init() {
   initEditor(cmContainer, {
     onChange: handleEditorChange,
     onScroll: (top) => scrollPreviewTo(top),
+    // The full title list for this space (bridge.list_titles), not the notes
+    // that happen to match the current search filter.
     getTitles: () => {
       const space = getActiveSpace();
-      if (space.locked) return [];
-      return (state.currentNotes || []).map(n => n.title);
+      return space && !space.locked ? state.titles : [];
     }
   });
 
@@ -1189,19 +1309,31 @@ async function init() {
   initPreview(previewContainer, {
     onOpenNoteByTitle: async (targetTitle) => {
       const space = getActiveSpace();
-      const notes = await bridge.list_notes(space.id, '', state.sort);
+      if (space.locked) return;
+      const notes = asList(await bridge.list_notes(space.id, '', state.sort));
       state.currentNotes = notes;
-      const match = notes.find(n => n.title.toLowerCase() === targetTitle.toLowerCase());
+      const wanted = String(targetTitle).trim().toLowerCase().replace(/\.md$/i, '');
+      const match = notes.find(n => n.title.trim().toLowerCase() === wanted);
       if (match) {
         openNote(match.id);
+      } else {
+        // The note went away (or the link points at another space).
+        toast(`“${targetTitle}” is not in ${space.name}`, { icon: 'alert' });
       }
     },
-    onCreateNotePrompt: (title) => {
-      toast(`“${title}” isn’t written yet`, {
-        icon: 'link',
-        action: 'Create note',
-        onAction: () => createNote(title)
+    onCreateNotePrompt: async (title) => {
+      const space = getActiveSpace();
+      if (space.locked) {
+        toast(`Unlock ${space.name} first`, { icon: 'lock' });
+        return;
+      }
+      const ok = await confirmAction({
+        title: `Create note “${title}”?`,
+        message: `${space.name} has no note with that name yet.`,
+        confirmLabel: 'Create note',
+        iconName: 'plus'
       });
+      if (ok) await createNote(title);
     },
     onExternalLink: (url) => {
       bridge.open_external(url);
@@ -1267,6 +1399,7 @@ async function init() {
         if (result.error !== 'cancelled') toast(result.message, { icon: 'folder' });
         return result;
       }
+      showWarnings(result.warnings);
       // The notes root changed: vaults are locked and stores rebuilt.
       // Reset the workspace and start over in Plain.
       clearTimeout(saveTimer);
