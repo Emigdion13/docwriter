@@ -90,6 +90,13 @@ def _now_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+#: File filters for the native dialogs, in the only form pywebview accepts:
+#: "Description (*.ext)".  A bare "*.vnkey" makes it raise before any dialog
+#: opens.
+KEY_FILE_TYPES = ("VaultNotes key (*.vnkey)",)
+MARKDOWN_FILE_TYPES = ("Markdown (*.md)",)
+
+
 class BridgeError(Exception):
     """An input or state problem with a user-facing code and message."""
 
@@ -1315,81 +1322,65 @@ class Api:
         dialog_type = getattr(dialogs, kind, None) if dialogs is not None else None
         if dialog_type is None:
             dialog_type = getattr(webview, f"{kind}_DIALOG")
-        with self._calls.released():
-            return self.window.create_file_dialog(dialog_type, **kwargs)
+        try:
+            with self._calls.released():
+                return self.window.create_file_dialog(dialog_type, **kwargs)
+        except Exception as exc:
+            # Reported as an error, never as "cancelled": a bad file filter once
+            # stopped every dialog from opening while the app said "cancelled".
+            sys.stderr.write(f"VaultNotes: the file dialog failed: {type(exc).__name__}: {exc}\n")
+            raise BridgeError(
+                "dialog_failed", f"The file dialog could not be opened ({type(exc).__name__})."
+            ) from exc
 
     def _choose_file(self, save: bool, suggested_name: str) -> Path | None:
         """Open a native key-file dialog, never a browser file input."""
         if self.window is None:
             return None
-        try:
-            kwargs: dict[str, Any] = {
-                "allow_multiple": False,
-                "file_types": ("VaultNotes key (*.vnkey)", "*.vnkey"),
-            }
-            if save:
-                kwargs["save_filename"] = suggested_name
-            selected = self._file_dialog("SAVE" if save else "OPEN", **kwargs)
-            if isinstance(selected, (list, tuple)):
-                selected = selected[0] if selected else None
-            if not selected:
-                return None
-            return Path(str(selected)).expanduser().resolve()
-        except Exception:
-            # Native dialog failures are presented as a normal user-facing
-            # error by the caller rather than crashing the bridge.
+        kwargs: dict[str, Any] = {"allow_multiple": False, "file_types": KEY_FILE_TYPES}
+        if save:
+            kwargs["save_filename"] = suggested_name
+        selected = self._file_dialog("SAVE" if save else "OPEN", **kwargs)
+        if isinstance(selected, (list, tuple)):
+            selected = selected[0] if selected else None
+        if not selected:
             return None
+        return Path(str(selected)).expanduser().resolve()
 
     def _choose_import_files(self) -> list[Path]:
         """Open a native multi-select picker for ``.md`` files to import."""
         if self.window is None:
             return []
-        try:
-            selected = self._file_dialog(
-                "OPEN",
-                allow_multiple=True,
-                file_types=("Markdown (*.md)", "*.md"),
-            )
-            if not selected:
-                return []
-            if isinstance(selected, (str, Path)):
-                selected = [selected]
-            return [Path(str(each)).expanduser() for each in selected]
-        except Exception:
+        selected = self._file_dialog("OPEN", allow_multiple=True, file_types=MARKDOWN_FILE_TYPES)
+        if not selected:
             return []
+        if isinstance(selected, (str, Path)):
+            selected = [selected]
+        return [Path(str(each)).expanduser() for each in selected]
 
     def _choose_export_file(self, suggested_name: str) -> Path | None:
         """Open a native Save dialog for exporting one ``.md`` file."""
         if self.window is None:
             return None
-        try:
-            selected = self._file_dialog(
-                "SAVE",
-                allow_multiple=False,
-                file_types=("Markdown (*.md)", "*.md"),
-                save_filename=suggested_name,
-            )
-            if isinstance(selected, (list, tuple)):
-                selected = selected[0] if selected else None
-            if not selected:
-                return None
-            return Path(str(selected)).expanduser()
-        except Exception:
+        selected = self._file_dialog(
+            "SAVE", allow_multiple=False, file_types=MARKDOWN_FILE_TYPES, save_filename=suggested_name
+        )
+        if isinstance(selected, (list, tuple)):
+            selected = selected[0] if selected else None
+        if not selected:
             return None
+        return Path(str(selected)).expanduser()
 
     def _choose_folder(self) -> Path | None:
         """Open a native folder picker and return its server-side path."""
         if self.window is None:
             return None
-        try:
-            selected = self._file_dialog("FOLDER", allow_multiple=False)
-            if isinstance(selected, (list, tuple)):
-                selected = selected[0] if selected else None
-            if not selected:
-                return None
-            return Path(str(selected)).expanduser().resolve()
-        except Exception:
+        selected = self._file_dialog("FOLDER", allow_multiple=False)
+        if isinstance(selected, (list, tuple)):
+            selected = selected[0] if selected else None
+        if not selected:
             return None
+        return Path(str(selected)).expanduser().resolve()
 
     @bridge_method
     def choose_notes_folder(self, folder_path: Path | str | None = None) -> dict[str, Any]:
