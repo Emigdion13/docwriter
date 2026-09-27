@@ -142,6 +142,9 @@ def bridge_method(method: Callable[..., Any]) -> Callable[..., Any]:
             sys.stderr.write(f"VaultNotes: {method.__name__} failed: {type(exc).__name__}\n")
             return _error("internal_error", "Something unexpected happened. Your notes were not changed.")
 
+    # Marks the method as part of the Bridge API; expose_bridge() gives the
+    # page these methods and nothing else.
+    wrapper._bridge_endpoint = True  # type: ignore[attr-defined]
     return wrapper
 
 
@@ -2059,3 +2062,36 @@ class Api:
         except Exception as exc:  # noqa: BLE001
             return _error("network", f"The cleanup stopped early ({type(exc).__name__}).")
         return {"ok": True, "removed": len(removed)}
+
+
+def bridge_function_names() -> tuple[str, ...]:
+    """The Bridge API (section 4.8): every ``@bridge_method`` method of :class:`Api`."""
+    return tuple(
+        sorted(name for name, value in vars(Api).items() if getattr(value, "_bridge_endpoint", False))
+    )
+
+
+def expose_bridge(window: Any, api: Api) -> None:
+    """Give the page exactly the Bridge API and nothing else (security rule 12f).
+
+    ``api`` is deliberately NOT passed to pywebview as ``js_api``.  For a
+    js_api object pywebview walks every attribute it can reach and exposes
+    what it finds -- here that includes the window, the unlocked vault stores
+    and the Drive token store -- and it dispatches any dotted name the page
+    sends, underscores included.  Walking the native window also froze the
+    app on Windows before the page had loaded.  ``window.expose`` registers
+    plain functions by exact name, and ``api`` is only reachable from inside
+    them.
+    """
+    window.expose(*(_endpoint(api, name) for name in bridge_function_names()))
+
+
+def _endpoint(api: Api, name: str) -> Callable[..., Any]:
+    """A plain function named ``name`` that forwards to ``api.<name>``."""
+    method = getattr(api, name)
+
+    def endpoint(*args: Any) -> Any:
+        return method(*args)
+
+    endpoint.__name__ = endpoint.__qualname__ = name
+    return endpoint

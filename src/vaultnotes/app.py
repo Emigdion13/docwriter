@@ -11,7 +11,7 @@ from pathlib import Path
 import webview
 from filelock import FileLock, Timeout
 
-from vaultnotes.api import Api
+from vaultnotes.api import Api, expose_bridge
 from vaultnotes.config import get_app_dir, get_config
 
 # Directory that "npm run build" fills (frontend/vite.config.js -> build.outDir).
@@ -61,6 +61,8 @@ def main(dev: bool = False) -> None:
         config = get_config()
         api = Api(config=config)
 
+        # No js_api here: expose_bridge() hands the page only the Bridge API
+        # functions (see its docstring for why passing the Api object is unsafe).
         window = webview.create_window(
             "VaultNotes",
             url=_frontend_target(dev),
@@ -68,8 +70,8 @@ def main(dev: bool = False) -> None:
             height=800,
             min_size=(1000, 640),
             background_color="#06070d",
-            js_api=api,
         )
+        expose_bridge(window, api)
         api.set_window(window)
         try:
             webview.start(debug=dev, private_mode=True)
