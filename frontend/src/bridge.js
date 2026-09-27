@@ -577,6 +577,13 @@ export const bridge = {
     };
   },
 
+  /** Tells Python the page has saved everything and the window may close. */
+  async ready_to_close() {
+    const api = await waitForBridge();
+    if (api?.ready_to_close) return await api.ready_to_close();
+    return { ok: true };
+  },
+
   async update_settings(changes) {
     const api = await waitForBridge();
     if (api?.update_settings) return await api.update_settings(changes);

@@ -22,6 +22,7 @@ The rules that matter here:
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import threading
 import time
@@ -359,12 +360,24 @@ class GoogleDriveClient:
         )
         return str(created["id"])
 
-    def upload(self, name: str, parent_id: str, path: Path) -> str:
-        """``files().create`` with a ``MediaFileUpload`` (section 8.2)."""
-        from googleapiclient.http import MediaFileUpload  # noqa: PLC0415
+    @staticmethod
+    def _media(path: Path) -> Any:
+        """The file's bytes, read up front.
 
+        A ``MediaFileUpload`` keeps the note open for the whole upload, and on
+        Windows an open file cannot be replaced -- so every save of that note
+        failed with "Access is denied" until the upload finished.
+        """
+        from googleapiclient.http import MediaIoBaseUpload  # noqa: PLC0415
+
+        return MediaIoBaseUpload(
+            io.BytesIO(path.read_bytes()), mimetype="application/octet-stream", resumable=False
+        )
+
+    def upload(self, name: str, parent_id: str, path: Path) -> str:
+        """``files().create`` with the file's bytes (section 8.2)."""
         body: dict[str, Any] = {"name": name, "parents": [parent_id]}
-        media = MediaFileUpload(str(path), mimetype="application/octet-stream", resumable=False)
+        media = self._media(path)
         created = (
             self.service.files()
             .create(body=body, media_body=media, fields="id", supportsAllDrives=True)
@@ -374,9 +387,7 @@ class GoogleDriveClient:
 
     def replace(self, file_id: str, path: Path) -> None:
         """``files().update(fileId=..., media_body=...)`` (section 8.2)."""
-        from googleapiclient.http import MediaFileUpload  # noqa: PLC0415
-
-        media = MediaFileUpload(str(path), mimetype="application/octet-stream", resumable=False)
+        media = self._media(path)
         try:
             self.service.files().update(fileId=file_id, media_body=media, supportsAllDrives=True).execute()
         except Exception as exc:  # noqa: BLE001 - only 404 is reinterpreted
@@ -646,6 +657,17 @@ def sync_files(
 # ----------------------------------------------------------------------
 # Restore
 # ----------------------------------------------------------------------
+def _safe_drive_name(name: object) -> bool:
+    """Whether a Drive file or folder name is safe to use as one path part."""
+    return (
+        isinstance(name, str)
+        and name not in {"", ".", ".."}
+        and not any(char in name for char in '/\\:')
+        and not any(ord(char) < 32 for char in name)
+        and name == name.rstrip(" .")
+    )
+
+
 def restore(
     client: DriveApi,
     target_dir: Path | str,
@@ -672,11 +694,17 @@ def restore(
     result.drive_folder_id = root_id
 
     collected: list[tuple[str, str]] = []
+    unsafe: list[str] = []
 
     def walk(folder_id: str, prefix: str) -> None:
         for child in client.list_children(folder_id):
             name = child.get("name", "")
             key = f"{prefix}{name}"
+            if not _safe_drive_name(name):
+                # Drive allows "..", "/" and "\\" in names; followed blindly, a
+                # renamed file could be written over live notes elsewhere.
+                unsafe.append(key)
+                continue
             if child.get("mimeType") == GoogleDriveClient.FOLDER_MIME:
                 walk(child["id"], f"{key}/")
             elif should_backup(name):
@@ -688,6 +716,9 @@ def restore(
         if progress is not None:
             progress(index - 1, total, _label(kind, index, total))
         final = dest / Path(key)
+        if not final.resolve().is_relative_to(dest.resolve()):
+            unsafe.append(key)
+            continue
         # Written under a staging name and renamed, so a half downloaded file
         # is never mistaken for a note (and never picked up by a backup).
         staging = final.with_name(final.name + ".vnrestore")
@@ -705,6 +736,10 @@ def restore(
             if len(result.errors) < MAX_REPORTED_ERRORS:
                 result.errors.append(f"{key} could not be downloaded")
 
+    for key in unsafe:
+        result.failed += 1
+        if len(result.errors) < MAX_REPORTED_ERRORS:
+            result.errors.append(f"{key!r} was skipped: its name could point outside the restore folder")
     result.scanned = total
     result.finished = _now_iso()
     result.ok = result.failed == 0

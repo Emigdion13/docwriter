@@ -348,6 +348,9 @@ The frontend calls Python with `await window.pywebview.api.<name>(...)`, after t
 - Every function returns plain JSON data.
 - Errors come back as `{"error": "<code>", "message": "<text to show the user>"}`. They never crash the app.
 - **Keep these names.** In M1, `bridge.js` fakes them with sample data, so M2 can switch to the real ones without changing the UI.
+- **How they reach the page:** `app.py` registers exactly the `@bridge_method` functions with `window.expose(...)`. **Never pass the `Api` object as `js_api`.** pywebview would then expose, and let the page call, everything reachable from it (the window, the vault stores, the Drive token store), and walking the native window froze the app at start.
+- **Calls run one at a time** (`CallLock`), because pywebview runs each call on its own thread. A call that waits on the user (a file dialog, the Google sign-in) releases the lock while it waits.
+- **Paths never come from the page.** Parameters such as `dest_path` or `key_paths` exist for tests only; the exposed functions refuse them.
 
 | Function | Returns |
 |---|---|
@@ -365,6 +368,7 @@ The frontend calls Python with `await window.pywebview.api.<name>(...)`, after t
 | `unlock_vault(space_id)` | Uses the remembered key path, or Python opens the file picker itself. Returns `{ok, count}`, or an error code: `key_not_found`, `wrong_vault`, `wrong_key` or `damaged` |
 | `lock_vault(space_id)`, `lock_all()` | locks and clears memory |
 | `touch()` | `{locks_at}`. The frontend calls this on keyboard/mouse activity (at most every 15 s) to reset auto-lock |
+| `ready_to_close()` | `{ok}`. When the window is closing, `app.py` asks the page to save (`window.vn.flushBeforeClose()`); the page calls this when done, then the window closes |
 | `open_external(url)` | opens http/https/mailto in the browser and ignores anything else |
 | `get_settings()`, `update_settings(changes)` | settings |
 | `backup_now()`, `connect_drive()`, `disconnect_drive()`, `restore_from_drive()` | backup (M8) |

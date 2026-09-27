@@ -21,3 +21,6 @@ packaging/vaultnotes.ico
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# PyInstaller writes this spec file on every build (build.bat passes all options)
+VaultNotes.spec

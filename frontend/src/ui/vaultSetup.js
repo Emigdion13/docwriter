@@ -42,8 +42,9 @@ export function createVaultSetupDialog({ onSetup, onChooseFolder }) {
           </div>
         </label>
         <p class="setup-pass-note">
-          A passphrase wraps the key file, so a stolen USB stick unlocks nothing
-          (section 4.5).  There is no recovery: the passphrase is not stored.
+          A passphrase protects the key file, so a lost or stolen USB stick
+          unlocks nothing on its own. There is no recovery: the passphrase is
+          not stored anywhere.
         </p>
       </div>
       <ol class="setup-steps">

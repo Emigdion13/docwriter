@@ -14,7 +14,9 @@ plan).  Two rules shape this module:
 from __future__ import annotations
 
 import functools
+import inspect
 import sys
+import threading
 import time
 import urllib.parse
 import uuid
@@ -25,6 +27,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from vaultnotes.autolock import AutoLock
+from vaultnotes.calllock import CallLock
 from vaultnotes.backup.gdrive_auth import DriveAuthError, TokenStore, is_connected, sign_in
 from vaultnotes.backup.gdrive_auth import CLIENT_SECRET_FILE as CLIENT_SECRET_NAME
 from vaultnotes.backup.gdrive_backup import (
@@ -113,6 +116,11 @@ def bridge_method(method: Callable[..., Any]) -> Callable[..., Any]:
 
     @functools.wraps(method)
     def wrapper(self: "Api", *args: Any, **kwargs: Any) -> Any:
+        # One call at a time: pywebview runs every call on its own thread.
+        with self._calls:
+            return guarded(self, *args, **kwargs)
+
+    def guarded(self: "Api", *args: Any, **kwargs: Any) -> Any:
         try:
             return method(self, *args, **kwargs)
         except BridgeError as exc:
@@ -142,6 +150,9 @@ def bridge_method(method: Callable[..., Any]) -> Callable[..., Any]:
             sys.stderr.write(f"VaultNotes: {method.__name__} failed: {type(exc).__name__}\n")
             return _error("internal_error", "Something unexpected happened. Your notes were not changed.")
 
+    # Marks the method as part of the Bridge API; expose_bridge() gives the
+    # page these methods and nothing else.
+    wrapper._bridge_endpoint = True  # type: ignore[attr-defined]
     return wrapper
 
 
@@ -161,6 +172,9 @@ class Api:
         drive_store: TokenStore | None = None,
         app_dir: Path | str | None = None,
     ) -> None:
+        self._calls = CallLock()
+        #: Set by :meth:`ready_to_close` once the page saved its last edit.
+        self.page_saved_for_close = threading.Event()
         self.config = config or get_config()
         self.window = window
         #: ``%APPDATA%\\VaultNotes``: settings, manifest, OAuth client file.
@@ -213,13 +227,15 @@ class Api:
 
     def close(self) -> None:
         """Stop the timers, make a final backup if asked to, and clear state."""
+        # Outside the call lock: the backup's own callbacks need it.
         self.backup.finish_on_close()
-        self.autolock.stop()
-        for store in self.vault_stores.values():
-            store.lock()
-        # Decrypted titles must not outlive the vault they came from.
-        for index in self.link_indexes.values():
-            index.clear()
+        with self._calls:
+            self.autolock.stop()
+            for store in self.vault_stores.values():
+                store.lock()
+            # Decrypted titles must not outlive the vault they came from.
+            for index in self.link_indexes.values():
+                index.clear()
 
     def _build_vault_stores(self) -> None:
         """Build providers for the configured vault folders without unlocking."""
@@ -387,7 +403,9 @@ class Api:
         ``<id>.vnote`` names: a damaged encrypted file was never decrypted, so
         there is no title to show and none may be guessed (security rule 5).
         """
-        warnings: list[str] = []
+        # Start-up problems (damaged settings.json, unreachable notes folder)
+        # belong to the app as a whole, not to one vault.
+        warnings: list[str] = list(self.config.warnings) if space_id is None else []
         for name in self.plain_store.skipped_files:
             warnings.append(f"Skipped a note that could not be read: {name}")
         for vault_space in SPACE_DEFINITIONS:
@@ -1113,6 +1131,18 @@ class Api:
                 destination = destination / suggested
         if destination.suffix.lower() != ".md":
             destination = destination.with_name(destination.name + ".md")
+        # Everything in the notes folder is backed up as it is, so an exported
+        # vault note there would reach Google Drive unencrypted.
+        try:
+            inside_notes = destination.resolve().is_relative_to(self.config.notes_root.resolve())
+        except (OSError, ValueError):
+            inside_notes = False
+        if inside_notes:
+            return _error(
+                "export_inside_notes",
+                "Choose a folder outside your VaultNotes notes folder. Files there are backed up "
+                "as they are, so an exported copy would be uploaded unencrypted.",
+            )
         try:
             atomic_write(destination, note.body.encode("utf-8"))
         except OSError as exc:
@@ -1273,21 +1303,33 @@ class Api:
     # ------------------------------------------------------------------
     # Vault creation, native key dialogs, unlock and lock
     # ------------------------------------------------------------------
+    def _file_dialog(self, kind: str, **kwargs: Any) -> Any:
+        """Show a native dialog; ``kind`` is ``"OPEN"``, ``"SAVE"`` or ``"FOLDER"``.
+
+        Other Bridge calls (autosave) keep running while the user decides, so
+        callers must re-check any state they rely on afterwards.
+        """
+        import webview  # type: ignore
+
+        dialogs = getattr(webview, "FileDialog", None)  # pywebview 5+
+        dialog_type = getattr(dialogs, kind, None) if dialogs is not None else None
+        if dialog_type is None:
+            dialog_type = getattr(webview, f"{kind}_DIALOG")
+        with self._calls.released():
+            return self.window.create_file_dialog(dialog_type, **kwargs)
+
     def _choose_file(self, save: bool, suggested_name: str) -> Path | None:
         """Open a native key-file dialog, never a browser file input."""
         if self.window is None:
             return None
         try:
-            import webview  # type: ignore
-
-            dialog_type = webview.SAVE_DIALOG if save else webview.OPEN_DIALOG
             kwargs: dict[str, Any] = {
                 "allow_multiple": False,
                 "file_types": ("VaultNotes key (*.vnkey)", "*.vnkey"),
             }
             if save:
                 kwargs["save_filename"] = suggested_name
-            selected = self.window.create_file_dialog(dialog_type, **kwargs)
+            selected = self._file_dialog("SAVE" if save else "OPEN", **kwargs)
             if isinstance(selected, (list, tuple)):
                 selected = selected[0] if selected else None
             if not selected:
@@ -1303,10 +1345,8 @@ class Api:
         if self.window is None:
             return []
         try:
-            import webview  # type: ignore
-
-            selected = self.window.create_file_dialog(
-                webview.OPEN_DIALOG,
+            selected = self._file_dialog(
+                "OPEN",
                 allow_multiple=True,
                 file_types=("Markdown (*.md)", "*.md"),
             )
@@ -1323,10 +1363,8 @@ class Api:
         if self.window is None:
             return None
         try:
-            import webview  # type: ignore
-
-            selected = self.window.create_file_dialog(
-                webview.SAVE_DIALOG,
+            selected = self._file_dialog(
+                "SAVE",
                 allow_multiple=False,
                 file_types=("Markdown (*.md)", "*.md"),
                 save_filename=suggested_name,
@@ -1344,12 +1382,7 @@ class Api:
         if self.window is None:
             return None
         try:
-            import webview  # type: ignore
-
-            dialog_type = getattr(webview, "FOLDER_DIALOG", None)
-            if dialog_type is None:
-                return None
-            selected = self.window.create_file_dialog(dialog_type, allow_multiple=False)
+            selected = self._file_dialog("FOLDER", allow_multiple=False)
             if isinstance(selected, (list, tuple)):
                 selected = selected[0] if selected else None
             if not selected:
@@ -1679,11 +1712,21 @@ class Api:
         return {"ok": True, "locked_spaces": self._lock_all(emit=True)}
 
     def _auto_lock_expired(self) -> None:
-        """AutoLock callback; never touches the frontend synchronously."""
-        self._lock_all(emit=True)
+        """AutoLock callback (timer thread): waits for any call in flight, so a
+        vault never locks halfway through a save."""
+        with self._calls:
+            locked = self._lock_all(emit=False)
+        if locked:
+            emit_event(self.window, "vault_locked", {"space_ids": locked})
 
     def _any_vault_unlocked(self) -> bool:
         return any(not store.locked for store in self.vault_stores.values())
+
+    @bridge_method
+    def ready_to_close(self) -> dict[str, bool]:
+        """The page has saved its last edit; app.py may now close the window."""
+        self.page_saved_for_close.set()
+        return {"ok": True}
 
     @bridge_method
     def touch(self) -> dict[str, int | None]:
@@ -1817,6 +1860,15 @@ class Api:
                 "error": "invalid_settings",
                 "message": "Use the folder dialog to change the notes folder.",
             }
+        # Key-file locations likewise come only from the native dialogs
+        # (unlock, setup).  A path from the page could be malformed enough to
+        # stop the next start, or a \\server\share path that every get_state
+        # would then touch.
+        if "vaults" in changes:
+            return {
+                "error": "invalid_settings",
+                "message": "Key files are chosen with the file dialog.",
+            }
 
         candidate_root = self.config.notes_root.resolve()
         entries = changes.get("vaults", self.config.get("vaults", []))
@@ -1899,7 +1951,8 @@ class Api:
 
     def _remember_drive_folder(self, folder_id: str) -> None:
         """Persist the id of the "VaultNotes Backup" folder (section 8.2)."""
-        self.config.update({"backup": {"drive_folder_id": str(folder_id)}})
+        with self._calls:  # backup thread
+            self.config.update({"backup": {"drive_folder_id": str(folder_id)}})
 
     def _drive_connected(self) -> bool:
         """Whether a Google sign-in is stored, without any network call."""
@@ -1924,7 +1977,8 @@ class Api:
         if report.kind == "backup" and report.ok:
             changes["last_backup"] = report.finished or _now_stamp()
         if changes:
-            self.config.update({"backup": changes})
+            with self._calls:  # backup thread
+                self.config.update({"backup": changes})
 
     def _auto_backup_due(self) -> None:
         """Timer callback: back up when the user connected and enabled it."""
@@ -1958,7 +2012,9 @@ class Api:
         connection (security rule 12f).
         """
         try:
-            result = sign_in(self.app_dir, store=self.drive_store)
+            # The browser sign-in can take minutes; keep autosave working.
+            with self._calls.released():
+                result = sign_in(self.app_dir, store=self.drive_store)
         except DriveAuthError as exc:
             return _error(exc.code, exc.message)
         except FileNotFoundError as exc:
@@ -2059,3 +2115,76 @@ class Api:
         except Exception as exc:  # noqa: BLE001
             return _error("network", f"The cleanup stopped early ({type(exc).__name__}).")
         return {"ok": True, "removed": len(removed)}
+
+
+def bridge_function_names() -> tuple[str, ...]:
+    """The Bridge API (section 4.8): every ``@bridge_method`` method of :class:`Api`."""
+    return tuple(
+        sorted(name for name, value in vars(Api).items() if getattr(value, "_bridge_endpoint", False))
+    )
+
+
+def expose_bridge(window: Any, api: Api) -> None:
+    """Give the page exactly the Bridge API and nothing else (security rule 12f).
+
+    ``api`` is deliberately NOT passed to pywebview as ``js_api``.  For a
+    js_api object pywebview walks every attribute it can reach and exposes
+    what it finds -- here that includes the window, the unlocked vault stores
+    and the Drive token store -- and it dispatches any dotted name the page
+    sends, underscores included.  Walking the native window also froze the
+    app on Windows before the page had loaded.  ``window.expose`` registers
+    plain functions by exact name, and ``api`` is only reachable from inside
+    them.
+    """
+    window.expose(*(_endpoint(api, name, window) for name in bridge_function_names()))
+
+
+def _origin(url: str) -> tuple[str, str]:
+    parts = urllib.parse.urlsplit(url)
+    return parts.scheme.lower(), parts.netloc.lower()
+
+
+def _page_is_ours(window: Any) -> bool:
+    """Whether the window still shows the app's own page.
+
+    pywebview injects the bridge into whatever page the window navigates to
+    (a link or an .html file dropped on it, say), so every call checks the
+    page's origin against the one the app was started with.
+    """
+    home = getattr(window, "real_url", None)
+    get_url = getattr(window, "get_current_url", None)
+    current = get_url() if callable(get_url) else None
+    if not home or not current:
+        return True  # nothing loaded yet, or a test double
+    return _origin(str(current)) == _origin(str(home))
+
+
+#: Parameters Python fills in from its own native dialogs.  Tests pass real
+#: paths through them; the page must leave them out or null (rule 12f: the
+#: frontend never sends file paths), or it could, say, export a decrypted
+#: vault note to any folder on disk.
+DIALOG_ONLY_PARAMETERS = frozenset(
+    {"folder_path", "key_path", "key_paths", "file_paths", "dest_path", "target_folder"}
+)
+
+
+def _endpoint(api: Api, name: str, window: Any = None) -> Callable[..., Any]:
+    """A plain function named ``name`` that forwards to ``api.<name>``."""
+    method = getattr(api, name)
+    signature = inspect.signature(method)
+    dialog_only = [param for param in signature.parameters if param in DIALOG_ONLY_PARAMETERS]
+
+    def endpoint(*args: Any) -> Any:
+        if window is not None and not _page_is_ours(window):
+            return _error("forbidden", "Only the VaultNotes page can use VaultNotes.")
+        if dialog_only:
+            try:
+                given = signature.bind(*args).arguments
+            except TypeError:
+                return _error("invalid_input", "That input was not accepted.")
+            if any(given.get(param) is not None for param in dialog_only):
+                return _error("invalid_input", "Files and folders are chosen in the file dialog.")
+        return method(*args)
+
+    endpoint.__name__ = endpoint.__qualname__ = name
+    return endpoint

@@ -277,7 +277,8 @@ def load_key_file(path: Path | str, passphrase: str = "") -> VaultKey:
         raise KeyFileError(f"Damaged key file: expected 32-byte key, got {len(key_bytes)} bytes")
 
     return VaultKey(
-        key=key_bytes,
+        # Mutable, like the other two paths, so VaultKey.wipe() can zero it.
+        key=bytearray(key_bytes),
         vault_id=vault_id,
         vault_name=vault_name,
         created=created,

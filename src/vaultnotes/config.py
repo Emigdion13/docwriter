@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -97,10 +98,19 @@ class Config:
             self.settings_file = Path(settings_path).resolve()
 
         self.data: dict[str, Any] = {}
+        #: Problems found while starting (damaged settings, unreachable notes
+        #: folder).  Shown to the user through ``get_state()["warnings"]``.
+        self.warnings: list[str] = []
+        #: The notes folder from settings.json while a fallback is in use:
+        #: saving must keep it, so the real folder is used again once reachable.
+        self._unreachable_root: str | None = None
         self.load()
 
         if auto_init_folders:
-            self.ensure_folders()
+            try:
+                self.ensure_folders()
+            except OSError as exc:
+                self._fall_back_from_unreachable_root(exc)
 
     @property
     def notes_root(self) -> Path:
@@ -114,25 +124,129 @@ class Config:
         return self.notes_root / "plain"
 
     def load(self) -> dict[str, Any]:
-        """Load settings from settings.json or populate with defaults."""
+        """Load settings from settings.json or populate with defaults.
+
+        A file that cannot be parsed is kept under another name rather than
+        overwritten, and each setting with an unusable value falls back to its
+        default on its own, so one bad value never stops the app from opening.
+        """
         if self.settings_file.is_file():
             try:
-                with open(self.settings_file, "r", encoding="utf-8") as f:
-                    loaded = json.load(f)
+                loaded = json.loads(self.settings_file.read_text(encoding="utf-8"))
+                if not isinstance(loaded, dict):
+                    raise ValueError("settings.json does not hold an object")
+            except (OSError, ValueError) as exc:  # JSON and decoding errors are ValueErrors
+                self._set_aside_damaged_settings(exc)
+            else:
                 merged = json.loads(json.dumps(DEFAULT_SETTINGS))
                 self._deep_update(merged, loaded)
                 self.data = merged
+                self._repair()
                 return self.data
-            except Exception:
-                pass
 
         self.data = json.loads(json.dumps(DEFAULT_SETTINGS))
         self.save()
         return self.data
 
+    def _set_aside_damaged_settings(self, exc: Exception) -> None:
+        """Rename an unreadable settings.json so starting fresh loses nothing."""
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        kept = self.settings_file.with_name(f"settings.damaged-{stamp}.json")
+        try:
+            os.replace(self.settings_file, kept)
+        except OSError:
+            kept = self.settings_file
+        self.warnings.append(
+            f"settings.json could not be read ({type(exc).__name__}), so VaultNotes started with "
+            f"default settings. The old file was kept as {kept.name}."
+        )
+
+    def _repair(self) -> None:
+        """Reset any setting whose value has the wrong type or range."""
+        defaults = json.loads(json.dumps(DEFAULT_SETTINGS))
+        reset: list[str] = []
+
+        def number(value: Any, low: float, high: float) -> bool:
+            return isinstance(value, (int, float)) and not isinstance(value, bool) and low <= value <= high
+
+        root = self.data.get("notes_root")
+        if not isinstance(root, str) or not root.strip() or not Path(root.strip()).expanduser().is_absolute():
+            self.data["notes_root"] = defaults["notes_root"]
+            reset.append("notes_root")
+
+        vaults = self.data.get("vaults")
+        good = [
+            entry
+            for entry in (vaults if isinstance(vaults, list) else [])
+            if isinstance(entry, dict)
+            and isinstance(entry.get("name"), str)
+            and isinstance(entry.get("folder"), str)
+            and isinstance(entry.get("key_path", ""), str)
+        ]
+        if not isinstance(vaults, list) or len(good) != len(vaults):
+            reset.append("vaults")
+        names = {entry["name"].casefold() for entry in good}
+        # The two built-in vaults must always be there; the app is built on them.
+        good += [entry for entry in defaults["vaults"] if entry["name"].casefold() not in names]
+        self.data["vaults"] = good
+
+        if not number(self.data.get("autolock_minutes"), 1, 120):
+            self.data["autolock_minutes"] = defaults["autolock_minutes"]
+            reset.append("autolock_minutes")
+
+        for block in ("look", "backup"):
+            if not isinstance(self.data.get(block), dict):
+                self.data[block] = defaults[block]
+                reset.append(block)
+        look, backup = self.data["look"], self.data["backup"]
+        checks = {
+            ("look", "theme"): look.get("theme") in ("nebula", "synthwave", "arctic"),
+            ("look", "effects"): look.get("effects") in ("full", "lite", "off"),
+            ("look", "view_mode"): look.get("view_mode") in ("edit", "split", "preview"),
+            ("look", "editor_font_size"): number(look.get("editor_font_size"), 10, 20),
+            ("backup", "enabled"): isinstance(backup.get("enabled"), bool),
+            ("backup", "interval_minutes"): number(backup.get("interval_minutes"), 5, 1440),
+            ("backup", "drive_folder_id"): backup.get("drive_folder_id") is None
+            or isinstance(backup.get("drive_folder_id"), str),
+            ("backup", "last_backup"): backup.get("last_backup") is None
+            or isinstance(backup.get("last_backup"), str),
+        }
+        for (block, key), ok in checks.items():
+            if not ok:
+                self.data[block][key] = defaults[block][key]
+                reset.append(f"{block}.{key}")
+
+        if reset:
+            self.warnings.append(
+                "Some settings had values VaultNotes could not use and were reset: " + ", ".join(reset) + "."
+            )
+
+    def _fall_back_from_unreachable_root(self, exc: OSError) -> None:
+        """Open with the default folder when the configured one is unreachable.
+
+        The configured folder stays in settings.json (see :meth:`save`), so the
+        next start uses it again once the drive is back.
+        """
+        configured = str(self.data.get("notes_root", ""))
+        fallback = str(get_default_notes_root())
+        if Path(configured).expanduser() == Path(fallback):
+            raise exc
+        self._unreachable_root = configured
+        self.data["notes_root"] = fallback
+        self.ensure_folders()
+        self.warnings.append(
+            f"Your notes folder {configured} could not be opened ({exc.strerror or type(exc).__name__}). "
+            f"VaultNotes opened {fallback} for now. Reconnect the drive and restart, or choose "
+            "another notes folder in Settings."
+        )
+
     def save(self) -> None:
         """Save current configuration to settings.json atomically."""
-        content = json.dumps(self.data, indent=2) + "\n"
+        data = self.data
+        if self._unreachable_root is not None:
+            # Never let a temporary fallback replace the folder the user chose.
+            data = {**self.data, "notes_root": self._unreachable_root}
+        content = json.dumps(data, indent=2) + "\n"
         atomic_write(self.settings_file, content.encode("utf-8"))
 
     def get(self, key: str, default: Any = None) -> Any:
@@ -149,11 +263,18 @@ class Config:
                 raise ValueError("Notes folder must be a folder path")
             if not Path(str(raw).strip()).expanduser().is_absolute():
                 raise ValueError("Notes folder must be an absolute path")
+        previous_root = self.data.get("notes_root")
         self._deep_update(self.data, changes)
         if "notes_root" in changes:
             # Create the folders first: if the disk refuses (permission, full,
             # drive removed) settings.json still names the old, working root.
-            self.ensure_folders()
+            try:
+                self.ensure_folders()
+            except OSError:
+                self.data["notes_root"] = previous_root
+                raise
+            # A folder the user picked replaces any start-up fallback.
+            self._unreachable_root = None
         self.save()
         return self.data
 

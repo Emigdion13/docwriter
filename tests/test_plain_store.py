@@ -151,3 +151,50 @@ def test_not_found_errors(store: PlainStore) -> None:
         store.delete_note("Nonexistent")
     with pytest.raises(FileNotFoundError):
         store.restore_note("Nonexistent")
+
+
+# ----------------------------------------------------------------------
+# Titles that once pointed at the wrong note or broke links
+# ----------------------------------------------------------------------
+def test_a_title_ending_in_md_never_saves_into_another_note(store: PlainStore) -> None:
+    readme = store.create_note("README", "# README\n\nkeep me\n")
+    scratch = store.create_note("Scratch", "scratch\n")
+
+    # "README.md" is the title "README", which is taken.
+    with pytest.raises(FileExistsError):
+        store.rename_note(scratch.id, "README.md")
+    copy = store.create_note("README.md", "a second one\n")
+    assert copy.id == "README (2)"
+    store.save_note(copy.id, "overwritten?\n")
+
+    assert store.read_note(readme.id).body == "# README\n\nkeep me\n"
+    assert sorted(p.name for p in store.root.glob("*.md")) == ["README (2).md", "README.md", "Scratch.md"]
+    # An id is exactly a file stem: "README.md" is not another name for "README".
+    with pytest.raises(FileNotFoundError):
+        store.save_note("README.md", "wrong note\n")
+
+
+def test_link_breaking_characters_are_not_allowed_in_titles() -> None:
+    for title in ("C# basics", "Q&A [draft]", "x^y", "a|b"):
+        cleaned = sanitize_title(title)
+        assert not set(cleaned) & set("#[]^|"), (title, cleaned)
+    assert sanitize_title("todo.MD.md") == "todo"
+
+
+def test_a_case_only_rename_renames_the_file(store: PlainStore) -> None:
+    note = store.create_note("meeting notes", "notes\n")
+    renamed, _ = store.rename_note(note.id, "Meeting Notes")
+    assert renamed.id == "Meeting Notes"
+    assert [p.name for p in store.root.glob("*.md")] == ["Meeting Notes.md"]
+
+
+def test_undo_restores_a_deleted_note_under_its_own_title(store: PlainStore) -> None:
+    old = store.create_note("Plan", "old plan\n")
+    store.delete_note(old.id)
+    new = store.create_note("Plan", "new plan\n")
+    trashed = store.delete_note(new.id)
+
+    assert trashed.id == "Plan", "the newest deletion keeps its name"
+    restored = store.restore_note(trashed.id)
+    assert restored.id == "Plan"
+    assert store.read_note("Plan").body == "new plan\n"

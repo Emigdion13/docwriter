@@ -249,7 +249,7 @@ def test_editing_one_note_uploads_only_that_note(notes_root: Path, manifest: Bac
     sync_files(notes_root, manifest, drive)
     drive.calls.clear()
 
-    (notes_root / "plain" / "Shopping list.md").write_text("# Shopping list\n- tea\n", encoding="utf-8")
+    (notes_root / "plain" / "Shopping list.md").write_text("# Shopping list\n- tea\n", encoding="utf-8", newline="\n")
     report = sync_files(notes_root, manifest, drive)
 
     assert (report.updated, report.uploaded, report.skipped) == (1, 0, 6)
@@ -308,7 +308,7 @@ def test_a_drive_file_that_vanishes_is_recreated_when_the_note_next_changes(
     unchanged = sync_files(notes_root, manifest, drive)
     assert (unchanged.updated, unchanged.uploaded) == (0, 0), "no local change, no call"
 
-    (notes_root / "plain" / "Home lab.md").write_text("# Home lab\nmoved\n", encoding="utf-8")
+    (notes_root / "plain" / "Home lab.md").write_text("# Home lab\nmoved\n", encoding="utf-8", newline="\n")
     report = sync_files(notes_root, manifest, drive)
     assert report.failed == 0
     assert report.uploaded == 1, "the 404 on update fell back to a create"
@@ -453,6 +453,30 @@ def test_restore_never_downloads_a_key_file(notes_root: Path, manifest: BackupMa
     report = restore(drive, target)
     assert report.restored == 7
     assert list(target.rglob("*.vnkey")) == []
+
+
+def test_restore_never_writes_outside_the_chosen_folder(
+    notes_root: Path, manifest: BackupManifest, tmp_path: Path
+) -> None:
+    """Drive allows "..", "/" and "\\" in names; restore must not follow them."""
+    drive = FakeDrive()
+    sync_files(notes_root, manifest, drive)
+    live_note = notes_root / "plain" / "Shopping list.md"
+    before = live_note.read_bytes()
+    drive.add_raw(f"{BACKUP_FOLDER_NAME}/plain", "..\\..\\escaped.md", b"escaped")
+    drive.add_raw(f"{BACKUP_FOLDER_NAME}/plain", "../../escaped.md", b"escaped")
+    dotdot = drive.create_folder("..", drive.path_of(BACKUP_FOLDER_NAME)["id"])
+    drive._add(dotdot, "sneaky.md", "", b"escaped")
+
+    target = tmp_path / "restore-here"
+    report = restore(drive, target)
+
+    assert report.restored == 7, "the genuine files still come back"
+    assert report.failed == 3 and not report.ok
+    assert len(report.errors) == 3
+    assert not list(tmp_path.glob("escaped.md")) and not (tmp_path / "sneaky.md").exists()
+    assert all(path.resolve().is_relative_to(target.resolve()) for path in target.rglob("*"))
+    assert live_note.read_bytes() == before
 
 
 def test_restore_without_a_backup_folder_says_so(manifest: BackupManifest, tmp_path: Path) -> None:

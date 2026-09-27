@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 
@@ -20,9 +21,13 @@ def atomic_write(path: Path | str, data: bytes | str, encoding: str = "utf-8") -
     else:
         payload = data
 
-    tmp_path = dest.with_name(f"{dest.name}.tmp")
+    # A unique temp name per write: two saves of one note at the same moment
+    # must never share (or delete) each other's temp file.  It still ends in
+    # ".tmp", which the note listing and the Drive backup both skip.
+    fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=f".{dest.name}.", suffix=".tmp")
+    tmp_path = Path(tmp_name)
     try:
-        with open(tmp_path, "wb") as f:
+        with os.fdopen(fd, "wb") as f:
             f.write(payload)
             f.flush()
             os.fsync(f.fileno())
@@ -32,9 +37,8 @@ def atomic_write(path: Path | str, data: bytes | str, encoding: str = "utf-8") -
         # saving must not leave a half-written .tmp file behind either (M7).
         # The target file is untouched in every case, so the previous version
         # of the note survives.
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
         raise
