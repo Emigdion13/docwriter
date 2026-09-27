@@ -57,12 +57,15 @@ if errorlevel 1 goto :fail
 
 echo.
 echo [4/4]  VaultNotes.exe
+REM  --paths src lets PyInstaller find the vaultnotes package: run.py only adds
+REM  src\ to sys.path at run time, which PyInstaller cannot see, so without it
+REM  the app is built without its own code.
 REM  --add-data ships the built frontend inside the app, where vaultnotes.app
 REM  looks for it.  --collect-all webview is needed because pywebview picks its
 REM  GUI backend (EdgeChromium on Windows) at run time, which PyInstaller cannot
 REM  see by following imports; bottle and proxy_tools are that backend's own
 REM  runtime dependencies.
-"%PY%" -m PyInstaller --noconfirm --clean --windowed --onedir --name VaultNotes --add-data "src/vaultnotes/web;vaultnotes/web" --icon packaging\vaultnotes.ico --collect-all webview --hidden-import bottle --hidden-import proxy_tools run.py
+"%PY%" -m PyInstaller --noconfirm --clean --windowed --onedir --name VaultNotes --paths src --add-data "src/vaultnotes/web;vaultnotes/web" --icon packaging\vaultnotes.ico --collect-all webview --hidden-import bottle --hidden-import proxy_tools run.py
 if errorlevel 1 goto :fail
 
 echo.

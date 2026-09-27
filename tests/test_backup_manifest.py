@@ -249,7 +249,7 @@ def test_editing_one_note_uploads_only_that_note(notes_root: Path, manifest: Bac
     sync_files(notes_root, manifest, drive)
     drive.calls.clear()
 
-    (notes_root / "plain" / "Shopping list.md").write_text("# Shopping list\n- tea\n", encoding="utf-8")
+    (notes_root / "plain" / "Shopping list.md").write_text("# Shopping list\n- tea\n", encoding="utf-8", newline="\n")
     report = sync_files(notes_root, manifest, drive)
 
     assert (report.updated, report.uploaded, report.skipped) == (1, 0, 6)
@@ -308,7 +308,7 @@ def test_a_drive_file_that_vanishes_is_recreated_when_the_note_next_changes(
     unchanged = sync_files(notes_root, manifest, drive)
     assert (unchanged.updated, unchanged.uploaded) == (0, 0), "no local change, no call"
 
-    (notes_root / "plain" / "Home lab.md").write_text("# Home lab\nmoved\n", encoding="utf-8")
+    (notes_root / "plain" / "Home lab.md").write_text("# Home lab\nmoved\n", encoding="utf-8", newline="\n")
     report = sync_files(notes_root, manifest, drive)
     assert report.failed == 0
     assert report.uploaded == 1, "the 404 on update fell back to a create"
