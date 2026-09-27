@@ -528,6 +528,7 @@ BRIDGE_SURFACE = [
     "lock_vault",
     "lock_all",
     "touch",
+    "ready_to_close",
     "open_external",
     "get_settings",
     "update_settings",

@@ -39,9 +39,10 @@ export default defineConfig({
   base: "./",
   plugins: [devOnlyCsp()],
   server: {
-    host: "0.0.0.0",
+    // This machine only: in --dev the app window trusts whatever answers here.
+    host: "127.0.0.1",
     port: 5173,
-    allowedHosts: true,
+    strictPort: true,
   },
   build: {
     outDir: "../src/vaultnotes/web",

@@ -208,6 +208,12 @@ async function refreshPlainTitles(space) {
 async function openLinkTarget(title, { space = '', heading = '' } = {}) {
   const current = getActiveSpace();
   if (!current) return;
+  // The only cross-space link is [[Plain:Title]] from a vault note (rule 11).
+  // A hand-written "#vn-open/encrypted/..." in a Plain note goes nowhere.
+  if (space && space !== current.id && !(space === 'plain' && current.kind === 'vault')) {
+    toast('Links only lead to notes in the same space.', { icon: 'alert' });
+    return;
+  }
   const spaceId = space || current.id;
   const target = state.spaces.find(s => s.id === spaceId);
   if (!target) {
@@ -396,24 +402,76 @@ async function refreshNoteList(animate = false) {
    Space & Note Navigation
    ================================================================= */
 
-async function flushSave() {
-  if (saveTimer && state.currentNote && !getActiveSpace()?.locked) {
-    clearTimeout(saveTimer);
-    saveTimer = null;
-    const body = getEditorContent();
-    setSavingState(true);
-    const res = await bridge.save_note(state.currentSpaceId, state.currentNote.id, body);
-    if (res?.error) {
-      reportSaveError(res);
-      return;
-    }
-    setSavingState(false);
-    state.currentNote.modified = res.modified;
+/* Autosave.  An edit is remembered together with the note it belongs to, so
+   a save that runs after the user switched notes still goes to the right one.
+   Saves are sent one at a time, in order, and a failed save stays pending. */
+let pendingSave = null;          // { spaceId, noteId, body }
+let saveQueue = Promise.resolve(true);
+
+function queueEdit(body) {
+  if (!state.currentNote) return;
+  pendingSave = { spaceId: state.currentSpaceId, noteId: state.currentNote.id, body };
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => saveNow({ refreshList: true }), 1000);
+}
+
+function isShowing(job) {
+  return !!state.currentNote && state.currentSpaceId === job.spaceId && state.currentNote.id === job.noteId;
+}
+
+/** Sends the pending edit (if any) after the saves already queued. */
+function saveNow({ refreshList = false } = {}) {
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  const job = pendingSave;
+  if (!job) return saveQueue;
+  pendingSave = null;
+  saveQueue = saveQueue.then(() => sendSave(job, refreshList));
+  return saveQueue;
+}
+
+async function sendSave(job, refreshList) {
+  setSavingState(true);
+  let res;
+  try {
+    res = await bridge.save_note(job.spaceId, job.noteId, job.body);
+  } catch (err) {
+    res = { error: 'internal_error', message: 'The note could not be saved. Your text is still in the editor.' };
   }
+  if (res?.error) {
+    // Keep the edit for the next attempt, unless a newer one replaced it.
+    if (!pendingSave) pendingSave = job;
+    reportSaveError(res);
+    return false;
+  }
+  if (!pendingSave) setSavingState(false);
+  if (isShowing(job)) {
+    state.currentNote.modified = res.modified;
+    const meta = document.getElementById('meta');
+    if (meta) meta.textContent = `Edited ${res.modified} · ${wordCount(job.body)} words`;
+    if (refreshList) {
+      const notes = asList(await bridge.list_notes(job.spaceId, document.getElementById('search')?.value || '', state.sort));
+      if (isShowing(job)) {
+        state.currentNotes = notes;
+        renderNotes(getActiveSpace(), notes, state.currentNote.id, false, { sort: state.sort });
+      }
+    }
+  }
+  return true;
+}
+
+/**
+ * Saves everything before the editor shows something else (another note, a
+ * locked vault, the trash).  Returns false when the text could not be saved:
+ * the caller must then stay where it is, so the text is not thrown away.
+ */
+async function flushSave() {
+  const ok = await saveNow();
+  return ok && !pendingSave;
 }
 
 async function selectSpace(spaceId, targetNoteId = null, animate = true) {
-  await flushSave();
+  if (!(await flushSave())) return;
   const prevSpaceId = state.currentSpaceId;
   state.currentSpaceId = spaceId;
   state.trashMode = false;
@@ -456,7 +514,7 @@ async function selectSpace(spaceId, targetNoteId = null, animate = true) {
 }
 
 async function openNote(noteId) {
-  await flushSave();
+  if (!(await flushSave())) return;
   state.trashMode = false;
   state.currentNoteId = noteId;
   const space = getActiveSpace();
@@ -512,7 +570,14 @@ function renderWorkspace() {
   // Crumb
   const crumb = document.getElementById('crumb');
   if (crumb) {
-    crumb.innerHTML = `<span class="crumb-dot"></span><span>${space.name}</span><span class="sep">/</span><span>${note.title}</span>`;
+    // Built with textContent: titles never go through innerHTML (rule 12a).
+    const part = (text, className = '') => {
+      const span = document.createElement('span');
+      if (className) span.className = className;
+      span.textContent = text;
+      return span;
+    };
+    crumb.replaceChildren(part('', 'crumb-dot'), part(space.name), part('/', 'sep'), part(note.title));
   }
 
   // Title input
@@ -543,7 +608,7 @@ function renderWorkspace() {
    ================================================================= */
 
 async function createNote(initialTitle = 'Untitled') {
-  await flushSave();
+  if (!(await flushSave())) return;
   const space = getActiveSpace();
   if (space.locked) {
     toast(`Unlock ${space.name} first`, { icon: 'lock' });
@@ -635,7 +700,7 @@ async function deleteNote() {
   const note = state.currentNote;
   if (!note || space.locked) return;
 
-  await flushSave();
+  if (!(await flushSave())) return;
 
   const res = await bridge.delete_note(space.id, note.id);
   if (res.error) {
@@ -692,7 +757,7 @@ async function refreshTrash() {
 async function toggleTrashMode() {
   const space = getActiveSpace();
   if (!space || space.locked) return;
-  await flushSave();
+  if (!(await flushSave())) return;
   state.trashMode = !state.trashMode;
   if (state.trashMode) {
     await refreshTrash();
@@ -776,7 +841,7 @@ async function moveCurrentNote() {
   const space = getActiveSpace();
   const note = state.currentNote;
   if (!note || space.locked || state.trashMode) return;
-  await flushSave();
+  if (!(await flushSave())) return;
 
   // Counted from the link index: only links that actually resolve in this
   // space break, which is the same number Python reports after the move.
@@ -859,7 +924,7 @@ async function exportCurrentNote() {
   const space = getActiveSpace();
   const note = state.currentNote;
   if (!note || space.locked || state.trashMode) return;
-  await flushSave();
+  if (!(await flushSave())) return;
   if (space.kind === 'vault') {
     const ok = await confirmAction({
       title: 'Export unencrypted copy?',
@@ -894,26 +959,8 @@ function handleEditorChange(newBody) {
     renderBacklinks(backlinksContainer, state.currentNote.backlinks, state.currentNote.title, (id) => openNote(id));
   }, 300);
 
-  // Auto-save debounce (1s)
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(async () => {
-    if (!state.currentNote) return;
-    const res = await bridge.save_note(state.currentSpaceId, state.currentNote.id, newBody);
-    if (res?.error) {
-      // Keep the text on screen; the next keystroke retries the save.
-      reportSaveError(res);
-      return;
-    }
-    setSavingState(false);
-    state.currentNote.modified = res.modified;
-    const meta = document.getElementById('meta');
-    if (meta) {
-      meta.textContent = `Edited ${res.modified} · ${wordCount(newBody)} words`;
-    }
-    const notes = asList(await bridge.list_notes(state.currentSpaceId, document.getElementById('search')?.value || '', state.sort));
-    state.currentNotes = notes;
-    renderNotes(getActiveSpace(), notes, state.currentNote.id, false, { sort: state.sort });
-  }, 1000);
+  // Auto-save 1 s after typing stops, to the note this text belongs to.
+  queueEdit(newBody);
 }
 
 /* =================================================================
@@ -978,6 +1025,12 @@ async function lockAllVaults(auto = false) {
     if (!auto) toast('All vaults are already locked', { icon: 'lock' });
     return;
   }
+  // Save the last keystrokes before the key is dropped.  A manual lock waits
+  // for a failed save to be sorted out; the auto-lock locks regardless.
+  if (!(await flushSave()) && !auto) {
+    toast('Your last change could not be saved, so the vaults stay unlocked for now.', { icon: 'alert' });
+    return;
+  }
 
   const active = getActiveSpace();
   if (active.kind === 'vault' && !active.locked && !isCalm()) {
@@ -1019,6 +1072,12 @@ async function lockAllVaults(auto = false) {
 function handleVaultLockedEvent(data = {}) {
   const ids = data.space_ids || (data.space_id ? [data.space_id] : []);
   if (!ids.length) return;
+  // A locked vault can take no more saves; its editor is about to be cleared.
+  if (pendingSave && ids.includes(pendingSave.spaceId)) {
+    pendingSave = null;
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
   // Titles of a locked vault must disappear from the suggestions at once.
   refreshTitles();
   ids.forEach(id => {
@@ -1285,6 +1344,10 @@ async function getPaletteCommands() {
         icon: 'lock',
         colorVar: s.colorVar,
         run: async () => {
+          if (!(await flushSave())) {
+            toast(`Your last change could not be saved, so ${s.name} stays unlocked for now.`, { icon: 'alert' });
+            return;
+          }
           await bridge.lock_vault(s.id);
           handleVaultLockedEvent({ space_id: s.id });
           toast(`Locked ${s.name}. Decrypted notes removed from memory.`, { icon: 'lock' });
@@ -1352,25 +1415,8 @@ function setupShortcuts() {
     } else if (mod && key === 's') {
       e.preventDefault();
       if (state.currentNote && !getActiveSpace().locked) {
-        clearTimeout(saveTimer);
-        saveTimer = null;
-        const body = getEditorContent();
-        setSavingState(true);
-        const res = await bridge.save_note(state.currentSpaceId, state.currentNote.id, body);
-        if (res?.error) {
-          reportSaveError(res);
-        } else {
-          setSavingState(false);
-          state.currentNote.modified = res.modified;
-          const meta = document.getElementById('meta');
-          if (meta) {
-            meta.textContent = `Edited ${res.modified} · ${wordCount(body)} words`;
-          }
-          const notes = asList(await bridge.list_notes(state.currentSpaceId, document.getElementById('search')?.value || '', state.sort));
-          state.currentNotes = notes;
-          renderNotes(getActiveSpace(), notes, state.currentNote.id, false, { sort: state.sort });
-          toast('Saved', { icon: 'check' });
-        }
+        queueEdit(getEditorContent());
+        if (await saveNow({ refreshList: true })) toast('Saved', { icon: 'check' });
       }
     } else if (mod && key === 'f') {
       e.preventDefault();
@@ -1462,6 +1508,27 @@ function startAutoLockTimer() {
 /* =================================================================
    Initialization
    ================================================================= */
+
+/* Closing the window: app.py holds the close back, calls this, and closes once
+   ready_to_close() arrives (or after a few seconds), so the last keystrokes
+   are saved instead of lost. */
+window.vn.flushBeforeClose = async () => {
+  try {
+    await flushSave();
+  } finally {
+    await bridge.ready_to_close();
+  }
+};
+
+/* A link or file dropped on the window would navigate it away from the app.
+   Python refuses Bridge calls from any other page, and nothing is dropped. */
+['dragover', 'drop'].forEach(type => {
+  window.addEventListener(type, (event) => {
+    // Dragged text may still go into the editor; files never go anywhere.
+    const files = Array.from(event.dataTransfer?.types || []).includes('Files');
+    if (files || !event.target?.closest?.('.cm-editor')) event.preventDefault();
+  });
+});
 
 async function init() {
   initToasts();
@@ -1667,7 +1734,9 @@ async function init() {
       toast('Settings saved', { icon: 'check' });
     },
     onChooseFolder: async () => {
-      await flushSave();
+      if (!(await flushSave())) {
+        return { error: 'unsaved', message: 'Your last change could not be saved yet, so the folder was not changed.' };
+      }
       const result = await bridge.choose_notes_folder();
       if (result?.error) {
         if (result.error !== 'cancelled') toast(result.message, { icon: 'folder' });
@@ -1678,6 +1747,7 @@ async function init() {
       // Reset the workspace and start over in Plain.
       clearTimeout(saveTimer);
       saveTimer = null;
+      pendingSave = null;
       state.currentNoteId = null;
       state.currentNote = null;
       state.currentNotes = [];

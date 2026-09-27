@@ -16,6 +16,7 @@ from __future__ import annotations
 import functools
 import inspect
 import sys
+import threading
 import time
 import urllib.parse
 import uuid
@@ -172,6 +173,8 @@ class Api:
         app_dir: Path | str | None = None,
     ) -> None:
         self._calls = CallLock()
+        #: Set by :meth:`ready_to_close` once the page saved its last edit.
+        self.page_saved_for_close = threading.Event()
         self.config = config or get_config()
         self.window = window
         #: ``%APPDATA%\\VaultNotes``: settings, manifest, OAuth client file.
@@ -1720,6 +1723,12 @@ class Api:
         return any(not store.locked for store in self.vault_stores.values())
 
     @bridge_method
+    def ready_to_close(self) -> dict[str, bool]:
+        """The page has saved its last edit; app.py may now close the window."""
+        self.page_saved_for_close.set()
+        return {"ok": True}
+
+    @bridge_method
     def touch(self) -> dict[str, int | None]:
         """Reset the Python timer after user activity."""
         if not self._any_vault_unlocked():
@@ -2127,7 +2136,27 @@ def expose_bridge(window: Any, api: Api) -> None:
     plain functions by exact name, and ``api`` is only reachable from inside
     them.
     """
-    window.expose(*(_endpoint(api, name) for name in bridge_function_names()))
+    window.expose(*(_endpoint(api, name, window) for name in bridge_function_names()))
+
+
+def _origin(url: str) -> tuple[str, str]:
+    parts = urllib.parse.urlsplit(url)
+    return parts.scheme.lower(), parts.netloc.lower()
+
+
+def _page_is_ours(window: Any) -> bool:
+    """Whether the window still shows the app's own page.
+
+    pywebview injects the bridge into whatever page the window navigates to
+    (a link or an .html file dropped on it, say), so every call checks the
+    page's origin against the one the app was started with.
+    """
+    home = getattr(window, "real_url", None)
+    get_url = getattr(window, "get_current_url", None)
+    current = get_url() if callable(get_url) else None
+    if not home or not current:
+        return True  # nothing loaded yet, or a test double
+    return _origin(str(current)) == _origin(str(home))
 
 
 #: Parameters Python fills in from its own native dialogs.  Tests pass real
@@ -2139,13 +2168,15 @@ DIALOG_ONLY_PARAMETERS = frozenset(
 )
 
 
-def _endpoint(api: Api, name: str) -> Callable[..., Any]:
+def _endpoint(api: Api, name: str, window: Any = None) -> Callable[..., Any]:
     """A plain function named ``name`` that forwards to ``api.<name>``."""
     method = getattr(api, name)
     signature = inspect.signature(method)
     dialog_only = [param for param in signature.parameters if param in DIALOG_ONLY_PARAMETERS]
 
     def endpoint(*args: Any) -> Any:
+        if window is not None and not _page_is_ours(window):
+            return _error("forbidden", "Only the VaultNotes page can use VaultNotes.")
         if dialog_only:
             try:
                 given = signature.bind(*args).arguments

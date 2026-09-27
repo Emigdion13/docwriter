@@ -6,7 +6,9 @@ Creates the single pywebview window and wires the Python Bridge API.
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
+from typing import Any
 
 import webview
 from filelock import FileLock, Timeout
@@ -18,7 +20,46 @@ from vaultnotes.config import get_app_dir, get_config
 WEB_DIR = Path(__file__).resolve().parent / "web"
 
 # Where the Vite dev server listens (frontend: "npm run dev").
-DEV_URL = "http://localhost:5173"
+DEV_URL = "http://127.0.0.1:5173"
+
+# How long closing the window waits for the page to save its last edit.
+CLOSE_SAVE_TIMEOUT = 5.0
+
+
+def hold_close_until_saved(window: Any, api: Api) -> None:
+    """Let the page save before the window closes.
+
+    Autosave runs a second after typing stops, so closing the window right
+    after typing used to lose that text.  The first close is held back while
+    the page saves (at most ``CLOSE_SAVE_TIMEOUT`` seconds, so a broken page
+    can never keep the window open), then the window closes for real.
+    """
+    may_close = threading.Event()
+    started = threading.Event()
+
+    def save_then_close() -> None:
+        try:
+            window.evaluate_js(
+                "window.vn && window.vn.flushBeforeClose && (window.vn.flushBeforeClose(), true)"
+            )
+            api.page_saved_for_close.wait(CLOSE_SAVE_TIMEOUT)
+        except Exception:  # noqa: BLE001 - closing must always go ahead
+            pass
+        finally:
+            may_close.set()
+            window.destroy()
+
+    def on_closing() -> bool | None:
+        # Runs on the window's UI thread, which the page needs in order to
+        # answer: never wait here.
+        if may_close.is_set():
+            return None
+        if not started.is_set():
+            started.set()
+            threading.Thread(target=save_then_close, name="VaultNotes-close", daemon=True).start()
+        return False  # not yet
+
+    window.events.closing += on_closing
 
 
 def _frontend_target(dev: bool) -> str:
@@ -72,6 +113,7 @@ def main(dev: bool = False) -> None:
             background_color="#06070d",
         )
         expose_bridge(window, api)
+        hold_close_until_saved(window, api)
         api.set_window(window)
         try:
             webview.start(debug=dev, private_mode=True)

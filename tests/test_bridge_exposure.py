@@ -108,3 +108,65 @@ def test_the_page_cannot_pass_file_paths(api: Api, tmp_path: Path) -> None:
     assert not (tmp_path / "elsewhere").exists()
     # Leaving the path out is what the UI does, and still works.
     assert window.exposed["export_note"]("plain", note_id).get("error") == "cancelled"
+
+
+def test_a_page_the_window_navigated_to_gets_nothing(api: Api) -> None:
+    """pywebview injects the bridge into any page; the calls check the origin."""
+
+    class NavigatingWindow(FakeWindow):
+        real_url = "http://127.0.0.1:51234/index.html"
+        current = "http://127.0.0.1:51234/index.html"
+
+        def get_current_url(self) -> str:
+            return self.current
+
+    window = NavigatingWindow()
+    expose_bridge(window, api)
+    assert "spaces" in window.exposed["get_state"]()
+
+    window.current = "https://evil.example/drop.html"  # e.g. a dropped link
+    assert window.exposed["list_notes"]("plain") == {
+        "error": "forbidden",
+        "message": "Only the VaultNotes page can use VaultNotes.",
+    }
+    window.current = "file:///C:/Users/me/Downloads/page.html"
+    assert window.exposed["get_state"]().get("error") == "forbidden"
+
+
+def test_closing_the_window_waits_for_the_page_to_save(api: Api) -> None:
+    import threading as _threading
+
+    from vaultnotes.app import hold_close_until_saved
+
+    class FakeEvent(list):
+        """pywebview events take handlers with +=."""
+
+        def __iadd__(self, handler):  # type: ignore[override]
+            self.append(handler)
+            return self
+
+    class ClosingWindow:
+        def __init__(self) -> None:
+            class Events:
+                def __init__(self) -> None:
+                    self.closing = FakeEvent()
+
+            self.events = Events()
+            self.destroyed = _threading.Event()
+            self.scripts: list[str] = []
+
+        def evaluate_js(self, script: str) -> None:
+            self.scripts.append(script)
+            api.ready_to_close()  # what the page does after flushSave()
+
+        def destroy(self) -> None:
+            self.destroyed.set()
+
+    window = ClosingWindow()
+    hold_close_until_saved(window, api)
+    (on_closing,) = window.events.closing
+
+    assert on_closing() is False, "the first close waits for the page"
+    assert window.destroyed.wait(timeout=5), "then the window closes"
+    assert "flushBeforeClose" in window.scripts[0]
+    assert on_closing() is None, "the second close goes through"
