@@ -492,7 +492,9 @@ class VaultStore:
         says "Saved".  A failure raises :class:`DamagedVaultError` and records
         the file name; the caller decides what to keep in memory.
         """
-        key = self._require_unlocked()
+        # A copy: lock() zeroes the live buffer in place, and a lock arriving
+        # mid-write must never make this note encrypt under an all-zero key.
+        key = bytes(self._require_unlocked())
         if self.vault_id is None:
             raise VaultNotInitializedError("Vault has not been created")
         payload = self._note_payload(note)
@@ -504,7 +506,7 @@ class VaultStore:
         if not should_verify:
             return
         try:
-            read_back = decrypt_note(bytes(key), self.vault_id, note.id, path.read_bytes())
+            read_back = decrypt_note(key, self.vault_id, note.id, path.read_bytes())
         except Exception as exc:  # noqa: BLE001 - any failure means "not verified"
             self.damaged_files.append(path.name)
             raise DamagedVaultError("The saved file could not be read back") from exc
@@ -591,8 +593,10 @@ class VaultStore:
         except DamagedVaultError:
             # The bytes on disk are not trustworthy, but the newest text is:
             # keep it in memory so the user can retry or copy it out instead of
-            # silently losing the edit (M7).
-            self._notes[clean_id] = updated
+            # silently losing the edit (M7).  Never after a lock, though: a
+            # locked store must hold no decrypted text.
+            if not self.locked:
+                self._notes[clean_id] = updated
             raise
         self._notes[clean_id] = updated
         return _copy_note(updated)

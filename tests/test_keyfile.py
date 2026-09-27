@@ -229,3 +229,14 @@ def test_rewrapping_a_key_keeps_the_vault_working(tmp_path: Path) -> None:
 
     again = load_key_file(path, passphrase=PASSPHRASE)
     assert again.key == first.key
+
+
+def test_a_loaded_key_can_really_be_wiped(tmp_path: Path) -> None:
+    """Rule 7: keys live in a mutable buffer that lock can zero."""
+    path = tmp_path / "wipe.vnkey"
+    generate_key_file(path, "0b6f2c1e-9a4d-4c55-8f0e-2d7c1b9a3e44", "Personal")
+    loaded = load_key_file(path)
+    buffer = loaded.key
+    assert isinstance(buffer, bytearray)
+    loaded.wipe()
+    assert buffer == bytearray(32)

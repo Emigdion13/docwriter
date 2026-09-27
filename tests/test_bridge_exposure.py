@@ -84,3 +84,27 @@ def test_app_never_hands_pywebview_the_api_object() -> None:
     assert calls, "app.py no longer calls webview.create_window"
     for call in calls:
         assert all(keyword.arg != "js_api" for keyword in call.keywords)
+
+
+def test_the_page_cannot_pass_file_paths(api: Api, tmp_path: Path) -> None:
+    """Rule 12f: paths come from Python's own dialogs, never from the page."""
+    window = FakeWindow()
+    expose_bridge(window, api)
+    note_id = api.create_note("plain", "Secret-ish")["id"]
+    outside = tmp_path / "anywhere" / "copy.md"
+
+    calls = [
+        ("export_note", ("plain", note_id, str(outside))),
+        ("import_notes", ("plain", [str(tmp_path / "x.md")])),
+        ("choose_notes_folder", (str(tmp_path / "elsewhere"),)),
+        ("create_vault", ("encrypted", str(tmp_path / "k.vnkey"))),
+        ("initialize_vaults", ({"encrypted": str(tmp_path / "k.vnkey")},)),
+        ("restore_from_drive", (str(tmp_path / "restore"),)),
+    ]
+    for name, args in calls:
+        result = window.exposed[name](*args)
+        assert result.get("error") == "invalid_input", (name, result)
+    assert not outside.exists() and not (tmp_path / "k.vnkey").exists()
+    assert not (tmp_path / "elsewhere").exists()
+    # Leaving the path out is what the UI does, and still works.
+    assert window.exposed["export_note"]("plain", note_id).get("error") == "cancelled"

@@ -984,3 +984,28 @@ def test_key_file_can_be_protected_with_a_passphrase(tmp_path: Path) -> None:
     opened = app.unlock_vault("encrypted", passphrase=passphrase)
     assert opened["ok"] is True and opened["count"] == 1
     assert app.open_note("encrypted", note["id"])["title"] == "Router"
+
+
+# ======================================================================
+# Review fixes
+# ======================================================================
+def test_update_settings_refuses_key_file_locations(api: Api) -> None:
+    result = api.update_settings({"vaults": "x"})
+    assert result.get("error") == "invalid_settings"
+    result = api.update_settings({"vaults": [{"name": "Personal", "folder": "vaults/personal", "key_path": r"\server\share\k.vnkey"}]})
+    assert result.get("error") == "invalid_settings"
+    assert api.config.get_vault_key_path("Personal") == ""
+
+
+def test_export_refuses_the_notes_folder(api_with_vaults: Api) -> None:
+    api = api_with_vaults
+    note_id = api.create_note("encrypted", "Bank stuff")["id"]
+    inside = api.config.notes_root / "vaults" / "encrypted" / "copy.md"
+    result = api.export_note("encrypted", note_id, str(inside))
+    assert result.get("error") == "export_inside_notes"
+    assert not inside.exists()
+
+
+def test_start_up_warnings_reach_the_ui(api: Api) -> None:
+    api.config.warnings.append("settings.json could not be read")
+    assert "settings.json could not be read" in api.get_state()["warnings"]

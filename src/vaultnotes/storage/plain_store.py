@@ -14,6 +14,11 @@ from vaultnotes.storage.atomic import atomic_write
 # Disallowed Windows filename characters
 INVALID_CHARS_RE = re.compile(r'[\\/:*?"<>|]')
 
+# Characters that would break a [[link]] to the note: "#" starts a heading,
+# "|" the shown text, "^" a block reference, and brackets end the link early.
+# Obsidian refuses the same ones in note names.
+LINK_CHARS_RE = re.compile(r"[#^\[\]|]")
+
 # Snippets only ever look at the start of a note, so a huge body stays cheap.
 _SNIPPET_LINE_LIMIT = 60
 
@@ -32,8 +37,13 @@ def sanitize_title(title: str) -> str:
     """
     if not isinstance(title, str):
         raise ValueError("Title must be text")
-    cleaned = INVALID_CHARS_RE.sub("-", title)
+    cleaned = LINK_CHARS_RE.sub("-", INVALID_CHARS_RE.sub("-", title))
     cleaned = cleaned.strip(" .\t\r\n-")
+    # The file name adds ".md" itself: a title "README.md" would become
+    # "README.md.md", and its id "README.md" is also how [[README.md]] names
+    # the note "README".
+    while cleaned.lower().endswith(".md"):
+        cleaned = cleaned[:-3].strip(" .\t\r\n-")
     cleaned = re.sub(r"-+", "-", cleaned)
     if len(cleaned) > MAX_TITLE_LENGTH:
         cleaned = cleaned[:MAX_TITLE_LENGTH].rstrip(" .-")
@@ -112,8 +122,9 @@ class PlainStore:
         """
         if not isinstance(note_id, str):
             raise ValueError("Note id must be text")
-        clean_id = note_id[:-3] if note_id.lower().endswith(".md") else note_id
-        clean_id = clean_id.strip()
+        # An id is exactly a file stem.  Stripping a ".md" here once made the
+        # id "README.md" (file "README.md.md") resolve to the note "README".
+        clean_id = note_id.strip()
         if not clean_id or clean_id in {".", ".."}:
             raise ValueError(f"Invalid note id: {note_id!r}")
         if any(character in clean_id for character in ("/", "\\", ":", "\x00")):
@@ -299,8 +310,10 @@ class PlainStore:
         if updated_body != body:
             atomic_write(old_path, updated_body.encode("utf-8"))
 
-        # Rename to new path
-        if old_path.resolve() != new_path.resolve():
+        # Rename to new path.  Compare names, not resolved paths: on Windows
+        # "meeting notes.md" and "Meeting Notes.md" resolve to the same file,
+        # and a case-only rename must still change the name on disk.
+        if old_path.name != new_path.name:
             old_path.rename(new_path)
 
         stat = new_path.stat()
@@ -325,7 +338,13 @@ class PlainStore:
 
         note = self.read_note(note_id)
 
-        trash_title, dest_path = self._get_unique_path(note.title, self.trash_dir)
+        # The newest deletion keeps its real name, so Undo restores the note
+        # exactly as it was (and its [[links]] still reach it); an older
+        # trashed copy with the same name moves aside instead.
+        trash_title, dest_path = note.title, self.trash_dir / src_path.name
+        if dest_path.exists():
+            _, aside = self._get_unique_path(note.title, self.trash_dir)
+            dest_path.rename(aside)
         shutil.move(str(src_path), str(dest_path))
 
         return Note(
@@ -345,7 +364,11 @@ class PlainStore:
         with open(trash_path, "r", encoding="utf-8", errors="replace") as f:
             body = f.read()
 
-        restored_title, dest_path = self._get_unique_path(trash_path.stem, self.root)
+        # Back under its own name when that is free, unchanged, so links to it
+        # keep working; otherwise the next free "Title (2)".
+        restored_title, dest_path = trash_path.stem, self.root / trash_path.name
+        if dest_path.exists():
+            restored_title, dest_path = self._get_unique_path(trash_path.stem, self.root)
         shutil.move(str(trash_path), str(dest_path))
 
         stat = dest_path.stat()
