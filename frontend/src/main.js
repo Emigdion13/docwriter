@@ -876,20 +876,24 @@ async function moveCurrentNote() {
   if (!note || space.locked || state.trashMode) return;
   if (!(await flushSave())) return;
 
-  // Counted from the link index: only links that actually resolve in this
-  // space break, which is the same number Python reports after the move.
+  // Counted from the link indexes, the same numbers Python reports after the
+  // move: the notes linking here (for a Plain note also the [[Plain:Title]]
+  // links in AI-Notes and unlocked vaults) and the notes this one links to.
+  const linked = await bridge.count_links_to(space.id, note.id);
   const linkInfo = await bridge.note_links(space.id, note.id);
-  const incoming = Array.isArray(linkInfo?.backlinks) ? linkInfo.backlinks.length : 0;
+  const incoming = linked?.count || 0;
   const outgoing = Array.isArray(linkInfo?.outgoing)
     ? linkInfo.outgoing.filter(link => link.resolved).length
     : 0;
+  const lockedVaults = Array.isArray(linked?.locked) ? linked.locked.map(vault => vault.name) : [];
 
   const targetId = await moveDialog?.open({
     spaces: state.spaces,
     currentSpaceId: space.id,
     noteTitle: note.title,
     incomingLinks: incoming,
-    outgoingLinks: outgoing
+    outgoingLinks: outgoing,
+    lockedVaults
   });
   if (!targetId) return;
 

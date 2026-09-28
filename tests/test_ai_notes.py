@@ -115,6 +115,19 @@ def test_a_plain_rename_leaves_ai_notes_own_links_alone(api: Api) -> None:
     assert "[[Plain:Renamed#Plan|theirs]]" in api.open_note("ai", "Finding")["body"]
 
 
+def test_renaming_an_ai_note_leaves_links_to_the_plain_note_alone(api: Api) -> None:
+    write(api, "plain", "Target", "# Target")
+    write(api, "ai", "Target", "# Target")
+    write(api, "ai", "Finding", "[[Target]] is ours, [[Plain:Target]] is the user's.")
+    write(api, "ai", "Session", "Only the user's [[Plain:Target]].")
+
+    # Session links to the Plain note, so it is not a backlink of ours.
+    assert api.count_links_to("ai", "Target") == {"count": 1}
+    assert api.rename_note("ai", "Target", "Ours", True)["links_updated"] == 1
+    assert api.open_note("ai", "Finding")["body"] == "[[Ours]] is ours, [[Plain:Target]] is the user's."
+    assert api.open_note("ai", "Session")["body"] == "Only the user's [[Plain:Target]]."
+
+
 def test_a_note_a_helper_writes_on_disk_shows_up_at_once(api: Api) -> None:
     write(api, "ai", "Findings", "# Findings")
     (api.config.ai_dir / "Written by Claude.md").write_text("Adds to [[Findings]].", encoding="utf-8")

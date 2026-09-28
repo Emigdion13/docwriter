@@ -804,3 +804,76 @@ def test_plain_rename_reaches_unlocked_vaults_and_never_a_locked_one(
     kept = api.open_note("encrypted", sealed["id"])["body"]
     assert kept == "Kept: [[Plain:Home lab]]"
     assert 'href="#vn-missing/plain/Home%20lab"' in api.render_preview("encrypted", kept)
+
+
+def test_a_vault_index_does_not_resolve_links_that_name_plain() -> None:
+    index = LinkIndex("personal")
+    index.build(
+        [
+            note("a" * 32, "Home lab", "The vault's own note of that name."),
+            note("b" * 32, "Rack", "Only [[Plain:Home lab]] and [[Plain:Not in Plain]]."),
+        ]
+    )
+
+    # Not a backlink, an outgoing link or a missing note of this vault...
+    assert index.backlinks("a" * 32) == []
+    assert index.outgoing("b" * 32) == []
+    assert index.missing_targets("b" * 32) == []
+    # ...but still a link of the note, and one a Plain rename can find.
+    assert index.link_count("b" * 32) == 2
+    assert index.sources_linking_out("plain", "Home lab") == ["b" * 32]
+
+    # Inside Plain the prefix names Plain itself, so it is an ordinary link.
+    plain = LinkIndex("plain")
+    plain.build([note("Home lab", "Home lab"), note("Rack", "Rack", "See [[Plain:Home lab]].")])
+    assert plain.backlinks("Home lab") == [{"id": "Rack", "title": "Rack"}]
+
+
+def test_renaming_a_vault_note_leaves_links_to_the_plain_note_alone(api_with_vaults: Api) -> None:
+    api = api_with_vaults
+    write(api, "plain", "Home lab", "# Home lab\n")
+    assert api.unlock_vault("personal")["ok"] is True
+    lab = api.create_note("personal", "Home lab")
+    rack = api.create_note("personal", "Rack")
+    api.save_note("personal", rack["id"], "vault [[Home lab]] and plain [[Plain:Home lab]]")
+    wiring = api.create_note("personal", "Wiring")
+    api.save_note("personal", wiring["id"], "Only [[Plain:Home lab]].")
+
+    # Wiring links to the Plain note, not to the vault's own "Home lab".
+    assert api.count_links_to("personal", lab["id"]) == {"count": 1}
+    assert [item["title"] for item in api.open_note("personal", lab["id"])["backlinks"]] == ["Rack"]
+
+    assert api.rename_note("personal", lab["id"], "Garage", update_links=True)["links_updated"] == 1
+    assert api.open_note("personal", rack["id"])["body"] == "vault [[Garage]] and plain [[Plain:Home lab]]"
+    assert api.open_note("personal", wiring["id"])["body"] == "Only [[Plain:Home lab]]."
+    assert 'href="#vn-open/plain/Home%20lab"' in api.render_preview("personal", "Only [[Plain:Home lab]].")
+    # The vault's graph holds its own links only.
+    assert [(edge["from"], edge["title"]) for edge in api.get_graph("personal")["edges"]] == [
+        (rack["id"], "Garage")
+    ]
+
+
+def test_moving_counts_links_from_other_spaces_and_plain_links_keep_working(api_with_vaults: Api) -> None:
+    api = api_with_vaults
+    write(api, "plain", "Home lab", "# Home lab\n\n[[Helper]] and [[Helper]] again.")
+    write(api, "plain", "Helper", "# Helper\n")
+    write(api, "plain", "Index", "[[Home lab]]")
+    write(api, "ai", "Finding", "[[Plain:Home lab]]")
+    assert api.unlock_vault("encrypted")["ok"] is True
+    sealed = api.create_note("encrypted", "Sealed")
+    api.save_note("encrypted", sealed["id"], "[[Plain:Home lab]]")
+    api.lock_vault("encrypted")
+    assert api.unlock_vault("personal")["ok"] is True
+    rack = api.create_note("personal", "Rack")
+    api.save_note("personal", rack["id"], "[[Plain:Home lab]] and [[Plain:Helper]]")
+
+    # What the move dialog shows: Index, Finding and Rack link here (the locked
+    # vault is not counted), and the note links to one other note, twice.
+    linked = api.count_links_to("plain", "Home lab")
+    assert linked["count"] == 3
+    assert linked["locked"] == [{"space_id": "encrypted", "name": "Encrypted"}]
+    assert api.move_note("plain", "Home lab", "personal")["broken_links"] == 3 + 1
+
+    # Personal now has a "Home lab" of its own, but Rack's [[Plain:…]] links
+    # never meant it, so moving Rack out breaks nothing.
+    assert api.move_note("personal", rack["id"], "plain")["broken_links"] == 0

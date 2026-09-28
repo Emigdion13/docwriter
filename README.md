@@ -282,7 +282,8 @@ Things the spec forbids, so the app does not do them:
   unlocked vault, but never in a locked one: the app does not decrypt a vault to look
   for links (its index exists only in memory while it is unlocked). When it asks
   whether to update links, it names the locked vaults it could not check. Their links
-  keep the old title and show as missing, so unlock those vaults before renaming.
+  keep the old title and show as missing, so unlock those vaults before renaming. The
+  move warning counts a Plain note's links the same way.
 - Backup uploads the whole notes folder on its first run; deleting notes locally does
   not delete them from Drive until you press *Clean up Drive…*.
 - No frameless window (the toolbar stays inside a normal title bar), no tag or pin

@@ -827,8 +827,15 @@ class Api:
 
         links_updated = 0
         if rewrite_links:
+            # Inside Plain, [[Old]] and [[Plain:Old]] both name this note.
+            # Anywhere else [[Plain:Old]] names a Plain note and stays as it is.
             links_updated = self._rewrite_links_to(
-                space, source_ids, old_title, note.title, exclude_id=note.id
+                space,
+                source_ids,
+                old_title,
+                note.title,
+                exclude_id=note.id,
+                spaces=None if space == "plain" else {""},
             )
             if space == "plain":
                 # Out there only [[Plain:Old]] is this note: a bare [[Old]]
@@ -1009,11 +1016,15 @@ class Api:
         return store.read_note(note_id)
 
     def _count_broken_links_on_move(self, space_id: str, note: Note) -> int:
-        """Count same-space links that break when a note leaves its space.
+        """Count the links that break when a note leaves its space.
 
-        Links never cross spaces, so moving a note breaks both the notes that
-        link to it and the note's own links to its old neighbours.  A note
-        linking to itself keeps working after the move and is not counted.
+        Moving a note breaks the notes that link to it and its own links to
+        its old neighbours, counted as the move dialog shows them: linking
+        notes, and the notes this one links to.  A Plain note also leaves its
+        ``[[Plain:Title]]`` links in AI-Notes and unlocked vaults behind (a
+        locked vault is never asked), while a ``[[Plain:Title]]`` the note
+        holds keeps working wherever it goes.  A note linking to itself keeps
+        working after the move and is not counted.
         """
         index = self._sync_index(space_id)
         if index is None:
@@ -1021,11 +1032,10 @@ class Api:
         if not index.has(note.id):
             index.update(note)
         incoming = len(index.backlinks(note.id))
-        outgoing = 0
-        for link in index.links_of(note.id):
-            target = index.resolve(link.target)
-            if target is not None and target != note.id:
-                outgoing += 1
+        if space_id == "plain":
+            incoming += sum(len(sources) for sources in self._links_out_to_plain(note.title).values())
+        # outgoing() leaves out self-links and links naming another space.
+        outgoing = sum(1 for link in index.outgoing(note.id) if link["resolved"])
         return incoming + outgoing
 
     @bridge_method
@@ -1035,7 +1045,8 @@ class Api:
         The note is created in the target space first; the source copy is
         only removed afterwards, so a failure never loses the note. Returns
         ``{new_id, title, broken_links}`` where ``broken_links`` counts the
-        same-space links that stop working because of the move.
+        links that stop working because of the move (see
+        :meth:`_count_broken_links_on_move`).
         """
         space = self._known_space(space_id)
         target = self._known_space(target_space_id)

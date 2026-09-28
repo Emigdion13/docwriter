@@ -49,7 +49,9 @@ M10 additions, on top of section 4.7
 * A rename rewrites the author's syntax (``!``, ``#Heading``, ``|alias``).
   Renaming a Plain note also rewrites the ``[[Plain:Title]]`` links in
   AI-Notes and unlocked vaults (never a locked one), and only those: there a
-  bare ``[[Title]]`` names a note of that space, not the Plain note.
+  bare ``[[Title]]`` names a note of that space, not the Plain note.  For the
+  same reason a vault or AI-Notes index never resolves ``[[Plain:Title]]``
+  against its own titles, and renaming a note there leaves those links alone.
 
 Security rule 11: a vault's index exists only in memory while the vault is
 unlocked.  It is never written to disk, and :meth:`LinkIndex.clear` is called
@@ -762,6 +764,11 @@ class LinkIndex:
     Resolution is incremental: a link to a note that does not exist yet is
     remembered as *pending* and starts working as soon as that note is created,
     so build order does not matter and single-note updates stay cheap.
+
+    A link naming another space (``[[Plain:Title]]`` in a vault or AI-Notes
+    note) is kept for :meth:`link_count` and :meth:`sources_linking_out`, but
+    never resolved here: it is not a backlink, an outgoing link or a missing
+    note of this space.
     """
 
     def __init__(self, space_id: str = "") -> None:
@@ -959,6 +966,10 @@ class LinkIndex:
         resolved = self._resolved.setdefault(note_id, {})
         unresolved = self._unresolved.setdefault(note_id, {})
         for link in links:
+            if link.space and link.space != self.space_id:
+                # [[Plain:Title]] outside Plain names a Plain note, which is
+                # not in this index: it is neither a link here nor a missing one.
+                continue
             folded = _fold(link.target)
             target_id = self._id_by_folded.get(folded)
             if target_id is None:
