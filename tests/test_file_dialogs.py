@@ -89,6 +89,49 @@ def test_import_and_export_through_the_dialogs(api: Api, tmp_path: Path) -> None
     assert exported.read_text(encoding="utf-8") == "# Recipe\n\nflour\n"
 
 
+def test_a_switched_notes_folder_finds_the_vaults_again(tmp_path: Path) -> None:
+    """Vaults in one folder, the app pointed at another: say so, and never make new ones."""
+    real = tmp_path / "Desktop" / "VaultNotes"
+    keys = tmp_path / "Desktop" / "keys"
+    cfg = Config(settings_path=tmp_path / "settings.json")
+    cfg.data["notes_root"] = str(real)
+    cfg.save()
+    cfg.ensure_folders()
+    first = Api(config=cfg, app_dir=tmp_path / "appdata", drive_store=TokenStore(memory=True))
+    first.set_window(DialogWindow([(str(keys / "encrypted.vnkey"),), (str(keys / "personal.vnkey"),)]))
+    assert first.initialize_vaults(None, None).get("ok") is True
+    personal_key = (keys / "personal.vnkey").read_bytes()
+
+    # The app now points at an empty folder (Settings -> Notes folder, say).
+    cfg.data["notes_root"] = str(tmp_path / "Documents" / "VaultNotes")
+    cfg.save()
+    cfg.ensure_folders()
+    api = Api(config=cfg, app_dir=tmp_path / "appdata", drive_store=TokenStore(memory=True))
+    state = api.get_state()
+    assert state["needs_setup"] is True
+    assert [s["created"] for s in state["spaces"] if s["kind"] == "vault"] == [False, False]
+
+    refused = api.unlock_vault("personal")
+    assert refused["error"] == "not_initialized"
+    assert "Documents" in refused["message"] and "Choose notes folder" in refused["message"]
+
+    # Saving over the existing key in the Save dialog is refused, and says why.
+    api.set_window(DialogWindow([(str(keys / "encrypted.vnkey"),)]))
+    clash = api.initialize_vaults(None, None)
+    assert clash["error"] == "key_exists", clash
+    assert "encrypted.vnkey already exists" in clash["message"]
+    assert "Choose notes folder" in clash["message"]
+    assert (keys / "personal.vnkey").read_bytes() == personal_key
+
+    # Choosing the real folder finds both vaults: nothing to set up, keys still work.
+    api.set_window(DialogWindow([str(real)]))
+    assert api.choose_notes_folder().get("ok") is True
+    state = api.get_state()
+    assert state["needs_setup"] is False
+    assert [s["created"] for s in state["spaces"] if s["kind"] == "vault"] == [True, True]
+    assert api.unlock_vault("personal").get("ok") is True
+
+
 DESKTOP_CLIENT = {
     "installed": {
         "client_id": "1234-abc.apps.googleusercontent.com",

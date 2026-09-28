@@ -65,20 +65,26 @@ export function createVaultSetupDialog({ onSetup, onChooseFolder }) {
   `;
 
   const close = () => overlay.classList.remove('open');
+  const statusEl = overlay.querySelector('#vault-setup-status');
+  const setStatus = (text, isError = false) => {
+    statusEl.textContent = text;
+    statusEl.classList.toggle('is-error', isError);
+  };
   overlay.querySelector('#setup-later').onclick = close;
   overlay.querySelector('#setup-folder').onclick = async () => {
-    const status = overlay.querySelector('#vault-setup-status');
     const result = await onChooseFolder?.();
-    if (result?.ok) {
-      status.textContent = `Notes folder selected: ${result.name}. Choose where to save each key file next.`;
-    } else if (result?.message) {
-      status.textContent = result.message;
+    if (result?.ok && result.needs_setup === false) {
+      // That folder already holds both vaults: there is nothing to create,
+      // and creating would only have made new, empty ones.
+      close();
+    } else if (result?.ok) {
+      setStatus(`Notes folder selected: ${result.name}. It has no vaults yet, so Create vaults makes new ones.`);
+    } else if (result?.message && result.error !== 'cancelled') {
+      setStatus(result.message, true);
     }
   };
   overlay.querySelector('#setup-go').onclick = async () => {
     const button = overlay.querySelector('#setup-go');
-    const status = overlay.querySelector('#vault-setup-status');
-
     const passEncrypted = overlay.querySelector('#setup-pass-encrypted');
     const passPersonal = overlay.querySelector('#setup-pass-personal');
     // Both typed twice would be kinder, but the app never stores either one:
@@ -88,10 +94,10 @@ export function createVaultSetupDialog({ onSetup, onChooseFolder }) {
     if (passPersonal.value.trim()) passphrases.personal = passPersonal.value;
 
     button.disabled = true;
-    status.textContent = 'Choose a location for the Encrypted key file…';
+    setStatus('Choose a location for the Encrypted key file…');
     const result = await onSetup?.(passphrases);
     if (result?.error) {
-      status.textContent = result.message || 'Vault setup could not be completed.';
+      setStatus(result.message || 'Vault setup could not be completed.', result.error !== 'cancelled');
       button.disabled = false;
       return;
     }

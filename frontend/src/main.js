@@ -559,7 +559,7 @@ function renderWorkspace() {
   ws.classList.toggle('empty', !isLocked && !hasNote);
 
   if (isLocked) {
-    updateSealedDetails(space);
+    updateSealedDetails(space, state.notesRoot);
     return;
   }
 
@@ -1198,6 +1198,50 @@ async function runBackup() {
   updateDriveCard('Starting…');
 }
 
+/**
+ * Point the app at another notes folder (Settings, the setup dialog and the
+ * "not in this notes folder" screen all use this).  The engine locks every
+ * vault and rebuilds its stores, so the workspace starts over in Plain.
+ * The answer carries `needs_setup` for the new folder.
+ */
+async function chooseNotesFolder() {
+  if (!(await flushSave())) {
+    return { error: 'unsaved', message: 'Your last change could not be saved yet, so the folder was not changed.' };
+  }
+  const result = await bridge.choose_notes_folder();
+  if (result?.error) {
+    if (result.error !== 'cancelled') toast(result.message, { icon: 'folder' });
+    return result;
+  }
+  showWarnings(result.warnings);
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  pendingSave = null;
+  state.currentNoteId = null;
+  state.currentNote = null;
+  state.currentNotes = [];
+  state.trashMode = false;
+  state.history = [];
+  state.historyIndex = -1;
+  state.locksAt = null;
+  const refreshed = await bridge.get_state();
+  state.spaces = refreshed.spaces;
+  state.notesRoot = refreshed.notes_root || '';
+  renderSpaces(state.spaces, state.currentSpaceId);
+  await selectSpace('plain', null, false);
+  pushHistory();
+
+  const folder = result.name || state.notesRoot;
+  const vaults = state.spaces.filter(s => s.kind === 'vault');
+  const found = vaults.filter(s => s.created !== false).map(s => s.name);
+  let message = `Notes folder: ${folder}.`;
+  if (found.length === vaults.length) message += ` Found ${found.join(' and ')}; unlock each with its key file.`;
+  else if (found.length) message += ` Found ${found.join(' and ')}; the other vault is not set up here.`;
+  else message += ' It has no vaults yet.';
+  toast(message, { icon: 'folder' });
+  return { ...result, needs_setup: Boolean(refreshed.needs_setup) };
+}
+
 async function chooseClientSecret() {
   const res = await bridge.choose_client_secret();
   if (res?.error) {
@@ -1339,10 +1383,34 @@ async function getPaletteCommands() {
       label: 'Settings…',
       icon: 'settings',
       run: () => settingsOverlay?.open()
-    }
+    },
+    {
+      label: 'Choose notes folder…',
+      sub: state.notesRoot || 'where Plain and the vaults live',
+      icon: 'folder',
+      run: () => chooseNotesFolder()
+    },
+    ...(state.spaces.some(s => s.created === false) ? [{
+      label: 'Create vaults…',
+      sub: 'only if you have none yet: new vaults start empty',
+      icon: 'key',
+      run: () => vaultSetupDialog?.open()
+    }] : [])
   ];
 
   for (const s of state.spaces) {
+    if (s.created === false) {
+      // Not in this notes folder: there is nothing to unlock, so open the
+      // space, whose screen explains it and offers the folder or setup.
+      commands.push({
+        label: `${s.name} is not in this notes folder`,
+        sub: 'Choose the notes folder, or create vaults',
+        icon: 'folder',
+        colorVar: s.colorVar,
+        run: () => selectSpace(s.id)
+      });
+      continue;
+    }
     if (s.locked) {
       commands.push({
         label: `Unlock ${s.name}`,
@@ -1633,7 +1701,9 @@ async function init() {
   // Mount Sealed and Empty heroes into workspace
   const sealedHeroContainer = document.getElementById('sealed-hero-container');
   const sealedHeroEl = createSealedHero({
-    onUnlock: () => openUnlockDialogForSpace(state.currentSpaceId)
+    onUnlock: () => openUnlockDialogForSpace(state.currentSpaceId),
+    onChooseFolder: () => chooseNotesFolder(),
+    onSetup: () => vaultSetupDialog?.open()
   });
   sealedHeroContainer.replaceWith(sealedHeroEl);
 
@@ -1702,15 +1772,27 @@ async function init() {
   overlaysRoot.appendChild(unlockDialog.element);
 
   vaultSetupDialog = createVaultSetupDialog({
-    onChooseFolder: () => bridge.choose_notes_folder(),
+    // The same folder switch as Settings: it resets the workspace, so the
+    // notes on screen are the chosen folder's, not the previous one's.
+    onChooseFolder: () => chooseNotesFolder(),
     onSetup: async (passphrases) => {
       const result = await bridge.initialize_vaults(passphrases);
-      if (!result?.error) {
-        const refreshed = await bridge.get_state();
-        state.spaces = refreshed.spaces;
-        renderSpaces(state.spaces, state.currentSpaceId);
-        updateSealedDetails(getActiveSpace());
+      if (result?.error) {
+        if (result.error !== 'cancelled') toast(result.message || 'Vault setup could not be completed.', { icon: 'alert' });
+        return result;
       }
+      const refreshed = await bridge.get_state();
+      state.spaces = refreshed.spaces;
+      renderSpaces(state.spaces, state.currentSpaceId);
+      const active = getActiveSpace();
+      if (active?.kind === 'vault') updateSealedDetails(active, state.notesRoot);
+      const made = (result.created || []).map(id => state.spaces.find(s => s.id === id)?.name || id);
+      toast(
+        made.length
+          ? `Created ${made.join(' and ')}. Back up the key files, then unlock each vault with its key.`
+          : 'Both vaults already exist in this notes folder. Unlock each with its key file.',
+        { icon: 'shield' }
+      );
       return result;
     }
   });
@@ -1751,37 +1833,7 @@ async function init() {
       }
       toast('Settings saved', { icon: 'check' });
     },
-    onChooseFolder: async () => {
-      if (!(await flushSave())) {
-        return { error: 'unsaved', message: 'Your last change could not be saved yet, so the folder was not changed.' };
-      }
-      const result = await bridge.choose_notes_folder();
-      if (result?.error) {
-        if (result.error !== 'cancelled') toast(result.message, { icon: 'folder' });
-        return result;
-      }
-      showWarnings(result.warnings);
-      // The notes root changed: vaults are locked and stores rebuilt.
-      // Reset the workspace and start over in Plain.
-      clearTimeout(saveTimer);
-      saveTimer = null;
-      pendingSave = null;
-      state.currentNoteId = null;
-      state.currentNote = null;
-      state.currentNotes = [];
-      state.trashMode = false;
-      state.history = [];
-      state.historyIndex = -1;
-      state.locksAt = null;
-      const refreshed = await bridge.get_state();
-      state.spaces = refreshed.spaces;
-      state.notesRoot = refreshed.notes_root || '';
-      renderSpaces(state.spaces, state.currentSpaceId);
-      await selectSpace('plain', null, false);
-      pushHistory();
-      toast(`Notes folder: ${result.name || state.notesRoot}`, { icon: 'folder' });
-      return result;
-    }
+    onChooseFolder: () => chooseNotesFolder()
   });
   overlaysRoot.appendChild(settingsOverlay.element);
 

@@ -499,6 +499,10 @@ class Api:
             "name": definition["name"],
             "kind": "vault",
             "locked": store.locked,
+            # False when this notes folder has no such vault yet (no vault.json):
+            # the UI then says "not set up" instead of "locked", so a notes folder
+            # switched by mistake is not mistaken for a vault that lost its key.
+            "created": store.has_header,
             "colorVar": definition["colorVar"],
             "note_count": count,
             "key_path": key_path,
@@ -1548,7 +1552,15 @@ class Api:
         if selected.suffix.lower() != ".vnkey":
             selected = selected.with_name(selected.name + ".vnkey")
         if selected.exists():
-            return {"error": "key_exists", "message": "That key file already exists. Choose a new file name."}
+            return {
+                "error": "key_exists",
+                "message": (
+                    f"{selected.name} already exists there, and VaultNotes never replaces a key "
+                    "file. If it belongs to vaults you already have, they are in another notes "
+                    "folder: press 'Choose notes folder' and pick that folder instead of creating "
+                    "new vaults. Otherwise, choose a new file name."
+                ),
+            }
         key: VaultKey | None = None
         try:
             vault_id = str(uuid.uuid4())
@@ -1623,7 +1635,15 @@ class Api:
         if store.header_error is not None:
             return {"error": "damaged", "message": str(store.header_error)}
         if not store.has_header:
-            return {"error": "not_initialized", "message": "Create this vault before unlocking it."}
+            name = SPACE_DEFINITIONS[space]["name"]
+            return {
+                "error": "not_initialized",
+                "message": (
+                    f"There is no {name} vault in the notes folder {self.config.notes_root}. "
+                    "If your vaults are in another folder, choose it with 'Choose notes folder'; "
+                    "otherwise create them with 'New vault'."
+                ),
+            }
 
         path = self._pending_key_paths.pop(space_id, None)
         if path is None:

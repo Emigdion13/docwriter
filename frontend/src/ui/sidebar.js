@@ -56,7 +56,7 @@ export function renderSpaces(spaces, activeSpaceId) {
 
   container.innerHTML = spaces.map(s => {
     const isPlain = s.kind === 'plain';
-    const sub = isPlain ? 'Always open' : s.locked ? 'Locked' : 'Unlocked';
+    const sub = isPlain ? 'Always open' : s.created === false ? 'Not set up' : s.locked ? 'Locked' : 'Unlocked';
     const ic = isPlain ? 'file' : s.locked ? 'lock' : 'unlock';
     const isActive = s.id === activeSpaceId;
     const isLocked = !isPlain && s.locked;
