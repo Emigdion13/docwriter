@@ -533,6 +533,7 @@ BRIDGE_SURFACE = [
     "get_settings",
     "update_settings",
     "backup_now",
+    "choose_client_secret",
     "connect_drive",
     "disconnect_drive",
     "restore_from_drive",
