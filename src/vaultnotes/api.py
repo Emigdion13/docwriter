@@ -76,9 +76,20 @@ SPACE_DEFINITIONS = {
     "personal": {"name": "Personal", "colorVar": "--personal"},
 }
 
+#: The spaces kept as ordinary ``.md`` files, always open.  Plain is the
+#: user's own; AI-Notes is where AI helpers write (``notes.py`` changes notes
+#: nowhere else), so the two never mix.
+PLAIN_SPACES = {
+    "plain": {"name": "Plain", "colorVar": "--plain"},
+    "ai": {"name": "AI-Notes", "colorVar": "--ai"},
+}
+
 #: Display name of every space, Plain included: user-facing messages must be
 #: able to name the space without assuming it is a vault.
-SPACE_NAMES = {"plain": "Plain", **{key: value["name"] for key, value in SPACE_DEFINITIONS.items()}}
+SPACE_NAMES = {
+    **{key: value["name"] for key, value in PLAIN_SPACES.items()},
+    **{key: value["name"] for key, value in SPACE_DEFINITIONS.items()},
+}
 
 #: Longest note body the editor may send (about 20 MB of text).
 MAX_BODY_LENGTH = 20_000_000
@@ -194,18 +205,19 @@ class Api:
         #: ``%APPDATA%\\VaultNotes``: settings, manifest, OAuth client file.
         #: Tests point it at a temporary folder.
         self.app_dir = Path(app_dir).resolve() if app_dir is not None else get_app_dir()
-        self.plain_store = PlainStore(self.config.plain_dir)
+        self.plain_stores: dict[str, PlainStore] = {}
+        self._build_plain_stores()
         self.vault_stores: dict[str, VaultStore] = {}
         self._build_vault_stores()
 
-        # One link graph per space, in memory only.  Plain is indexed at
-        # startup; a vault's index is built on unlock and cleared on lock, so
-        # titles from a locked vault can never leak (security rule 11).
+        # One link graph per space, in memory only.  Plain and AI-Notes are
+        # indexed at startup; a vault's index is built on unlock and cleared on
+        # lock, so titles from a locked vault can never leak (security rule 11).
         self.link_indexes: dict[str, LinkIndex] = {
-            space_id: LinkIndex(space_id) for space_id in ("plain", *SPACE_DEFINITIONS)
+            space_id: LinkIndex(space_id) for space_id in (*PLAIN_SPACES, *SPACE_DEFINITIONS)
         }
-        self._plain_fingerprint: tuple[int, int, int] | None = None
-        self._sync_plain_index()
+        self._plain_fingerprints: dict[str, tuple[int, int, int]] = {}
+        self._sync_plain_indexes()
 
         self._pending_key_paths: dict[str, Path] = {}
         self.autolock = AutoLock(
@@ -251,6 +263,22 @@ class Api:
             for index in self.link_indexes.values():
                 index.clear()
 
+    def _build_plain_stores(self) -> None:
+        """Open Plain and AI-Notes in the current notes folder."""
+        self.plain_stores = {
+            "plain": PlainStore(self.config.plain_dir),
+            "ai": PlainStore(self.config.ai_dir),
+        }
+
+    @property
+    def plain_store(self) -> PlainStore:
+        """The user's own Plain space."""
+        return self.plain_stores["plain"]
+
+    def _plain(self, space_id: str) -> PlainStore | None:
+        """The store of a Plain-kind space (Plain or AI-Notes), else ``None``."""
+        return self.plain_stores.get(space_id)
+
     def _build_vault_stores(self) -> None:
         """Build providers for the configured vault folders without unlocking."""
         self.vault_stores = {}
@@ -288,19 +316,19 @@ class Api:
     def _known_space(self, space_id: Any) -> str:
         """Validate a space id, raising ``invalid_space`` for anything else."""
         text = self._text(space_id, "Space", allow_empty=False).strip()
-        if text != "plain" and text not in self.vault_stores:
+        if text not in self.plain_stores and text not in self.vault_stores:
             raise BridgeError("invalid_space", f"Space not found: {text}")
         return text
 
     def _note_id_text(self, space_id: str, note_id: Any) -> str:
         """Validate a note id for a space.
 
-        Vault ids are the opaque 32-hex file names; Plain ids are file names,
-        so anything with a path separator in it is refused before it can reach
-        the filesystem.
+        Vault ids are the opaque 32-hex file names; Plain and AI-Notes ids are
+        file names, so anything with a path separator in it is refused before
+        it can reach the filesystem.
         """
         text = self._text(note_id, "Note", allow_empty=False).strip()
-        if space_id == "plain":
+        if space_id in self.plain_stores:
             if any(character in text for character in ("/", "\\", ":", "\x00")) or text in {".", ".."}:
                 raise BridgeError("invalid_note", "That note id is not valid")
             return text
@@ -336,20 +364,27 @@ class Api:
         """The link index for a space, or ``None`` for an unknown space."""
         return self.link_indexes.get(space_id)
 
-    def _sync_plain_index(self) -> LinkIndex:
-        """Rebuild the Plain index only when the folder actually changed.
+    def _sync_plain_index(self, space_id: str) -> LinkIndex:
+        """Rebuild a Plain or AI-Notes index only when its folder changed.
 
         Plain notes can be edited by other programs (the plan explicitly
-        supports opening the folder in Obsidian), so the index is checked
-        against a cheap directory fingerprint instead of being trusted blindly.
+        supports opening the folder in Obsidian), and AI helpers write AI-Notes
+        from outside the app, so the index is checked against a cheap
+        directory fingerprint instead of being trusted blindly.
         """
-        index = self.link_indexes["plain"]
-        fingerprint = self.plain_store.fingerprint()
-        if fingerprint != self._plain_fingerprint:
+        index = self.link_indexes[space_id]
+        store = self.plain_stores[space_id]
+        fingerprint = store.fingerprint()
+        if fingerprint != self._plain_fingerprints.get(space_id):
             # list_notes() also refreshes skipped-file warnings.
-            index.build(self.plain_store.list_notes())
-            self._plain_fingerprint = fingerprint
+            index.build(store.list_notes())
+            self._plain_fingerprints[space_id] = fingerprint
         return index
+
+    def _sync_plain_indexes(self) -> None:
+        """Bring the Plain and AI-Notes indexes up to date."""
+        for space_id in self.plain_stores:
+            self._sync_plain_index(space_id)
 
     def _sync_index(self, space_id: str) -> LinkIndex | None:
         """Return an up-to-date index for an open space.
@@ -360,8 +395,8 @@ class Api:
         index = self.link_indexes.get(space_id)
         if index is None:
             return None
-        if space_id == "plain":
-            return self._sync_plain_index()
+        if space_id in self.plain_stores:
+            return self._sync_plain_index(space_id)
 
         store = self.vault_stores.get(space_id)
         if store is None:
@@ -381,11 +416,12 @@ class Api:
         if index is None:
             return
         index.update(note)
-        if space_id == "plain":
+        store = self._plain(space_id)
+        if store is not None:
             # We just wrote that file ourselves, so the index is current: move
             # the fingerprint forward instead of forcing a full rebuild on the
             # next call.  Only edits from *outside* the app should trigger one.
-            self._plain_fingerprint = self.plain_store.fingerprint()
+            self._plain_fingerprints[space_id] = store.fingerprint()
 
     def _index_remove(self, space_id: str, note_id: str) -> None:
         """Drop one note from its space's index."""
@@ -393,8 +429,9 @@ class Api:
         if index is None:
             return
         index.remove(note_id)
-        if space_id == "plain":
-            self._plain_fingerprint = self.plain_store.fingerprint()
+        store = self._plain(space_id)
+        if store is not None:
+            self._plain_fingerprints[space_id] = store.fingerprint()
 
     def _backlinks_for(self, space_id: str, note: Any) -> list[dict[str, str]]:
         """The "Linked from" list for a note, from its space's index."""
@@ -420,8 +457,12 @@ class Api:
         # Start-up problems (damaged settings.json, unreachable notes folder)
         # belong to the app as a whole, not to one vault.
         warnings: list[str] = list(self.config.warnings) if space_id is None else []
-        for name in self.plain_store.skipped_files:
-            warnings.append(f"Skipped a note that could not be read: {name}")
+        for plain_space, store in self.plain_stores.items():
+            if space_id is not None and plain_space != space_id:
+                continue
+            where = "" if plain_space == "plain" else f" in {SPACE_NAMES[plain_space]}"
+            for name in store.skipped_files:
+                warnings.append(f"Skipped a note{where} that could not be read: {name}")
         for vault_space in SPACE_DEFINITIONS:
             if space_id is not None and vault_space != space_id:
                 continue
@@ -514,22 +555,28 @@ class Api:
             result["vault_id"] = store.vault_id
         return result
 
+    def _plain_space_summary(self, space_id: str) -> dict[str, Any]:
+        definition = PLAIN_SPACES[space_id]
+        return {
+            "id": space_id,
+            "name": definition["name"],
+            "kind": "plain",
+            "locked": False,
+            "colorVar": definition["colorVar"],
+            # The directory fingerprint counts files without reading them.
+            "note_count": max(0, self.plain_stores[space_id].fingerprint()[0]),
+        }
+
     @bridge_method
     def get_state(self) -> dict[str, Any]:
         """Return spaces, look settings, backup status, and setup state."""
-        self._sync_plain_index()
+        self._sync_plain_indexes()
         spaces = [
-            {
-                "id": "plain",
-                "name": "Plain",
-                "kind": "plain",
-                "locked": False,
-                "colorVar": "--plain",
-                # The directory fingerprint counts files without reading them.
-                "note_count": max(0, self.plain_store.fingerprint()[0]),
-            },
+            self._plain_space_summary("plain"),
             self._space_summary("encrypted"),
             self._space_summary("personal"),
+            # Last, apart from the user's own spaces: AI helpers write here.
+            self._plain_space_summary("ai"),
         ]
         needs_setup = any(not self.vault_stores[space_id].has_header for space_id in SPACE_DEFINITIONS)
         backup = self.config.get("backup", {})
@@ -600,8 +647,9 @@ class Api:
 
         # Keeps link counts honest and a locked vault's index empty.
         self._sync_index(space)
-        if space == "plain":
-            notes = self.plain_store.list_notes(query=text_query, sort=text_sort)
+        plain = self._plain(space)
+        if plain is not None:
+            notes = plain.list_notes(query=text_query, sort=text_sort)
             return [self._note_summary(space, note) for note in notes]
 
         store = self.vault_stores[space]
@@ -623,8 +671,8 @@ class Api:
         space = self._known_space(space_id)
         clean_id = self._note_id_text(space, note_id)
 
-        if space == "plain":
-            note = self._read_plain_note(clean_id)
+        if space in self.plain_stores:
+            note = self._read_plain_note(space, clean_id)
         else:
             store = self.vault_stores[space]
             if store.locked:
@@ -636,10 +684,10 @@ class Api:
 
         return self._note_result(space, note, self._backlinks_for(space, note))
 
-    def _read_plain_note(self, note_id: str) -> Note:
-        """Read one Plain note, turning a missing file into ``not_found``."""
+    def _read_plain_note(self, space_id: str, note_id: str) -> Note:
+        """Read one Plain or AI-Notes note, turning a missing file into ``not_found``."""
         try:
-            return self.plain_store.read_note(note_id)
+            return self.plain_stores[space_id].read_note(note_id)
         except FileNotFoundError:
             raise BridgeError("not_found", f"Note not found: {note_id}") from None
         except OSError as exc:
@@ -648,7 +696,7 @@ class Api:
 
     @bridge_method
     def create_note(self, space_id: str, title: str = "Untitled") -> dict[str, Any]:
-        """Create a note in Plain or an unlocked encrypted vault.
+        """Create a note in Plain, AI-Notes or an unlocked encrypted vault.
 
         Titles are unique inside a space: a collision gets `` (2)``, `` (3)``
         and so on rather than an error or an overwritten note.
@@ -656,8 +704,9 @@ class Api:
         space = self._known_space(space_id)
         clean_title = self._title_text(title)
 
-        if space == "plain":
-            note = self.plain_store.create_note(title=clean_title)
+        plain = self._plain(space)
+        if plain is not None:
+            note = plain.create_note(title=clean_title)
         else:
             store = self.vault_stores[space]
             if store.locked:
@@ -679,8 +728,9 @@ class Api:
         clean_id = self._note_id_text(space, note_id)
         text_body = self._body_text(body)
 
-        if space == "plain":
-            note = self.plain_store.save_note(clean_id, text_body)
+        plain = self._plain(space)
+        if plain is not None:
+            note = plain.save_note(clean_id, text_body)
         else:
             store = self.vault_stores[space]
             if store.locked:
@@ -731,9 +781,10 @@ class Api:
         # the old id stops existing as soon as the file is renamed.
         source_ids: list[str] = index.sources_linking_to(clean_id) if index is not None else []
 
-        if space == "plain":
+        plain = self._plain(space)
+        if plain is not None:
             try:
-                note, old_title = self.plain_store.rename_note(clean_id, clean_title)
+                note, old_title = plain.rename_note(clean_id, clean_title)
             except FileExistsError:
                 return _error("collision", f"A note titled '{clean_title}' already exists")
             except FileNotFoundError:
@@ -771,8 +822,9 @@ class Api:
         """
         if not old_title or not new_title or old_title == new_title:
             return 0
-        store = None if space_id == "plain" else self.vault_stores.get(space_id)
-        if space_id != "plain" and (store is None or store.locked):
+        plain = self._plain(space_id)
+        store = None if plain is not None else self.vault_stores.get(space_id)
+        if plain is None and (store is None or store.locked):
             return 0
 
         updated = 0
@@ -781,16 +833,16 @@ class Api:
                 continue
             try:
                 source = (
-                    self._read_plain_note(source_id)
-                    if space_id == "plain"
+                    self._read_plain_note(space_id, source_id)
+                    if plain is not None
                     else store.read_note(source_id)
                 )
                 new_body, count = rename_links(source.body, old_title, new_title)
                 if not count:
                     continue
                 saved = (
-                    self.plain_store.save_note(source_id, new_body)
-                    if space_id == "plain"
+                    plain.save_note(source_id, new_body)
+                    if plain is not None
                     else store.save_note(source_id, new_body)
                 )
             except (BridgeError, FileNotFoundError, OSError, ValueError, VaultStoreError):
@@ -811,7 +863,7 @@ class Api:
         index = self._sync_index(space)
         if index is None:
             return {"count": 0}
-        if space != "plain":
+        if space in self.vault_stores:
             if self.vault_stores[space].locked:
                 return {"count": 0}
             if not index.has(clean_id):
@@ -824,8 +876,9 @@ class Api:
         space = self._known_space(space_id)
         clean_id = self._note_id_text(space, note_id)
 
-        if space == "plain":
-            note = self.plain_store.delete_note(clean_id)
+        plain = self._plain(space)
+        if plain is not None:
+            note = plain.delete_note(clean_id)
         else:
             store = self.vault_stores[space]
             if store.locked:
@@ -846,8 +899,9 @@ class Api:
         space = self._known_space(space_id)
         clean_id = self._note_id_text(space, note_id)
 
-        if space == "plain":
-            note = self.plain_store.restore_note(clean_id)
+        plain = self._plain(space)
+        if plain is not None:
+            note = plain.restore_note(clean_id)
         else:
             store = self.vault_stores[space]
             if store.locked:
@@ -865,10 +919,11 @@ class Api:
     def list_trash(self, space_id: str) -> list[dict[str, str]] | dict[str, str]:
         """List trash entries without ever returning locked vault titles."""
         space = self._known_space(space_id)
-        if space == "plain":
+        plain = self._plain(space)
+        if plain is not None:
             return [
                 {"id": note.id, "title": note.title, "modified": note.modified}
-                for note in self.plain_store.list_trash()
+                for note in plain.list_trash()
             ]
         store = self.vault_stores[space]
         if store.locked:
@@ -879,13 +934,14 @@ class Api:
         ]
 
     def _read_any_note(self, space_id: str, note_id: str) -> Any:
-        """Read a note from Plain or an unlocked vault.
+        """Read a note from Plain, AI-Notes or an unlocked vault.
 
         Raises VaultLockedError, FileNotFoundError, or ValueError for a bad
         vault note id.
         """
-        if space_id == "plain":
-            return self.plain_store.read_note(note_id)
+        plain = self._plain(space_id)
+        if plain is not None:
+            return plain.read_note(note_id)
         store = self._vault(space_id)
         if store is None:  # pragma: no cover - callers validate the space first
             raise FileNotFoundError(f"Space not found: {space_id}")
@@ -946,11 +1002,12 @@ class Api:
         # Create the target copy first. A second save preserves the exact
         # body even when the source body is empty (creation would otherwise
         # insert a default "# Title" heading).
+        target_plain = self._plain(target)
         try:
-            if target == "plain":
-                created = self.plain_store.create_note(title=source.title, body=source.body)
+            if target_plain is not None:
+                created = target_plain.create_note(title=source.title, body=source.body)
                 if created.body != source.body:
-                    created = self.plain_store.save_note(created.id, source.body)
+                    created = target_plain.save_note(created.id, source.body)
             else:
                 assert target_store is not None  # narrowed by the checks above
                 created = target_store.create_note(title=source.title, body=source.body)
@@ -961,9 +1018,10 @@ class Api:
 
         # The target copy exists; now remove the source without using trash,
         # because a move is not a delete.
+        source_plain = self._plain(space)
         try:
-            if space == "plain":
-                source_path = self.plain_store._resolve_note_path(clean_id)  # noqa: SLF001 - same package
+            if source_plain is not None:
+                source_path = source_plain._resolve_note_path(clean_id)  # noqa: SLF001 - same package
                 if not source_path.is_file():
                     raise FileNotFoundError(f"Note not found: {clean_id}")
                 source_path.unlink()
@@ -999,9 +1057,10 @@ class Api:
         """Permanently delete a trashed note (cannot be undone)."""
         space = self._known_space(space_id)
         clean_id = self._note_id_text(space, note_id)
-        if space == "plain":
+        plain = self._plain(space)
+        if plain is not None:
             try:
-                title = self.plain_store.purge_note(clean_id)
+                title = plain.purge_note(clean_id)
             except FileNotFoundError:
                 return _error("not_found", f"Note not found in trash: {clean_id}")
         else:
@@ -1018,8 +1077,9 @@ class Api:
     def empty_trash(self, space_id: str) -> dict[str, Any]:
         """Permanently delete every trashed note in one space."""
         space = self._known_space(space_id)
-        if space == "plain":
-            return {"ok": True, "purged": self.plain_store.empty_trash()}
+        plain = self._plain(space)
+        if plain is not None:
+            return {"ok": True, "purged": plain.empty_trash()}
         store = self.vault_stores[space]
         if store.locked:
             return _error("locked", "Vault is locked")
@@ -1034,13 +1094,14 @@ class Api:
         space_id: str,
         file_paths: list[Path | str] | None = None,
     ) -> dict[str, Any]:
-        """Import ``.md`` files into Plain or an unlocked vault.
+        """Import ``.md`` files into Plain, AI-Notes or an unlocked vault.
 
         The frontend calls this without paths, causing Python to open the
         native file picker itself (the frontend never sends file paths).
         ``file_paths`` exists only for headless callers and tests.
         """
         space = self._known_space(space_id)
+        plain = self._plain(space)
         store = self._vault(space)
         if store is not None and store.locked:
             return _error("locked", "Unlock the vault first")
@@ -1088,10 +1149,10 @@ class Api:
                 skipped.append({"name": path.name, "reason": "larger than the note size limit"})
                 continue
             try:
-                if space == "plain":
-                    note = self.plain_store.create_note(title=title, body=body)
+                if plain is not None:
+                    note = plain.create_note(title=title, body=body)
                     if note.body != body:
-                        note = self.plain_store.save_note(note.id, body)
+                        note = plain.save_note(note.id, body)
                 else:
                     assert store is not None  # narrowed by the checks above
                     note = store.create_note(title=title, body=body)
@@ -1197,8 +1258,8 @@ class Api:
 
         A locked vault contributes no titles, so its notes can never be
         discovered through a preview (security rule 11).  ``spaces`` is only
-        ever given the Plain space: vault notes may link out to Plain notes
-        (``[[Plain:Title]]``, M10) and never the other way around.
+        ever given the Plain space: vault and AI-Notes notes may link out to
+        Plain notes (``[[Plain:Title]]``, M10) and never the other way around.
         """
         space = self._known_space(space_id)
         text_body = self._body_text(body)
@@ -1257,7 +1318,8 @@ class Api:
             return _error("invalid_title", "That link has no title to open.")
         if len(wanted) > MAX_TITLE_LENGTH:
             return _error("invalid_title", "That link title is too long to be a note.")
-        if space != "plain" and self._vault(space).locked:
+        vault = self._vault(space)
+        if vault is not None and vault.locked:
             # Say why, instead of claiming the note does not exist.
             return _error("locked", f"Unlock {SPACE_NAMES[space]} first.")
 
@@ -1286,7 +1348,8 @@ class Api:
         """
         space = self._known_space(space_id)
         index = self._sync_index(space)
-        if space != "plain" and self._vault(space).locked:
+        vault = self._vault(space)
+        if vault is not None and vault.locked:
             return {"space_id": space, "nodes": [], "edges": [], "locked": True}
 
         notes = self.list_notes(space, "", "title")
@@ -1486,20 +1549,20 @@ class Api:
             self.config.data["notes_root"] = previous_root
             self.config.save()
             raise
-        self.plain_store = PlainStore(self.config.plain_dir)
+        self._build_plain_stores()
         self._pending_key_paths.clear()
         self._build_vault_stores()
         for index in self.link_indexes.values():
             index.clear()
-        self._plain_fingerprint = None
-        self._sync_plain_index()
+        self._plain_fingerprints.clear()
+        self._sync_plain_indexes()
 
     @bridge_method
     def choose_key_file(self, space_id: str) -> dict[str, Any]:
         """Let the native UI choose a key and keep its path server-side."""
         space = self._known_space(space_id)
-        if space == "plain":
-            return _error("invalid_space", "Plain is not encrypted and has no key file")
+        if space in self.plain_stores:
+            return _error("invalid_space", f"{SPACE_NAMES[space]} is not encrypted and has no key file")
         selected = self._choose_file(False, f"{space}.vnkey")
         if selected is None:
             return _error("key_not_found", "No key file was selected.")
@@ -1629,8 +1692,8 @@ class Api:
         ``wrong_passphrase``.  The passphrase is never stored or echoed.
         """
         space = self._known_space(space_id)
-        if space == "plain":
-            return _error("invalid_space", "Plain is always open and cannot be unlocked")
+        if space in self.plain_stores:
+            return _error("invalid_space", f"{SPACE_NAMES[space]} is always open and cannot be unlocked")
         store = self.vault_stores[space]
         if store.header_error is not None:
             return {"error": "damaged", "message": str(store.header_error)}
@@ -1931,13 +1994,13 @@ class Api:
             for store in self.vault_stores.values():
                 store.lock()
             self.autolock.clear()
-            self.plain_store = PlainStore(self.config.plain_dir)
+            self._build_plain_stores()
             self._pending_key_paths.clear()
             self._build_vault_stores()
             for index in self.link_indexes.values():
                 index.clear()
-            self._plain_fingerprint = None
-            self._sync_plain_index()
+            self._plain_fingerprints.clear()
+            self._sync_plain_indexes()
         if "autolock_minutes" in changes:
             try:
                 self.autolock.set_minutes(float(changes["autolock_minutes"]))

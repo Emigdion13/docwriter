@@ -6,6 +6,8 @@ live on **your** computer (or a USB stick) — never in the cloud, never in the 
 - **Plain** — ordinary `.md` files you can open in any editor.
 - **Encrypted** and **Personal** — each note is AES-256-GCM encrypted on disk, each
   with its own key file. The two vaults use different keys, on purpose.
+- **AI-Notes** — ordinary `.md` files that belong to AI helpers such as Claude: they
+  write their findings and drafts there, so Plain stays yours alone (§7).
 - **Google Drive backup** — your notes folder, uploaded by you, on your schedule.
   The key files are never part of it.
 
@@ -68,6 +70,7 @@ opening the app; there is no separate JS test step.
    ```
    Documents\VaultNotes\
    ├─ plain\                 Shopping list.md, Home lab.md, …   (+ .trash\)
+   ├─ ai-notes\              About AI-Notes.md, …               (+ .trash\)
    └─ vaults\
       ├─ encrypted\          vault.json, <opaque-id>.vnote      (+ .trash\)
       └─ personal\           vault.json, <opaque-id>.vnote      (+ .trash\)
@@ -206,8 +209,8 @@ themes and the effects level, so nothing in the app is only reachable by mouse.
 
 Notes link to each other with `[[Title]]`, `[[Title|shown text]]` and `[[Title#Heading]]`
 (jumps to that heading in the preview). `![[Title]]` shows the other note inside the
-preview. In a vault note, `[[Plain:Title]]` links to a Plain note — never the other way
-round, so a Plain note can never list, open or link into a vault. Renaming a note
+preview. In a vault or AI-Notes note, `[[Plain:Title]]` links to a Plain note — never
+the other way round, so a Plain note can never list, open or link into a vault. Renaming a note
 rewrites the links that point at it; "Linked from" sits under the preview. Typing
 `[[` suggests titles from the open space only.
 
@@ -218,22 +221,51 @@ if the note does not exist yet.
 Arctic. **Effects:** *Lite* and *Off* drop the blur and glow for older machines
 (Settings, the status bar, or the palette).
 
-### Reading notes from a script or an AI helper
+### AI helpers and the AI-Notes space
 
-`notes.py` (it runs `vaultnotes.notes_cli`) reads Plain and Personal notes without the
-app. It never writes anything, and it refuses the **Encrypted** vault outright: it never
-lists that vault, never opens its folder, and never uses its key. Use Encrypted for
-anything a helper must not see, such as PHI.
+**AI-Notes** is the space AI helpers write in: findings, reviews, summaries, notes to
+pick up next time. It sits last in the sidebar, in its own colour. It works like Plain
+(ordinary `.md` files in `ai-notes\`, a trash, links, the Drive backup), and you can
+read, edit, move or delete anything in it. A note in it can point at yours with
+`[[Plain:Title]]`. The move dialog warns before a note goes *into* AI-Notes, because
+helpers can then read and change it. Its first note, *About AI-Notes*, tells a helper
+these rules.
+
+`notes.py` (it runs `vaultnotes.notes_cli`) is how a helper uses VaultNotes without
+the app:
+
+| Space | What `notes.py` may do |
+|---|---|
+| `ai` (AI-Notes) | list, read, search, **write, append, delete** (to its trash) |
+| `plain`, `personal` | list, read, search — never write |
+| `encrypted` | nothing: it never lists that vault, opens its folder or uses its key |
+
+Use Encrypted for anything a helper must not see, such as PHI.
 
 ```
 .venv\Scripts\python notes.py --root "%USERPROFILE%\Documents\VaultNotes" list plain
 .venv\Scripts\python notes.py --root ... read plain "Shopping list"
 .venv\Scripts\python notes.py --root ... --personal-key E:\keys\personal.vnkey search personal flights
+.venv\Scripts\python notes.py --root ... write ai "PR 42 review" --file review.md
+.venv\Scripts\python notes.py --root ... append ai "Session log" --text "Tests pass now."
+.venv\Scripts\python notes.py --root ... delete ai "Old draft"
 ```
 
 `--root` and `--personal-key` can be set once as `VAULTNOTES_ROOT` and
 `VAULTNOTES_PERSONAL_KEY`. `read` accepts a note id, its title, or a unique part of the
-title. A passphrase-protected Personal key is not accepted; open that vault in the app.
+title; `append` and `delete` need the exact title. `write` refuses a title that is
+already taken unless you add `--replace`, and `append` creates the note if it is
+missing. The text comes from `--text`, `--file` or standard input. Prefer `--file`
+for anything long: Windows PowerShell 5.1 turns accented letters into `?` when it
+pipes text to a program. A passphrase-protected Personal key is not accepted; open
+that vault in the app.
+
+`notes.py` writes nothing outside `ai-notes\`. It refuses key files, `.vnote` files,
+anything in the vault folders, and any text that is a key file. It creates `ai-notes\`
+on its first write if the app has not yet, but only inside a real notes folder, and
+reading never creates anything. The app picks up a helper's changes by itself, but
+it does not reload a note that is open in the editor: type in it after a helper
+changed it and your version is saved over theirs.
 
 ---
 
@@ -261,7 +293,7 @@ Things the spec forbids, so the app does not do them:
 
 ```
 run.py                     start the app ("--dev" for the Vite dev server)
-notes.py                   read Plain / Personal notes from a shell (never Encrypted)
+notes.py                   read Plain / Personal, write AI-Notes, from a shell (never Encrypted)
 build.bat                  the M9 build: frontend, icon, VaultNotes.exe
 frontend/                  the look: Vite, plain JS modules, no framework
 src/vaultnotes/            the engine: api.py (Bridge API), storage/, crypto/,

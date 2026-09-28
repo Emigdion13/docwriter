@@ -3,7 +3,7 @@
    Reusable confirm dialog and the Move-note dialog (M5).
    ================================================================= */
 
-import { icon } from '../icons.js';
+import { icon, spaceIcon } from '../icons.js';
 
 /**
  * Shows a confirm dialog and resolves true when the user confirms.
@@ -117,13 +117,20 @@ export function createMoveDialog() {
           <span><b>${bits.join(' and ')}</b> will break. Links only work within the same space.</span>
         </div>`);
     }
-    if (sourceSpace.kind === 'vault' && targetSpace.id === 'plain') {
+    if (targetSpace.id === 'ai') {
+      const unencrypted = sourceSpace.kind === 'vault' ? ', and it will be stored <b>unencrypted</b>' : '';
+      parts.push(`
+        <div class="setup-warning">
+          ${icon('bot', 15)}
+          <span>AI helpers can read and change notes in <b>AI-Notes</b>${unencrypted}.</span>
+        </div>`);
+    } else if (sourceSpace.kind === 'vault' && targetSpace.kind === 'plain') {
       parts.push(`
         <div class="setup-warning">
           ${icon('unlock', 15)}
-          <span>The note will be stored <b>unencrypted</b> in Plain.</span>
+          <span>The note will be stored <b>unencrypted</b> in ${targetSpace.name}.</span>
         </div>`);
-    } else if (sourceSpace.id === 'plain' && targetSpace.kind === 'vault') {
+    } else if (sourceSpace.kind === 'plain' && targetSpace.kind === 'vault') {
       parts.push(`
         <div class="move-info">
           ${icon('lock', 15)}
@@ -155,13 +162,13 @@ export function createMoveDialog() {
         btn.setAttribute('aria-checked', String(t.id === selectedTarget));
         btn.style.setProperty('--c', `var(${t.colorVar || '--accent'})`);
         btn.innerHTML = `
-          <span class="ic">${icon(t.kind === 'plain' ? 'file' : t.locked ? 'lock' : 'unlock', 16)}</span>
+          <span class="ic">${icon(spaceIcon(t), 16)}</span>
           <span class="txt"><span class="nm"></span><span class="sub"></span></span>
         `;
         btn.querySelector('.nm').textContent = t.name;
         btn.querySelector('.sub').textContent = t.locked
           ? 'Locked — unlock it first'
-          : t.kind === 'plain' ? 'Unencrypted' : 'Encrypted';
+          : t.id === 'ai' ? 'Unencrypted, AI helpers can edit' : t.kind === 'plain' ? 'Unencrypted' : 'Encrypted';
         btn.onclick = () => {
           if (t.locked) return;
           selectedTarget = t.id;

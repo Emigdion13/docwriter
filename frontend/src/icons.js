@@ -7,6 +7,7 @@ export const ICONS = {
   lock: '<rect x="4" y="11" width="16" height="10" rx="2.5"/><path d="M8 11V7.5a4 4 0 0 1 8 0V11"/>',
   unlock: '<rect x="4" y="11" width="16" height="10" rx="2.5"/><path d="M8 11V7.5a4 4 0 0 1 7.6-1.8"/>',
   file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/>',
+  bot: '<rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 8V5"/><circle cx="12" cy="3.6" r="1.4"/><path d="M9 13v2M15 13v2M2 12.5v3M22 12.5v3"/>',
   folder: '<path d="M3.5 6.5h6l2 2H20.5v9a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/><path d="M3.5 6.5v-1a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v1"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
@@ -34,6 +35,16 @@ export const ICONS = {
   check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
   settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
 };
+
+/**
+ * The icon that stands for a space: a robot for AI-Notes, a page for Plain,
+ * an open or closed lock for a vault.
+ */
+export function spaceIcon(space) {
+  if (space?.id === 'ai') return 'bot';
+  if (space?.kind === 'plain') return 'file';
+  return space?.locked ? 'lock' : 'unlock';
+}
 
 /**
  * Returns an inline SVG string for the requested icon name.

@@ -1,8 +1,15 @@
-"""Read-only command-line access to Plain and Personal notes, for helpers such as Claude.
+"""Command-line access to VaultNotes for helpers such as Claude.
+
+AI helpers have a space of their own, **AI-Notes** (``ai``): they may create,
+change and delete notes there and nowhere else.  Plain and Personal are
+read-only, and the Encrypted vault is always refused.
 
     python -m vaultnotes.notes_cli --root <notes folder> list plain
     python -m vaultnotes.notes_cli --root <notes folder> read plain "Shopping list"
     python -m vaultnotes.notes_cli --root <notes folder> --personal-key <file> search personal flights
+    python -m vaultnotes.notes_cli --root <notes folder> write ai "PR 42 review" --file review.md
+    python -m vaultnotes.notes_cli --root <notes folder> append ai "Session log" --text "Done: tests"
+    python -m vaultnotes.notes_cli --root <notes folder> delete ai "Old draft"
 
 ``--root`` and ``--personal-key`` can also come from the ``VAULTNOTES_ROOT`` and
 ``VAULTNOTES_PERSONAL_KEY`` environment variables.  The app's settings.json is
@@ -11,8 +18,13 @@ not read, so the notes folder and key are always the ones named here.
 The **Encrypted** vault is refused before anything is opened: it holds PHI, so
 this tool never lists it, never opens its folder and never decrypts it.  A key
 file whose vault id is not Personal's (the Encrypted key under any file name)
-is refused before its key is decoded.  Nothing is written either; folders the
-app has not created yet are reported, not made.
+is refused before its key is decoded.
+
+Only the ``ai-notes`` folder is ever written.  ``write``, ``append`` and
+``delete`` refuse every other space, never copy a key file or an encrypted note
+into a note, and ``delete`` only moves a note to the AI-Notes trash.  The first
+write creates the folder if the app has not yet, but only inside a real notes
+folder; reading never creates anything.
 """
 
 from __future__ import annotations
@@ -20,17 +32,27 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Sequence
 
+from vaultnotes.config import AI_NOTES_FOLDER, ensure_ai_notes_folder
 from vaultnotes.crypto.keyfile import KeyFileError, PassphraseRequired, load_key_file
 from vaultnotes.models import Note
-from vaultnotes.storage.plain_store import PlainStore
+from vaultnotes.storage.plain_store import MAX_TITLE_LENGTH, PlainStore, sanitize_title
 from vaultnotes.storage.vault_store import VaultStore, VaultStoreError
 
-#: The only spaces this tool opens.
-SPACES = ("plain", "personal")
+#: The only spaces this tool opens, and the one it may write.
+SPACES = ("plain", "personal", "ai")
+WRITABLE_SPACES = ("ai",)
+SPACE_NAMES = {"plain": "Plain", "personal": "Personal", "ai": "AI-Notes"}
+SPACE_ALIASES = {"ai-notes": "ai", "ai_notes": "ai", "ai notes": "ai", "ainotes": "ai"}
+
+WRITE_COMMANDS = ("write", "append", "delete")
+
+#: The largest note this tool writes: the same limit as importing a .md file.
+MAX_NOTE_BYTES = 5 * 1024 * 1024
 
 #: Exit codes: 1 for "not found" and other errors, 2 for a refused request.
 EXIT_ERROR = 1
@@ -40,6 +62,16 @@ ENCRYPTED_REFUSAL = (
     "The Encrypted vault is off-limits: it holds PHI. This tool never lists it, "
     "never opens its folder and never decrypts it. Open it in VaultNotes yourself."
 )
+
+READ_ONLY_REFUSAL = (
+    "{name} is read-only for AI helpers, so your notes and theirs never mix. "
+    'Write in AI-Notes instead: notes.py write ai "<title>".'
+)
+
+KEY_MATERIAL_REFUSAL = "Key files and encrypted notes are never copied into a note."
+
+#: What every VaultNotes key file says about itself (build plan, section 4.2).
+_KEY_FILE_MARKER = re.compile(r'"format"\s*:\s*"vaultnotes-key"')
 
 
 class Refused(Exception):
@@ -60,9 +92,17 @@ def _space(name: str) -> str:
     wanted = name.strip().casefold()
     if _mentions_encrypted(wanted):
         raise Refused(ENCRYPTED_REFUSAL)
+    wanted = SPACE_ALIASES.get(wanted, wanted)
     if wanted not in SPACES:
         raise CliError(f"Unknown space {name!r}. Use one of: {', '.join(SPACES)}.")
     return wanted
+
+
+def _writable_space(name: str) -> str:
+    space = _space(name)  # the Encrypted refusal comes first
+    if space not in WRITABLE_SPACES:
+        raise Refused(READ_ONLY_REFUSAL.format(name=SPACE_NAMES[space]))
+    return space
 
 
 def _existing_folder(folder: Path, what: str) -> Path:
@@ -74,7 +114,7 @@ def _existing_folder(folder: Path, what: str) -> Path:
 
 
 class NotesReader:
-    """Opens Plain or Personal on demand and forgets the Personal key when closed."""
+    """Opens Plain, AI-Notes or Personal on demand and forgets the Personal key when closed."""
 
     def __init__(self, root: Path, personal_key: Path | None) -> None:
         self.root = root
@@ -84,10 +124,16 @@ class NotesReader:
     def notes(self, space: str, query: str = "") -> list[Note]:
         if space == "plain":
             return self._plain().list_notes(query, sort="title")
+        if space == "ai":
+            store = self._ai()
+            return store.list_notes(query, sort="title") if store is not None else []
         return self._personal().list_notes(query, sort="title")
 
     def _plain(self) -> PlainStore:
         return PlainStore(_existing_folder(self.root / "plain", "Plain folder"))
+
+    def _ai(self) -> PlainStore | None:
+        return _ai_store(self.root, create=False)
 
     def _personal(self) -> VaultStore:
         if self._vault is not None:
@@ -144,6 +190,19 @@ class NotesReader:
             self._vault = None
 
 
+def _ai_store(root: Path, *, create: bool) -> PlainStore | None:
+    """AI-Notes, or ``None`` while nothing has made its folder yet.
+
+    ``create`` makes the folder, for the first write.  Only inside a real notes
+    folder: a mistyped ``--root`` must not grow an ``ai-notes`` folder elsewhere.
+    """
+    _existing_folder(root / "plain", "Plain folder")
+    if create:
+        return PlainStore(ensure_ai_notes_folder(root))
+    folder = root / AI_NOTES_FOLDER
+    return PlainStore(folder) if (folder / ".trash").is_dir() else None
+
+
 def _find(notes: list[Note], wanted: str) -> Note:
     """Match a note by id, then exact title, then a unique title fragment."""
     needle = wanted.strip().casefold()
@@ -160,16 +219,122 @@ def _find(notes: list[Note], wanted: str) -> Note:
     raise CliError(f"No note matches {wanted!r}.")
 
 
+def _existing(store: PlainStore, wanted: str) -> Note | None:
+    """The note titled exactly ``wanted`` (any case), as typed or as it would be saved.
+
+    Writes never guess from a fragment the way ``read`` does: appending to or
+    deleting the wrong note is worse than being told there is none.
+    """
+    if not wanted.strip():
+        return None  # sanitize_title("") is "Untitled", a real note's name
+    for candidate in dict.fromkeys((wanted.strip(), sanitize_title(wanted))):
+        try:
+            return store.read_note(candidate)
+        except (FileNotFoundError, ValueError):
+            continue
+    return None
+
+
+def _title(raw: str) -> str:
+    text = raw.strip()
+    if not text:
+        raise CliError("A note needs a title.")
+    if len(text) > MAX_TITLE_LENGTH:
+        raise CliError(f"That title has {len(text)} characters; the limit is {MAX_TITLE_LENGTH}.")
+    return sanitize_title(text)
+
+
+def _check_size(text: str) -> str:
+    size = len(text.encode("utf-8"))
+    if size > MAX_NOTE_BYTES:
+        raise CliError(f"That note would be {size / 1_048_576:.1f} MB; notes.py writes notes up to 5 MB.")
+    return text
+
+
+def _read_text_file(path: Path, root: Path) -> str:
+    resolved = path.expanduser().resolve()
+    if resolved.suffix.lower() in {".vnkey", ".vnote"}:
+        raise Refused(KEY_MATERIAL_REFUSAL)
+    if resolved.is_relative_to((root / "vaults").resolve()):
+        raise Refused(KEY_MATERIAL_REFUSAL)
+    try:
+        if resolved.stat().st_size > MAX_NOTE_BYTES:
+            raise CliError(f"{path.name} is larger than 5 MB, the most notes.py writes into a note.")
+        data = resolved.read_bytes()
+    except OSError as exc:
+        raise CliError(f"{path} could not be read ({exc.strerror or type(exc).__name__}).") from exc
+    return data.decode("utf-8-sig", errors="replace")
+
+
+def _note_text(args: argparse.Namespace, root: Path, stdin) -> str:
+    """The text for ``write``/``append``: ``--text``, ``--file`` or standard input."""
+    if args.body is not None and args.body_file is not None:
+        raise CliError("Give the text with --text or --file, not both.")
+    if args.body is not None:
+        text = args.body
+    elif args.body_file is not None:
+        text = _read_text_file(Path(args.body_file), root)
+    else:
+        stream = stdin if stdin is not None else sys.stdin
+        if stream is None or (hasattr(stream, "isatty") and stream.isatty()):
+            raise CliError("Give the note's text with --text, --file or on standard input.")
+        raw = stream.buffer.read() if hasattr(stream, "buffer") else stream.read()
+        text = raw.decode("utf-8-sig", errors="replace") if isinstance(raw, bytes) else raw
+    text = text.removeprefix("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+    if not text.strip():
+        raise CliError("The text is empty, so nothing was written.")
+    if _KEY_FILE_MARKER.search(text):
+        raise Refused(KEY_MATERIAL_REFUSAL)
+    return _check_size(text)
+
+
+def _write(store: PlainStore, title: str, text: str, replace: bool) -> str:
+    body = text if text.endswith("\n") else text + "\n"
+    existing = _existing(store, title)
+    if existing is not None:
+        if not replace:
+            raise CliError(
+                f'AI-Notes already has "{existing.title}". Add --replace to overwrite it, '
+                "or use append to add to it."
+            )
+        note = store.save_note(existing.id, body)
+        return f'Replaced "{note.title}" in AI-Notes.'
+    note = store.create_note(title=title, body=body)
+    return f'Created "{note.title}" in AI-Notes.'
+
+
+def _append(store: PlainStore, wanted: str, text: str) -> str:
+    addition = text.strip("\n")
+    existing = _existing(store, wanted)
+    if existing is None:
+        note = store.create_note(title=_title(wanted), body=f"{addition}\n")
+        return f'Created "{note.title}" in AI-Notes.'
+    old = existing.body.rstrip()
+    body = _check_size(f"{old}\n\n{addition}\n" if old else f"{addition}\n")
+    note = store.save_note(existing.id, body)
+    return f'Appended to "{note.title}" in AI-Notes.'
+
+
+def _delete(store: PlainStore | None, wanted: str) -> str:
+    existing = _existing(store, wanted) if store is not None else None
+    if existing is None:
+        raise CliError(f"AI-Notes has no note titled {wanted!r}. delete needs the exact title.")
+    store.delete_note(existing.id)
+    return f'Moved "{existing.title}" to the AI-Notes trash; it can be restored from there in VaultNotes.'
+
+
 def _matching_lines(body: str, needle: str, limit: int = 3) -> list[str]:
     lines = [line.strip() for line in body.splitlines() if needle in line.casefold()]
     return lines[:limit]
 
 
-def run(argv: Sequence[str] | None = None, out=None) -> int:
-    out = out or sys.stdout
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="notes.py",
-        description="Read Plain and Personal VaultNotes notes. The Encrypted vault is always refused.",
+        description=(
+            "Read Plain, Personal and AI-Notes notes, and write AI-Notes (space 'ai'). "
+            "The Encrypted vault is always refused."
+        ),
     )
     parser.add_argument("--root", default=os.environ.get("VAULTNOTES_ROOT"), help="the notes folder")
     parser.add_argument(
@@ -185,17 +350,54 @@ def run(argv: Sequence[str] | None = None, out=None) -> int:
     search = commands.add_parser("search", help="find notes whose title or text contains TEXT")
     search.add_argument("space")
     search.add_argument("text")
-    args = parser.parse_args(argv)
+
+    def text_options(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--text", dest="body", help="the text itself")
+        command.add_argument(
+            "--file", dest="body_file", help="a UTF-8 file holding the text (standard input otherwise)"
+        )
+
+    write = commands.add_parser("write", help="create a note in AI-Notes")
+    write.add_argument("space", help="must be ai")
+    write.add_argument("title")
+    text_options(write)
+    write.add_argument("--replace", action="store_true", help="overwrite a note that has this title")
+    append = commands.add_parser("append", help="add text to the end of an AI-Notes note, creating it if needed")
+    append.add_argument("space", help="must be ai")
+    append.add_argument("note", help="the note's exact title")
+    text_options(append)
+    delete = commands.add_parser("delete", help="move an AI-Notes note to its trash")
+    delete.add_argument("space", help="must be ai")
+    delete.add_argument("note", help="the note's exact title")
+    return parser
+
+
+def run(argv: Sequence[str] | None = None, out=None, stdin=None) -> int:
+    out = out or sys.stdout
+    args = _parser().parse_args(argv)
 
     reader: NotesReader | None = None
     try:
-        space = _space(args.space)  # before anything else, so Encrypted is refused first
+        # Before anything else, so Encrypted (and a write outside AI-Notes) is
+        # refused first.
+        writing = args.command in WRITE_COMMANDS
+        space = _writable_space(args.space) if writing else _space(args.space)
         if not args.root:
             raise CliError("Name the notes folder with --root (or VAULTNOTES_ROOT).")
-        reader = NotesReader(
-            Path(args.root).expanduser(),
-            Path(args.personal_key) if args.personal_key else None,
-        )
+        root = Path(args.root).expanduser()
+        if args.command == "write":
+            title, text = _title(args.title), _note_text(args, root, stdin)
+            print(_write(_ai_store(root, create=True), title, text, args.replace), file=out)
+            return 0
+        if args.command == "append":
+            text = _note_text(args, root, stdin)
+            print(_append(_ai_store(root, create=True), args.note, text), file=out)
+            return 0
+        if args.command == "delete":
+            print(_delete(_ai_store(root, create=False), args.note), file=out)
+            return 0
+
+        reader = NotesReader(root, Path(args.personal_key) if args.personal_key else None)
         if args.command == "list":
             for note in reader.notes(space):
                 print(f"{note.title}\t{note.modified}\t{note.id}", file=out)
@@ -215,6 +417,9 @@ def run(argv: Sequence[str] | None = None, out=None) -> int:
         return EXIT_REFUSED
     except CliError as exc:
         print(str(exc), file=sys.stderr)
+        return EXIT_ERROR
+    except OSError as exc:
+        print(f"The notes folder could not be used ({exc.strerror or type(exc).__name__}).", file=sys.stderr)
         return EXIT_ERROR
     finally:
         if reader is not None:
