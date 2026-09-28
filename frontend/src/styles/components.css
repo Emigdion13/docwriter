@@ -1006,6 +1006,22 @@
   font-weight: 600;
 }
 
+.sealed-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+}
+
+.sealed-hero [hidden],
+.sealed-actions[hidden] {
+  display: none;
+}
+
+.dlg-sub.is-error {
+  color: var(--danger);
+}
+
 .hud {
   display: flex;
   flex-wrap: wrap;
