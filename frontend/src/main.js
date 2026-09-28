@@ -638,6 +638,35 @@ async function createNote(initialTitle = 'Untitled') {
   toast(`Created “${newNote.title}”`, { icon: 'plus' });
 }
 
+/** "A", "A and B", "A, B and C". */
+function listText(items) {
+  if (items.length < 2) return items[0] || '';
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
+
+/**
+ * The rename prompt's text, from count_links_to(): where the linking notes
+ * are (`spaces`, only sent for a Plain note) and which vaults were not looked
+ * in because they are locked (`locked`).
+ */
+function renamePromptMessage(linked, space, oldTitle, newTitle) {
+  const count = linked.count;
+  const notes = `${count} note${count === 1 ? '' : 's'}`;
+  const where = Array.isArray(linked.spaces) && linked.spaces.length
+    ? linked.spaces
+    : [{ name: space.name, count }];
+  const found = where.length === 1
+    ? `${notes} in ${where[0].name} link${count === 1 ? 's' : ''} to “${oldTitle}”.`
+    : `${notes} link to “${oldTitle}”: ${listText(where.map((item) => `${item.count} in ${item.name}`))}.`;
+  const locked = Array.isArray(linked.locked) ? linked.locked.map((vault) => vault.name) : [];
+  const unchecked = locked.length
+    ? ` ${listText(locked)} ${locked.length === 1 ? 'is' : 'are'} locked, so any links in `
+      + `${locked.length === 1 ? 'it' : 'them'} keep the old title.`
+    : '';
+  return `${found} Rewrite ${count === 1 ? 'it' : 'them'} to “${newTitle}”? `
+    + `Aliases and #headings are kept.${unchecked}`;
+}
+
 async function renameNote(newTitle) {
   const space = getActiveSpace();
   const note = state.currentNote;
@@ -652,16 +681,17 @@ async function renameNote(newTitle) {
 
   if (trimmed === note.title) return;
 
-  // "Update N links in other notes?"  The count comes from the link index, so
-  // it only ever covers this space - links never cross spaces (section 7).
+  // "Update N links in other notes?"  The count comes from the link indexes:
+  // this space, plus for a Plain note the [[Plain:Title]] links in AI-Notes
+  // and unlocked vaults, which the rename rewrites too.  A locked vault is
+  // never looked in, so the prompt says its links keep the old title.
   const linked = await bridge.count_links_to(space.id, note.id);
   const incoming = linked?.count || 0;
   let updateLinks = false;
   if (incoming > 0) {
     updateLinks = await confirmAction({
       title: `Update ${incoming} link${incoming === 1 ? '' : 's'} in other notes?`,
-      message: `${incoming} note${incoming === 1 ? '' : 's'} in ${space.name} link to “${note.title}”. `
-        + `Rewrite ${incoming === 1 ? 'it' : 'them'} to “${trimmed}”? Aliases and #headings are kept.`,
+      message: renamePromptMessage(linked, space, note.title, trimmed),
       confirmLabel: 'Update links',
       cancelLabel: 'Rename only',
       iconName: 'link'
