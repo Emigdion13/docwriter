@@ -3,7 +3,7 @@
    Left navigation panel: Spaces list, New vault button, Google Drive card
    ================================================================= */
 
-import { icon } from '../icons.js';
+import { icon, spaceIcon } from '../icons.js';
 
 export function createSidebar({ onSelectSpace, onNewVault, onSyncDrive, onOpenDriveSettings }) {
   const aside = document.createElement('aside');
@@ -56,8 +56,9 @@ export function renderSpaces(spaces, activeSpaceId) {
 
   container.innerHTML = spaces.map(s => {
     const isPlain = s.kind === 'plain';
-    const sub = isPlain ? 'Always open' : s.created === false ? 'Not set up' : s.locked ? 'Locked' : 'Unlocked';
-    const ic = isPlain ? 'file' : s.locked ? 'lock' : 'unlock';
+    const sub = s.id === 'ai' ? 'For AI helpers'
+      : isPlain ? 'Always open' : s.created === false ? 'Not set up' : s.locked ? 'Locked' : 'Unlocked';
+    const ic = spaceIcon(s);
     const isActive = s.id === activeSpaceId;
     const isLocked = !isPlain && s.locked;
     const badgeContent = isLocked ? icon('key', 12) : (s.note_count ?? s.notes?.length ?? 0);

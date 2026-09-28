@@ -1,9 +1,13 @@
-"""Read Plain and Personal notes from the command line (the Encrypted vault is always refused).
+"""Notes from the command line: read Plain, Personal and AI-Notes, write only AI-Notes.
+
+The Encrypted vault is always refused.
 
 Usage:
     python notes.py --root <notes folder> list plain
     python notes.py --root <notes folder> read plain "Shopping list"
     python notes.py --root <notes folder> --personal-key <file> search personal flights
+    python notes.py --root <notes folder> write ai "PR 42 review" --file review.md
+    python notes.py --root <notes folder> append ai "Session log" --text "Done: tests"
 
 See vaultnotes/notes_cli.py for the details.
 """

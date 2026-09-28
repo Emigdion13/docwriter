@@ -22,13 +22,16 @@
 
 ## 1. What we're building
 
-A Windows desktop app for writing Markdown notes. Notes are organized in three **spaces**:
+A Windows desktop app for writing Markdown notes. Notes are organized in four **spaces**:
 
 | Space | Stored on disk as | Unlocked by |
 |---|---|---|
 | **Plain** | normal `.md` files that any editor can read | nothing, always open |
 | **Encrypted** | encrypted `.vnote` files | key file #1 (e.g. `encrypted.vnkey`) |
 | **Personal** | encrypted `.vnote` files | key file #2 (e.g. `personal.vnkey`) |
+| **AI-Notes** | normal `.md` files, like Plain, in `ai-notes/` | nothing, always open |
+
+AI-Notes (space id `ai`, added after v1) belongs to AI helpers: `notes.py` lets them write there and nowhere else, so their findings never mix with the user's Plain notes. The app treats it exactly like Plain.
 
 Notes can link to each other the way Obsidian does, by writing `[[Note title]]`. Each note also shows a "Linked from" list of the notes that link to it (backlinks).
 
@@ -187,6 +190,9 @@ vaultnotes/
 ├─ plain\
 │  ├─ Shopping list.md
 │  └─ .trash\
+├─ ai-notes\                                (AI helpers write here; same format as plain\)
+│  ├─ About AI-Notes.md
+│  └─ .trash\
 └─ vaults\
    ├─ encrypted\
    │  ├─ vault.json
@@ -317,7 +323,7 @@ Links are plain text inside a note's Markdown body, so nothing new is stored on 
 | `[text](https://example.com)` | A web link. Opens in your browser |
 
 Rules:
-- **Only the same space.** A link finds notes in the space it's written in. Plain links find Plain notes. Encrypted links find Encrypted notes. Personal links find Personal notes.
+- **Only the same space.** A link finds notes in the space it's written in. Plain links find Plain notes. Encrypted links find Encrypted notes. Personal links find Personal notes. AI-Notes links find AI-Notes notes; like a vault note, an AI-Notes note may also write `[[Plain:Title]]` (M10), and nothing links into AI-Notes from outside.
 - **Matching ignores upper/lower case** and extra spaces at the start or end of the title.
 - **Titles must be unique within a space**, ignoring case. Plain notes already are, because titles are filenames. In vaults, creating or renaming a note to a title that already exists adds ` (2)`, ` (3)` and so on.
 - **Inside a Markdown table**, write the `|` as `\|` (`[[Travel 2026\|my trip]]`), just like Obsidian.
@@ -432,7 +438,7 @@ The frontend calls Python with `await window.pywebview.api.<name>(...)`, after t
 **Calm sci-fi.** Think of the control panel of a spaceship in a good movie, not a flashing gaming keyboard.
 - **Deep, dark background** with a soft aurora of color that drifts very slowly, plus a faint grid.
 - **Frosted glass panels** (blurred, see-through, with a thin light border) floating over it.
-- **One neon accent per space:** Plain is cyan, Encrypted is violet, Personal is pink. When you switch spaces, the whole app smoothly re-tints to that color.
+- **One neon accent per space:** Plain is cyan, Encrypted is violet, Personal is pink, AI-Notes is lime. When you switch spaces, the whole app smoothly re-tints to that color.
 - **Glow only on what matters:** the selected item, focused fields, links, unlocked vaults.
 - **Motion that explains something:** notes "decrypt" when a vault unlocks and scramble away when it locks.
 
@@ -458,6 +464,7 @@ The frontend calls Python with `await window.pywebview.api.<name>(...)`, after t
 | `--plain` | `#22d3ee` | `#05d9e8` | `#0891b2` |
 | `--encrypted` | `#a78bfa` | `#ff2a6d` | `#7c3aed` |
 | `--personal` | `#f472b6` | `#ff9f1c` | `#db2777` |
+| `--ai` | `#a3e635` | `#b8f53c` | `#4d7c0f` |
 | `--glass` | `rgba(255,255,255,.035)` | `rgba(255,255,255,.04)` | `rgba(255,255,255,.55)` |
 | `--glass-border` | `rgba(255,255,255,.085)` | `rgba(255,120,200,.14)` | `rgba(15,23,42,.08)` |
 | `--surface` (dialogs) | `rgba(14,16,28,.84)` | `rgba(24,8,44,.86)` | `rgba(255,255,255,.9)` |

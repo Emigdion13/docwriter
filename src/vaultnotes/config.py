@@ -87,6 +87,42 @@ INITIAL_READING_LIST = """# Reading list
 - [[Book club]] picks for October
 """
 
+#: Folder of the AI-Notes space, beside ``plain``: ordinary ``.md`` files that AI
+#: helpers may create and change (``notes.py`` writes nowhere else).
+AI_NOTES_FOLDER = "ai-notes"
+
+AI_GUIDE_TITLE = "About AI-Notes"
+
+INITIAL_AI_GUIDE = """# About AI-Notes
+
+This space belongs to AI helpers such as Claude. They write their findings,
+summaries, drafts and hand-over notes here, so Plain stays yours alone.
+
+- **AI helpers** create, read and change notes here, with `notes.py` or by
+  writing `.md` files in the `ai-notes` folder. Plain and Personal are
+  read-only to them, and Encrypted is off-limits.
+- **You** can read, edit, move or delete anything here, like any other note.
+- **Link to your own notes** with `[[Plain:Title]]`.
+- **Never store** PHI, passwords or keys here: these notes are unencrypted and
+  go to the Google Drive backup like the rest of the notes folder.
+"""
+
+
+def ensure_ai_notes_folder(notes_root: Path | str) -> Path:
+    """Create the AI-Notes folder and its trash; return the folder.
+
+    The guide note is written only when the folder itself is new, so deleting
+    it is permanent.
+    """
+    folder = Path(notes_root) / AI_NOTES_FOLDER
+    first_run = not folder.exists()
+    (folder / ".trash").mkdir(parents=True, exist_ok=True)
+    if first_run:
+        guide = folder / f"{AI_GUIDE_TITLE}.md"
+        if not guide.exists():
+            atomic_write(guide, INITIAL_AI_GUIDE.encode("utf-8"))
+    return folder
+
 
 class Config:
     """Manages settings.json and notes directory structure."""
@@ -122,6 +158,10 @@ class Config:
     @property
     def plain_dir(self) -> Path:
         return self.notes_root / "plain"
+
+    @property
+    def ai_dir(self) -> Path:
+        return self.notes_root / AI_NOTES_FOLDER
 
     def load(self) -> dict[str, Any]:
         """Load settings from settings.json or populate with defaults.
@@ -342,6 +382,7 @@ class Config:
 
         if first_plain_run:
             self._seed_sample_plain_notes(plain)
+        ensure_ai_notes_folder(root)
 
     def _seed_sample_plain_notes(self, plain_dir: Path) -> None:
         """Create initial sample notes if plain directory was just created."""

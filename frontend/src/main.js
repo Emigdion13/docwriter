@@ -12,6 +12,7 @@ import './styles/preview.css';
 
 // Bridge & Services
 import { bridge, events } from './bridge.js';
+import { spaceIcon } from './icons.js';
 
 // UI Modules
 import { createToolbar, updateToolbarView, updateToolbarTheme } from './ui/toolbar.js';
@@ -201,16 +202,18 @@ async function refreshPlainTitles(space) {
 
 /**
  * Follow a [[link]] the user clicked - in the preview, or with Ctrl+click in the
- * editor (M10).  `space` is set for the one cross-space form a vault note may
- * use, `[[Plain:Title]]`, and then the note is opened by switching spaces.
- * `heading` asks the preview to scroll to that heading once the note is up.
+ * editor (M10).  `space` is set for the one cross-space form a vault or
+ * AI-Notes note may use, `[[Plain:Title]]`, and then the note is opened by
+ * switching spaces.  `heading` asks the preview to scroll to that heading once
+ * the note is up.
  */
 async function openLinkTarget(title, { space = '', heading = '' } = {}) {
   const current = getActiveSpace();
   if (!current) return;
-  // The only cross-space link is [[Plain:Title]] from a vault note (rule 11).
-  // A hand-written "#vn-open/encrypted/..." in a Plain note goes nowhere.
-  if (space && space !== current.id && !(space === 'plain' && current.kind === 'vault')) {
+  // The only cross-space link is [[Plain:Title]]: Plain is always open, and
+  // nothing may link into a vault (rule 11).  A hand-written
+  // "#vn-open/encrypted/..." in a Plain note goes nowhere.
+  if (space && space !== current.id && space !== 'plain') {
     toast('Links only lead to notes in the same space.', { icon: 'alert' });
     return;
   }
@@ -1446,7 +1449,7 @@ async function getPaletteCommands() {
       commands.push({
         label: n.title,
         sub: s.name,
-        icon: s.kind === 'plain' ? 'file' : 'unlock',
+        icon: spaceIcon(s),
         colorVar: s.colorVar,
         run: () => selectSpace(s.id, n.id)
       });

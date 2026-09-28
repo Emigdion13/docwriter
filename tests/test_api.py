@@ -26,7 +26,7 @@ def api(tmp_path: Path) -> Api:
 def test_api_get_state(api: Api) -> None:
     state = api.get_state()
     assert "spaces" in state
-    assert len(state["spaces"]) == 3
+    assert [s["id"] for s in state["spaces"]] == ["plain", "encrypted", "personal", "ai"]
 
     plain_space = next(s for s in state["spaces"] if s["id"] == "plain")
     assert plain_space["locked"] is False
