@@ -366,7 +366,7 @@ The frontend calls Python with `await window.pywebview.api.<name>(...)`, after t
 | `create_note(space_id, title)` | the new note |
 | `save_note(space_id, note_id, body)` | `{modified}` |
 | `rename_note(space_id, note_id, new_title, update_links)` | `{title, links_updated}` |
-| `count_links_to(space_id, note_id)` | `{count}`, used by the rename prompt and the move warning |
+| `count_links_to(space_id, note_id)` | `{count}`, used by the rename prompt and the move warning. For a Plain note, `count` includes the `[[Plain:Title]]` links in AI-Notes and unlocked vaults, and the result adds `spaces` (where the linking notes are) and `locked` (the vaults it did not look in) |
 | `delete_note`, `restore_note`, `list_trash` | trash handling |
 | `move_note(space_id, note_id, target_space_id)` | `{new_id, broken_links}` |
 | `render_preview(space_id, body)` | HTML string (section 4.7) |

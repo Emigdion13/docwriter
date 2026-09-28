@@ -465,7 +465,11 @@ def test_rename_updates_links_in_other_notes(api: Api) -> None:
         "Shopping list",
         "See [[Travel 2026]], [[Travel 2026|my trip]] and [[Travel 2026#Hotels]].",
     )
-    assert api.count_links_to("plain", "Travel 2026") == {"count": 1}
+    assert api.count_links_to("plain", "Travel 2026") == {
+        "count": 1,
+        "spaces": [{"space_id": "plain", "name": "Plain", "count": 1}],
+        "locked": [],
+    }
 
     result = api.rename_note("plain", "Travel 2026", "Trip 2026", update_links=True)
     assert result["title"] == "Trip 2026"
@@ -502,7 +506,7 @@ def test_moving_a_note_reports_the_links_that_break(api: Api) -> None:
     write(api, "plain", "Home lab", "# Home lab\n")
 
     links = api.count_links_to("plain", "Travel 2026")
-    assert links == {"count": 1}
+    assert links["count"] == 1
     # The note itself holds one resolved link, so a move breaks two in total.
     result = api.note_links("plain", "Travel 2026")
     assert [item["title"] for item in result["outgoing"]] == ["Home lab"]
@@ -707,3 +711,169 @@ def test_embeds_count_as_links_for_backlinks(api: Api) -> None:
     assert [item["title"] for item in lab["backlinks"]] == ["Notes"]
     listing = {item["id"]: item for item in api.list_notes("plain")}
     assert listing["Notes"]["link_count"] == 1
+
+
+def test_rename_can_be_limited_to_the_links_that_name_plain() -> None:
+    body = (
+        "[[Travel 2026]], [text](Travel%202026.md), [[Plain:Travel 2026]], "
+        "![[Plain:travel 2026.md#Hotels|stay]]\n"
+        "| [[Plain:Travel 2026\\|trip]] |\n"
+        "`[[Plain:Travel 2026]]`\n"
+    )
+
+    # In a vault note, what a Plain rename does: only the Plain links move,
+    # with their "!", heading, alias and table pipe kept.
+    renamed, count = rename_links(body, "Travel 2026", "Trip 2026", spaces={"plain"})
+    assert count == 3
+    assert renamed == (
+        "[[Travel 2026]], [text](Travel%202026.md), [[Plain:Trip 2026]], "
+        "![[Plain:Trip 2026#Hotels|stay]]\n"
+        "| [[Plain:Trip 2026\\|trip]] |\n"
+        "`[[Plain:Travel 2026]]`\n"
+    )
+
+    # And the other way round: only the links to a note of the same space.
+    renamed, count = rename_links(body, "Travel 2026", "Trip 2026", spaces={""})
+    assert count == 2
+    assert renamed.startswith("[[Trip 2026]], [text](Trip%202026.md), [[Plain:Travel 2026]], ")
+
+
+def test_index_finds_the_notes_that_link_out_to_a_plain_note() -> None:
+    index = LinkIndex("personal")
+    index.build(
+        [
+            note("a" * 32, "Home lab", "The vault's own note of that name."),
+            note("b" * 32, "Rack", "[[Home lab]] is the vault's note."),
+            note("c" * 32, "Wiring", "See ![[Plain:home lab.md#Power|power]]."),
+            note("d" * 32, "Snippet", "`[[Plain:Home lab]]` is only code."),
+        ]
+    )
+
+    assert index.sources_linking_out("plain", "Home lab") == ["c" * 32]
+    assert index.sources_linking_out("plain", "Rack") == []
+
+    index.update(note("b" * 32, "Rack", "Now [[Plain:Home lab]] as well."))
+    assert sorted(index.sources_linking_out("plain", " HOME LAB ")) == ["b" * 32, "c" * 32]
+
+    index.clear()
+    assert index.sources_linking_out("plain", "Home lab") == []
+
+
+def test_plain_rename_reaches_unlocked_vaults_and_never_a_locked_one(
+    api_with_vaults: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Security rule 11: a locked vault is not read, counted or rewritten."""
+    api = api_with_vaults
+    write(api, "plain", "Home lab", "# Home lab\n")
+    assert api.unlock_vault("encrypted")["ok"] is True
+    sealed = api.create_note("encrypted", "Sealed")
+    api.save_note("encrypted", sealed["id"], "Kept: [[Plain:Home lab]]")
+    api.lock_vault("encrypted")
+    assert api.unlock_vault("personal")["ok"] is True
+    lab = api.create_note("personal", "Home lab")
+    rack = api.create_note("personal", "Rack")
+    api.save_note("personal", rack["id"], "[[Home lab]] here, [[Plain:Home lab#Power|the lab]] at home.")
+
+    locked = api.vault_stores["encrypted"]
+    on_disk = {path: path.read_bytes() for path in locked.root.rglob("*") if path.is_file()}
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("the locked vault was asked for its notes")
+
+    for name in ("unlock", "read_note", "save_note", "list_notes", "iter_notes", "disk_note_count", "_decrypt_file"):
+        monkeypatch.setattr(locked, name, refuse)
+
+    # The locked vault holds a matching link, and nothing admits it.
+    assert api.count_links_to("plain", "Home lab") == {
+        "count": 1,
+        "spaces": [{"space_id": "personal", "name": "Personal", "count": 1}],
+        "locked": [{"space_id": "encrypted", "name": "Encrypted"}],
+    }
+    assert api.rename_note("plain", "Home lab", "Garage", update_links=True)["links_updated"] == 1
+    assert api.open_note("personal", rack["id"])["body"] == (
+        "[[Home lab]] here, [[Plain:Garage#Power|the lab]] at home."
+    )
+    # The vault's own "Home lab" keeps its backlink; nothing reached Encrypted.
+    assert [item["title"] for item in api.open_note("personal", lab["id"])["backlinks"]] == ["Rack"]
+    assert len(api.link_indexes["encrypted"]) == 0
+    monkeypatch.undo()
+    assert {path: path.read_bytes() for path in locked.root.rglob("*") if path.is_file()} == on_disk
+
+    # Unlocked later, its link still names the old title: a missing Plain note.
+    assert api.unlock_vault("encrypted")["ok"] is True
+    kept = api.open_note("encrypted", sealed["id"])["body"]
+    assert kept == "Kept: [[Plain:Home lab]]"
+    assert 'href="#vn-missing/plain/Home%20lab"' in api.render_preview("encrypted", kept)
+
+
+def test_a_vault_index_does_not_resolve_links_that_name_plain() -> None:
+    index = LinkIndex("personal")
+    index.build(
+        [
+            note("a" * 32, "Home lab", "The vault's own note of that name."),
+            note("b" * 32, "Rack", "Only [[Plain:Home lab]] and [[Plain:Not in Plain]]."),
+        ]
+    )
+
+    # Not a backlink, an outgoing link or a missing note of this vault...
+    assert index.backlinks("a" * 32) == []
+    assert index.outgoing("b" * 32) == []
+    assert index.missing_targets("b" * 32) == []
+    # ...but still a link of the note, and one a Plain rename can find.
+    assert index.link_count("b" * 32) == 2
+    assert index.sources_linking_out("plain", "Home lab") == ["b" * 32]
+
+    # Inside Plain the prefix names Plain itself, so it is an ordinary link.
+    plain = LinkIndex("plain")
+    plain.build([note("Home lab", "Home lab"), note("Rack", "Rack", "See [[Plain:Home lab]].")])
+    assert plain.backlinks("Home lab") == [{"id": "Rack", "title": "Rack"}]
+
+
+def test_renaming_a_vault_note_leaves_links_to_the_plain_note_alone(api_with_vaults: Api) -> None:
+    api = api_with_vaults
+    write(api, "plain", "Home lab", "# Home lab\n")
+    assert api.unlock_vault("personal")["ok"] is True
+    lab = api.create_note("personal", "Home lab")
+    rack = api.create_note("personal", "Rack")
+    api.save_note("personal", rack["id"], "vault [[Home lab]] and plain [[Plain:Home lab]]")
+    wiring = api.create_note("personal", "Wiring")
+    api.save_note("personal", wiring["id"], "Only [[Plain:Home lab]].")
+
+    # Wiring links to the Plain note, not to the vault's own "Home lab".
+    assert api.count_links_to("personal", lab["id"]) == {"count": 1}
+    assert [item["title"] for item in api.open_note("personal", lab["id"])["backlinks"]] == ["Rack"]
+
+    assert api.rename_note("personal", lab["id"], "Garage", update_links=True)["links_updated"] == 1
+    assert api.open_note("personal", rack["id"])["body"] == "vault [[Garage]] and plain [[Plain:Home lab]]"
+    assert api.open_note("personal", wiring["id"])["body"] == "Only [[Plain:Home lab]]."
+    assert 'href="#vn-open/plain/Home%20lab"' in api.render_preview("personal", "Only [[Plain:Home lab]].")
+    # The vault's graph holds its own links only.
+    assert [(edge["from"], edge["title"]) for edge in api.get_graph("personal")["edges"]] == [
+        (rack["id"], "Garage")
+    ]
+
+
+def test_moving_counts_links_from_other_spaces_and_plain_links_keep_working(api_with_vaults: Api) -> None:
+    api = api_with_vaults
+    write(api, "plain", "Home lab", "# Home lab\n\n[[Helper]] and [[Helper]] again.")
+    write(api, "plain", "Helper", "# Helper\n")
+    write(api, "plain", "Index", "[[Home lab]]")
+    write(api, "ai", "Finding", "[[Plain:Home lab]]")
+    assert api.unlock_vault("encrypted")["ok"] is True
+    sealed = api.create_note("encrypted", "Sealed")
+    api.save_note("encrypted", sealed["id"], "[[Plain:Home lab]]")
+    api.lock_vault("encrypted")
+    assert api.unlock_vault("personal")["ok"] is True
+    rack = api.create_note("personal", "Rack")
+    api.save_note("personal", rack["id"], "[[Plain:Home lab]] and [[Plain:Helper]]")
+
+    # What the move dialog shows: Index, Finding and Rack link here (the locked
+    # vault is not counted), and the note links to one other note, twice.
+    linked = api.count_links_to("plain", "Home lab")
+    assert linked["count"] == 3
+    assert linked["locked"] == [{"space_id": "encrypted", "name": "Encrypted"}]
+    assert api.move_note("plain", "Home lab", "personal")["broken_links"] == 3 + 1
+
+    # Personal now has a "Home lab" of its own, but Rack's [[Plain:…]] links
+    # never meant it, so moving Rack out breaks nothing.
+    assert api.move_note("personal", rack["id"], "plain")["broken_links"] == 0

@@ -278,9 +278,12 @@ Things the spec forbids, so the app does not do them:
 - No cache of decrypted text on disk, ever, including `%TEMP%`.
 - No plaintext fallback if the Windows credential store is unavailable: the Drive
   sign-in fails with a clear message instead of writing a token unprotected.
-- A `[[Plain:Title]]` link is not rewritten when the *Plain* note is renamed while the
-  vault holding the link is locked (a locked vault's index exists only in memory).
-  Fix it by unlocking the vault before renaming.
+- Renaming a *Plain* note rewrites the `[[Plain:Title]]` links in AI-Notes and in every
+  unlocked vault, but never in a locked one: the app does not decrypt a vault to look
+  for links (its index exists only in memory while it is unlocked). When it asks
+  whether to update links, it names the locked vaults it could not check. Their links
+  keep the old title and show as missing, so unlock those vaults before renaming. The
+  move warning counts a Plain note's links the same way.
 - Backup uploads the whole notes folder on its first run; deleting notes locally does
   not delete them from Drive until you press *Clean up Drive…*.
 - No frameless window (the toolbar stays inside a normal title bar), no tag or pin
