@@ -218,6 +218,23 @@ if the note does not exist yet.
 Arctic. **Effects:** *Lite* and *Off* drop the blur and glow for older machines
 (Settings, the status bar, or the palette).
 
+### Reading notes from a script or an AI helper
+
+`notes.py` (it runs `vaultnotes.notes_cli`) reads Plain and Personal notes without the
+app. It never writes anything, and it refuses the **Encrypted** vault outright: it never
+lists that vault, never opens its folder, and never uses its key. Use Encrypted for
+anything a helper must not see, such as PHI.
+
+```
+.venv\Scripts\python notes.py --root "%USERPROFILE%\Documents\VaultNotes" list plain
+.venv\Scripts\python notes.py --root ... read plain "Shopping list"
+.venv\Scripts\python notes.py --root ... --personal-key E:\keys\personal.vnkey search personal flights
+```
+
+`--root` and `--personal-key` can be set once as `VAULTNOTES_ROOT` and
+`VAULTNOTES_PERSONAL_KEY`. `read` accepts a note id, its title, or a unique part of the
+title. A passphrase-protected Personal key is not accepted; open that vault in the app.
+
 ---
 
 ## 8. Deliberate limits
@@ -244,6 +261,7 @@ Things the spec forbids, so the app does not do them:
 
 ```
 run.py                     start the app ("--dev" for the Vite dev server)
+notes.py                   read Plain / Personal notes from a shell (never Encrypted)
 build.bat                  the M9 build: frontend, icon, VaultNotes.exe
 frontend/                  the look: Vite, plain JS modules, no framework
 src/vaultnotes/            the engine: api.py (Bridge API), storage/, crypto/,
