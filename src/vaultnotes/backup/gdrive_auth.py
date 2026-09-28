@@ -23,6 +23,8 @@ import json
 from pathlib import Path
 from typing import Any, Protocol
 
+from vaultnotes.storage.atomic import atomic_write
+
 #: The one scope VaultNotes asks for (security rule 10).
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 
@@ -35,6 +37,9 @@ KEYRING_USER = "gdrive"
 
 #: File name of the OAuth client, inside the app-settings folder.
 CLIENT_SECRET_FILE = "client_secret.json"
+
+#: Google's download is well under 1 KB; anything this big is the wrong file.
+MAX_CLIENT_SECRET_BYTES = 64 * 1024
 
 
 class KeyringLike(Protocol):
@@ -79,9 +84,9 @@ def read_client_secret(app_dir: Path | str | None = None) -> dict[str, Any]:
     if not path.is_file():
         raise DriveAuthError(
             "client_secret_missing",
-            "Google sign-in needs client_secret.json in "
-            f"{path.parent}. Copy it from the Google Cloud console (see the "
-            "build plan, section 8.1), then try again.",
+            "Google sign-in needs the client_secret.json you downloaded from "
+            "Google Cloud (see the build plan, section 8.1). In Settings, press "
+            "'Choose client_secret.json…' and pick that file, then connect again.",
         )
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -91,7 +96,11 @@ def read_client_secret(app_dir: Path | str | None = None) -> dict[str, Any]:
             "client_secret_damaged",
             f"client_secret.json could not be read ({type(exc).__name__}).",
         ) from exc
+    return _client_from(data)
 
+
+def _client_from(data: Any, *, desktop_only: bool = False) -> dict[str, Any]:
+    """Return the client fields of a downloaded OAuth client file, or explain."""
     if not isinstance(data, dict):
         raise DriveAuthError(
             "client_secret_damaged",
@@ -100,14 +109,49 @@ def read_client_secret(app_dir: Path | str | None = None) -> dict[str, Any]:
 
     # Desktop-app clients nest their fields under "installed"; web clients
     # under "web".  Only the desktop shape is supported (section 8.1).
-    client = data.get("installed") or data.get("web")
+    client = data.get("installed") if desktop_only else data.get("installed") or data.get("web")
     if not isinstance(client, dict) or not client.get("client_id"):
         raise DriveAuthError(
             "client_secret_damaged",
-            "client_secret.json has no client id. Download an OAuth client of "
-            "type 'Desktop app' from Google Cloud Console.",
+            "That is not an OAuth client of type 'Desktop app'. In Google Cloud "
+            "Console, create one under Clients and download its JSON.",
         )
     return client
+
+
+def install_client_secret(source: Path | str, app_dir: Path | str | None = None) -> Path:
+    """Check the file Google downloaded, then copy it to :func:`client_secret_path`.
+
+    A wrong file never replaces a working one.  VaultNotes copies it itself so
+    it lands in the folder the app reads: a packaged Windows app (the Claude
+    desktop app, for one) that copies into ``%APPDATA%`` writes to its own
+    private copy of that folder instead.
+    """
+    try:
+        with open(source, "rb") as handle:
+            raw = handle.read(MAX_CLIENT_SECRET_BYTES + 1)
+    except OSError as exc:
+        raise DriveAuthError(
+            "client_secret_damaged",
+            f"That file could not be read ({type(exc).__name__}).",
+        ) from exc
+    if len(raw) > MAX_CLIENT_SECRET_BYTES:
+        raise DriveAuthError(
+            "client_secret_damaged",
+            "That file is too large to be the client_secret.json Google downloads.",
+        )
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError as exc:  # UnicodeDecodeError is a ValueError too
+        raise DriveAuthError(
+            "client_secret_damaged",
+            "That file is not the JSON file Google downloaded.",
+        ) from exc
+    _client_from(data, desktop_only=True)
+
+    dest = client_secret_path(app_dir)
+    atomic_write(dest, raw)
+    return dest
 
 
 def _keyring_backend(keyring: KeyringLike | None = None) -> KeyringLike:
@@ -351,6 +395,7 @@ __all__ = [
     "CLIENT_SECRET_FILE",
     "KEYRING_SERVICE",
     "KEYRING_USER",
+    "MAX_CLIENT_SECRET_BYTES",
     "SCOPES",
     "DriveAuthError",
     "TokenStore",
@@ -358,6 +403,7 @@ __all__ = [
     "client_secret_path",
     "disconnect",
     "get_credentials",
+    "install_client_secret",
     "is_connected",
     "read_client_secret",
     "sign_in",

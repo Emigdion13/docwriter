@@ -14,6 +14,7 @@ export function createSettingsOverlay({
   onChooseFolder,
   getBackup,
   onSaveBackup,
+  onChooseClientSecret,
   onConnectDrive,
   onDisconnectDrive,
   onBackupNow,
@@ -108,6 +109,9 @@ export function createSettingsOverlay({
         </div>
 
         <div class="drive-actions">
+          <button class="btn" id="set-drive-client" type="button">
+            ${icon('file', 15)}Choose client_secret.json…
+          </button>
           <button class="btn primary" id="set-drive-connect" type="button">
             ${icon('cloud', 15)}Connect Google Drive
           </button>
@@ -156,13 +160,14 @@ export function createSettingsOverlay({
     const data = backup || {};
     const connected = Boolean(data.connected);
     driveState.classList.toggle('on', connected);
+    overlay.querySelector('#set-drive-client').style.display = connected ? 'none' : '';
     overlay.querySelector('#set-drive-connect').style.display = connected ? 'none' : '';
     overlay.querySelector('#set-drive-disconnect').style.display = connected ? '' : 'none';
     overlay.querySelector('#set-drive-prune').style.display = connected && data.has_folder ? '' : 'none';
     if (!connected) {
       driveText.textContent = data.client_secret
         ? 'Not connected · sign in once to back up'
-        : 'No client_secret.json yet · see the build plan, section 8.1';
+        : 'No client_secret.json yet · choose the file you downloaded from Google Cloud';
     } else {
       const auto = data.enabled ? `every ${data.interval_minutes} min` : 'automatic backup off';
       driveText.textContent = `Connected · ${auto} · ${data.folder_name || 'VaultNotes Backup'}`;
@@ -182,6 +187,7 @@ export function createSettingsOverlay({
     return result;
   }
 
+  overlay.querySelector('#set-drive-client').onclick = () => runDriveAction(onChooseClientSecret);
   overlay.querySelector('#set-drive-connect').onclick = () => runDriveAction(onConnectDrive);
   overlay.querySelector('#set-drive-disconnect').onclick = () => runDriveAction(onDisconnectDrive);
   overlay.querySelector('#set-drive-now').onclick = () => runDriveAction(onBackupNow);

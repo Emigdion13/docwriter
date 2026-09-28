@@ -1198,6 +1198,17 @@ async function runBackup() {
   updateDriveCard('Starting…');
 }
 
+async function chooseClientSecret() {
+  const res = await bridge.choose_client_secret();
+  if (res?.error) {
+    if (res.error !== 'cancelled') toast(res.message || 'That file was not accepted', { icon: 'alert' });
+  } else {
+    toast('Google client file saved. Now connect Google Drive.', { icon: 'check' });
+    applyBackupState(res.backup);
+  }
+  return res;
+}
+
 async function connectDrive() {
   const res = await bridge.connect_drive();
   if (res?.error) {
@@ -1299,6 +1310,12 @@ async function getPaletteCommands() {
       { label: 'Clean up Drive…', sub: 'delete files you removed over 30 days ago', icon: 'trash', run: () => pruneDrive() },
       { label: 'Disconnect Google Drive', icon: 'cloud', run: () => disconnectDrive() }
     ] : [
+      {
+        label: 'Choose client_secret.json…',
+        sub: 'the Google Cloud file Drive sign-in needs',
+        icon: 'file',
+        run: () => chooseClientSecret()
+      },
       { label: 'Connect Google Drive', sub: 'one-time sign-in', icon: 'cloud', run: () => connectDrive() }
     ]),
     { label: 'Switch view: Edit / Split / Preview', hint: 'Ctrl E', icon: 'columns', run: () => cycleViewMode() },
@@ -1715,6 +1732,7 @@ async function init() {
     }),
     getBackup: () => state.backup,
     onSaveBackup: (changes) => saveBackupSettings(changes),
+    onChooseClientSecret: () => chooseClientSecret(),
     onConnectDrive: () => connectDrive(),
     onDisconnectDrive: () => disconnectDrive(),
     onBackupNow: () => runBackup(),

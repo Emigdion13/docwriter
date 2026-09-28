@@ -597,6 +597,14 @@ export const bridge = {
     return { ok: true, started: true, folder: mockBackup.folder_name };
   },
 
+  async choose_client_secret() {
+    const api = await waitForBridge();
+    if (api?.choose_client_secret) return await api.choose_client_secret();
+    // The desktop app picks the file in a native dialog; the preview pretends.
+    mockBackup.client_secret = true;
+    return { ok: true, backup: { ...mockBackup } };
+  },
+
   async connect_drive() {
     const api = await waitForBridge();
     if (api?.connect_drive) return await api.connect_drive();

@@ -8,6 +8,7 @@ reported "cancelled".
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -15,7 +16,7 @@ import webview
 from webview.util import parse_file_type
 
 from vaultnotes.api import Api
-from vaultnotes.backup.gdrive_auth import TokenStore
+from vaultnotes.backup.gdrive_auth import MAX_CLIENT_SECRET_BYTES, TokenStore
 from vaultnotes.config import Config
 
 
@@ -88,9 +89,69 @@ def test_import_and_export_through_the_dialogs(api: Api, tmp_path: Path) -> None
     assert exported.read_text(encoding="utf-8") == "# Recipe\n\nflour\n"
 
 
+DESKTOP_CLIENT = {
+    "installed": {
+        "client_id": "1234-abc.apps.googleusercontent.com",
+        "client_secret": "not-a-real-secret",
+        "redirect_uris": ["http://localhost"],
+    }
+}
+
+
+def test_choose_the_google_client_file_through_the_open_dialog(api: Api, tmp_path: Path) -> None:
+    downloaded = tmp_path / "Downloads" / "client_secret_1234-abc.apps.googleusercontent.com.json"
+    downloaded.parent.mkdir()
+    downloaded.write_text(json.dumps(DESKTOP_CLIENT), encoding="utf-8")
+    window = DialogWindow([(str(downloaded),)])
+    api.set_window(window)
+    assert api.get_state()["backup"]["client_secret"] is False
+
+    result = api.choose_client_secret()  # exactly what the UI sends
+
+    assert result.get("ok") is True, result
+    assert result["backup"]["client_secret"] is True
+    installed = tmp_path / "appdata" / "client_secret.json"
+    assert installed.read_bytes() == downloaded.read_bytes()
+    assert [kind for kind, _ in window.dialogs] == [webview.FileDialog.OPEN]
+    assert window.dialogs[0][1]["allow_multiple"] is False
+
+
+@pytest.mark.parametrize(
+    ("content", "why"),
+    [
+        (json.dumps({"web": DESKTOP_CLIENT["installed"]}), "a Web application client"),
+        (json.dumps({"format": "vaultnotes-key", "vault_id": "x"}), "some other JSON"),
+        ("this is not JSON", "not JSON"),
+        (" " * (MAX_CLIENT_SECRET_BYTES + 1), "far too large"),
+    ],
+    ids=["web-client", "other-json", "not-json", "too-large"],
+)
+def test_a_wrong_file_is_refused_and_keeps_the_working_one(
+    api: Api, tmp_path: Path, content: str, why: str
+) -> None:
+    working = tmp_path / "appdata" / "client_secret.json"
+    working.parent.mkdir(parents=True, exist_ok=True)
+    working.write_text(json.dumps(DESKTOP_CLIENT), encoding="utf-8")
+    wrong = tmp_path / "wrong.json"
+    wrong.write_text(content, encoding="utf-8")
+    api.set_window(DialogWindow([(str(wrong),)]))
+
+    result = api.choose_client_secret()
+
+    assert result.get("error") == "client_secret_damaged", (why, result)
+    assert json.loads(working.read_text(encoding="utf-8")) == DESKTOP_CLIENT, why
+
+
+def test_connect_without_the_client_file_points_to_the_button(api: Api) -> None:
+    result = api.connect_drive()
+    assert result["error"] == "client_secret_missing"
+    assert "Choose client_secret.json" in result["message"]
+
+
 def test_closing_a_dialog_is_cancelled(api: Api) -> None:
-    api.set_window(DialogWindow([None]))
+    api.set_window(DialogWindow([None, None]))
     assert api.initialize_vaults(None, None)["error"] == "cancelled"
+    assert api.choose_client_secret()["error"] == "cancelled"
 
 
 def test_a_dialog_that_fails_is_an_error_not_a_cancel(api: Api) -> None:

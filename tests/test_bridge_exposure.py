@@ -100,6 +100,7 @@ def test_the_page_cannot_pass_file_paths(api: Api, tmp_path: Path) -> None:
         ("create_vault", ("encrypted", str(tmp_path / "k.vnkey"))),
         ("initialize_vaults", ({"encrypted": str(tmp_path / "k.vnkey")},)),
         ("restore_from_drive", (str(tmp_path / "restore"),)),
+        ("choose_client_secret", (str(tmp_path / "client_secret.json"),)),
     ]
     for name, args in calls:
         result = window.exposed[name](*args)

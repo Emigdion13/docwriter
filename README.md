@@ -136,19 +136,25 @@ You can wrap it with a passphrase instead (format in the build plan, §4.5):
    user type **External**, app name VaultNotes, your email, and the scope
    `.../auth/drive.file`. Add your Gmail address as a test user.
 4. **Credentials → Create credentials → OAuth client ID** → application type
-   **Desktop app**. Download the JSON and save it as:
+   **Desktop app**. Download the JSON before you close the popup: Google shows the
+   secret only once.
+5. In VaultNotes, open **Settings → Choose client_secret.json…** and pick the file you
+   downloaded. The app checks that it is a Desktop app client and copies it to:
 
    ```
    %APPDATA%\VaultNotes\client_secret.json
    ```
 
-   That exact name and folder is the only thing the app looks for. If it is missing,
-   Settings says so and the Connect button stays disabled.
-5. Keep a copy of that file somewhere safe: on a new PC you put the same file back, and
-   your sign-in is already allowed.
-6. While the app's status is "Testing", Google asks you to sign in again every 7 days.
+   That exact name and folder is the only place the app looks. You can copy it there
+   yourself instead, but not from a packaged Windows app (the Claude desktop app, for
+   one): its writes to `%APPDATA%` land in its own private copy of the folder.
+6. Keep a copy of that file somewhere safe: on a new PC you choose the same file again,
+   and your sign-in is already allowed.
+7. While the app's status is "Testing", Google asks you to sign in again every 7 days.
    To stop that, set **Publishing status → In production**. With only `drive.file`
-   requested, Google normally does not require a review.
+   requested, Google normally does not require a review. With a Google Workspace
+   account, **Audience → Make internal** does the same without publishing; only
+   accounts in your organization can then sign in.
 
 How it works: the app copies your notes folder into a Drive folder named
 `VaultNotes Backup`, keeping the same structure, and remembers what it uploaded in
@@ -174,8 +180,8 @@ Key files (`.vnkey`) are never uploaded, and `client_secret.json` stays home too
 2. Put your key files back where they belong (that is why they are backed up
    separately) and set the notes folder in the first-run dialog if it is not at the
    default location.
-3. To use Drive again, copy `client_secret.json` into `%APPDATA%\VaultNotes\` and
-   press **Connect Google Drive**.
+3. To use Drive again, open **Settings → Choose client_secret.json…**, pick your saved
+   copy, and press **Connect Google Drive**.
 4. Unlock each vault with its key file. Everything is there: notes, trash, links,
    backlinks — the app keeps no database to rebuild.
 

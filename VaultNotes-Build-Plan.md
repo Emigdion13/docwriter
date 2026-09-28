@@ -372,6 +372,7 @@ The frontend calls Python with `await window.pywebview.api.<name>(...)`, after t
 | `open_external(url)` | opens http/https/mailto in the browser and ignores anything else |
 | `get_settings()`, `update_settings(changes)` | settings |
 | `backup_now()`, `connect_drive()`, `disconnect_drive()`, `restore_from_drive()` | backup (M8) |
+| `choose_client_secret()` | `{ok, backup}`. Picks the downloaded OAuth client JSON in a native Open dialog, checks it is a Desktop app client, and copies it to `%APPDATA%\VaultNotes\client_secret.json` |
 
 **Events from Python to the frontend** use `window.evaluate_js("window.vn.emit(name, data)")`. Always build that string with `json.dumps(...)`, never by pasting text in. The events are:
 - `vault_locked`
@@ -630,9 +631,9 @@ When the window is narrower than about 1240px, the sidebar shrinks to icons only
    - User type: **External**. App name: VaultNotes. Enter your email.
    - Scopes: add `.../auth/drive.file`.
    - Test users: add your Gmail address.
-4. Go to **Credentials → Create credentials → OAuth client ID**. Choose application type **Desktop app**. Download the JSON file and save it as `%APPDATA%\VaultNotes\client_secret.json`.
+4. Go to **Credentials → Create credentials → OAuth client ID**. Choose application type **Desktop app**. Download the JSON file (Google shows the secret only once, so download it before you close the popup). In VaultNotes, open **Settings → Choose client_secret.json…** and pick that file: the app checks it and copies it to `%APPDATA%\VaultNotes\client_secret.json`. Copying it there by hand works too, except from a packaged Windows app, whose writes to `%APPDATA%` land in its own private copy of the folder.
 5. **Keep a copy of `client_secret.json`** somewhere safe, just as you do with your key files. On a new PC, use the same file. With the `drive.file` scope, the app can only see files created through the same Google Cloud project.
-6. While the app's status is "Testing", Google makes you sign in again every 7 days. To stop this, set **Publishing status → In production**. Because the app only asks for `drive.file`, Google normally doesn't require a review. If you see a warning screen when you sign in, it's safe to continue because it's your own app.
+6. While the app's status is "Testing", Google makes you sign in again every 7 days. To stop this, set **Publishing status → In production**. Because the app only asks for `drive.file`, Google normally doesn't require a review. If you see a warning screen when you sign in, it's safe to continue because it's your own app. With a Google Workspace account, **Audience → Make internal** does the same without publishing: only accounts in your organization can sign in, and nothing expires after 7 days.
 
 Notes:
 

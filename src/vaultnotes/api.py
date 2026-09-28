@@ -28,7 +28,13 @@ from typing import Any, Callable
 
 from vaultnotes.autolock import AutoLock
 from vaultnotes.calllock import CallLock
-from vaultnotes.backup.gdrive_auth import DriveAuthError, TokenStore, is_connected, sign_in
+from vaultnotes.backup.gdrive_auth import (
+    DriveAuthError,
+    TokenStore,
+    install_client_secret,
+    is_connected,
+    sign_in,
+)
 from vaultnotes.backup.gdrive_auth import CLIENT_SECRET_FILE as CLIENT_SECRET_NAME
 from vaultnotes.backup.gdrive_backup import (
     BACKUP_FOLDER_NAME,
@@ -95,6 +101,7 @@ def _now_stamp() -> str:
 #: opens.
 KEY_FILE_TYPES = ("VaultNotes key (*.vnkey)",)
 MARKDOWN_FILE_TYPES = ("Markdown (*.md)",)
+CLIENT_SECRET_FILE_TYPES = ("Google OAuth client (*.json)",)
 
 
 class BridgeError(Exception):
@@ -1371,6 +1378,21 @@ class Api:
             return None
         return Path(str(selected)).expanduser()
 
+    def _choose_client_secret_file(self) -> Path | None:
+        """Open a native picker for the OAuth client JSON Google downloaded."""
+        if self.window is None:
+            return None
+        kwargs: dict[str, Any] = {"allow_multiple": False, "file_types": CLIENT_SECRET_FILE_TYPES}
+        downloads = Path.home() / "Downloads"
+        if downloads.is_dir():
+            kwargs["directory"] = str(downloads)
+        selected = self._file_dialog("OPEN", **kwargs)
+        if isinstance(selected, (list, tuple)):
+            selected = selected[0] if selected else None
+        if not selected:
+            return None
+        return Path(str(selected)).expanduser()
+
     def _choose_folder(self) -> Path | None:
         """Open a native folder picker and return its server-side path."""
         if self.window is None:
@@ -1996,6 +2018,27 @@ class Api:
         }
 
     @bridge_method
+    def choose_client_secret(self, file_path: Path | str | None = None) -> dict[str, Any]:
+        """Install the Google OAuth client file, picked in a native dialog.
+
+        ``file_path`` is honoured only when no window exists (tests), exactly
+        like :meth:`choose_notes_folder` - the page never sends a path.
+        """
+        if self.window is not None or file_path is None:
+            selected = self._choose_client_secret_file()
+        elif isinstance(file_path, (str, Path)):
+            selected = Path(str(file_path)).expanduser()
+        else:
+            return _error("invalid_input", "That is not a file path.")
+        if selected is None:
+            return _error("cancelled", "No file was selected.")
+        try:
+            install_client_secret(selected, self.app_dir)
+        except DriveAuthError as exc:
+            return _error(exc.code, exc.message)
+        return {"ok": True, "backup": self._backup_state()}
+
+    @bridge_method
     def connect_drive(self) -> dict[str, Any]:
         """Run the Google sign-in flow once and keep only the refresh token.
 
@@ -2155,7 +2198,7 @@ def _page_is_ours(window: Any) -> bool:
 #: frontend never sends file paths), or it could, say, export a decrypted
 #: vault note to any folder on disk.
 DIALOG_ONLY_PARAMETERS = frozenset(
-    {"folder_path", "key_path", "key_paths", "file_paths", "dest_path", "target_folder"}
+    {"folder_path", "key_path", "key_paths", "file_path", "file_paths", "dest_path", "target_folder"}
 )
 
 
