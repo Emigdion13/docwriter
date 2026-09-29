@@ -78,6 +78,56 @@ def test_links_stay_in_ai_notes_and_may_name_plain(api: Api) -> None:
     assert api.open_note_by_title("ai", "findings")["note_id"] == "Findings"
 
 
+def test_renaming_a_plain_note_rewrites_its_links_in_ai_notes_and_open_vaults(api: Api, tmp_path: Path) -> None:
+    keys = {space: tmp_path / "keys" / f"{space}.vnkey" for space in ("encrypted", "personal")}
+    assert api.initialize_vaults(key_paths=keys)["ok"] is True
+    write(api, "plain", "Target", "# Target")
+    assert api.unlock_vault("personal")["ok"] is True
+    in_vault = write(api, "personal", "Vault note", "see [[Plain:Target]]")
+    write(api, "ai", "Finding", "see [[Plain:Target]]")
+
+    # The rename prompt counts them, and says Encrypted was not looked in.
+    assert api.count_links_to("plain", "Target") == {
+        "count": 2,
+        "spaces": [
+            {"space_id": "personal", "name": "Personal", "count": 1},
+            {"space_id": "ai", "name": "AI-Notes", "count": 1},
+        ],
+        "locked": [{"space_id": "encrypted", "name": "Encrypted"}],
+    }
+    assert api.rename_note("plain", "Target", "Renamed", True)["links_updated"] == 2
+    assert api.open_note("personal", in_vault)["body"] == "see [[Plain:Renamed]]"
+    assert api.open_note("ai", "Finding")["body"] == "see [[Plain:Renamed]]"
+    assert 'href="#vn-open/plain/Renamed"' in api.render_preview("ai", "see [[Plain:Renamed]]")
+
+
+def test_a_plain_rename_leaves_ai_notes_own_links_alone(api: Api) -> None:
+    write(api, "plain", "Target", "# Target")
+    write(api, "ai", "Target", "# Target\n\nThe helper's own note.")
+    write(api, "ai", "Finding", "[[Target]] is ours, [[Plain:target#Plan|theirs]] is the user's.")
+
+    assert api.rename_note("plain", "Target", "Renamed", True)["links_updated"] == 1
+    assert api.open_note("ai", "Finding")["body"] == "[[Target]] is ours, [[Plain:Renamed#Plan|theirs]] is the user's."
+    assert [link["title"] for link in api.open_note("ai", "Target")["backlinks"]] == ["Finding"]
+
+    # "Rename only" leaves every link where it was.
+    assert api.rename_note("plain", "Renamed", "Final", False)["links_updated"] == 0
+    assert "[[Plain:Renamed#Plan|theirs]]" in api.open_note("ai", "Finding")["body"]
+
+
+def test_renaming_an_ai_note_leaves_links_to_the_plain_note_alone(api: Api) -> None:
+    write(api, "plain", "Target", "# Target")
+    write(api, "ai", "Target", "# Target")
+    write(api, "ai", "Finding", "[[Target]] is ours, [[Plain:Target]] is the user's.")
+    write(api, "ai", "Session", "Only the user's [[Plain:Target]].")
+
+    # Session links to the Plain note, so it is not a backlink of ours.
+    assert api.count_links_to("ai", "Target") == {"count": 1}
+    assert api.rename_note("ai", "Target", "Ours", True)["links_updated"] == 1
+    assert api.open_note("ai", "Finding")["body"] == "[[Ours]] is ours, [[Plain:Target]] is the user's."
+    assert api.open_note("ai", "Session")["body"] == "Only the user's [[Plain:Target]]."
+
+
 def test_a_note_a_helper_writes_on_disk_shows_up_at_once(api: Api) -> None:
     write(api, "ai", "Findings", "# Findings")
     (api.config.ai_dir / "Written by Claude.md").write_text("Adds to [[Findings]].", encoding="utf-8")

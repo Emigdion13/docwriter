@@ -21,7 +21,7 @@ import time
 import urllib.parse
 import uuid
 import webbrowser
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -90,6 +90,10 @@ SPACE_NAMES = {
     **{key: value["name"] for key, value in PLAIN_SPACES.items()},
     **{key: value["name"] for key, value in SPACE_DEFINITIONS.items()},
 }
+
+#: The spaces whose notes may link out to a Plain note with ``[[Plain:Title]]``
+#: (M10), in sidebar order.  Renaming a Plain note follows its links there.
+LINKS_OUT_TO_PLAIN = (*SPACE_DEFINITIONS, *(space for space in PLAIN_SPACES if space != "plain"))
 
 #: Longest note body the editor may send (about 20 MB of text).
 MAX_BODY_LENGTH = 20_000_000
@@ -447,6 +451,25 @@ class Api:
         index = self._sync_index(space_id)
         return index.titles() if index is not None else []
 
+    def _links_out_to_plain(self, title: str) -> dict[str, list[str]]:
+        """Notes outside Plain whose ``[[Plain:Title]]`` links name ``title``.
+
+        Keyed by space, in sidebar order, spaces without such notes left out.
+        Only AI-Notes and unlocked vaults are asked.  A locked vault is skipped
+        before its index is even looked at: nothing in it is decrypted,
+        counted or rewritten (security rule 11).
+        """
+        found: dict[str, list[str]] = {}
+        for space_id in LINKS_OUT_TO_PLAIN:
+            vault = self._vault(space_id)
+            if vault is not None and vault.locked:
+                continue
+            index = self._sync_index(space_id)
+            sources = index.sources_linking_out("plain", title) if index is not None else []
+            if sources:
+                found[space_id] = sources
+        return found
+
     def _warnings(self, space_id: str | None = None) -> list[str]:
         """Human-readable warnings about files that were skipped (M7).
 
@@ -770,6 +793,9 @@ class Api:
 
         The notes to rewrite come from the link index, so a rename touches only
         the notes that actually link here instead of scanning the whole space.
+        A Plain rename also rewrites the ``[[Plain:Title]]`` links in AI-Notes
+        and unlocked vaults; a locked vault is left as it is (security rule 11).
+        ``links_updated`` counts every link rewritten, in every space.
         """
         space = self._known_space(space_id)
         clean_id = self._note_id_text(space, note_id)
@@ -801,9 +827,23 @@ class Api:
 
         links_updated = 0
         if rewrite_links:
+            # Inside Plain, [[Old]] and [[Plain:Old]] both name this note.
+            # Anywhere else [[Plain:Old]] names a Plain note and stays as it is.
             links_updated = self._rewrite_links_to(
-                space, source_ids, old_title, note.title, exclude_id=note.id
+                space,
+                source_ids,
+                old_title,
+                note.title,
+                exclude_id=note.id,
+                spaces=None if space == "plain" else {""},
             )
+            if space == "plain":
+                # Out there only [[Plain:Old]] is this note: a bare [[Old]]
+                # names a note of that space and must keep pointing at it.
+                for other, other_ids in self._links_out_to_plain(old_title).items():
+                    links_updated += self._rewrite_links_to(
+                        other, other_ids, old_title, note.title, spaces={"plain"}
+                    )
         return {"title": note.title, "id": note.id, "links_updated": links_updated}
 
     def _rewrite_links_to(
@@ -813,9 +853,12 @@ class Api:
         old_title: str,
         new_title: str,
         exclude_id: str = "",
+        spaces: Collection[str] | None = None,
     ) -> int:
         """Point the links in ``source_ids`` at ``new_title``; return the count.
 
+        ``spaces`` is passed to :func:`vaultnotes.links.rename_links` to pick
+        which links are rewritten (``{"plain"}``: only ``[[Plain:Title]]``).
         A note that vanished or cannot be written is skipped rather than
         aborting the whole rename: the rename itself already succeeded and must
         not be reported as failed because of one unwritable neighbour (M7).
@@ -837,7 +880,7 @@ class Api:
                     if plain is not None
                     else store.read_note(source_id)
                 )
-                new_body, count = rename_links(source.body, old_title, new_title)
+                new_body, count = rename_links(source.body, old_title, new_title, spaces=spaces)
                 if not count:
                     continue
                 saved = (
@@ -852,11 +895,16 @@ class Api:
         return updated
 
     @bridge_method
-    def count_links_to(self, space_id: str, note_id: str) -> dict[str, int]:
-        """Count the notes linking here, without crossing space boundaries.
+    def count_links_to(self, space_id: str, note_id: str) -> dict[str, Any]:
+        """Count the notes linking here: the ones a rename would rewrite.
 
-        Used by the "Update N links?" rename prompt and the move warning.  A
-        locked vault reports 0 rather than admitting anything about its notes.
+        Used by the "Update N links?" rename prompt and the move warning.
+        Links stay inside their space except ``[[Plain:Title]]`` (M10), so a
+        Plain note also counts the AI-Notes and unlocked-vault notes linking
+        out to it.  For a Plain note ``spaces`` says where the notes are and
+        ``locked`` names the vaults nobody looked in: a locked vault is never
+        decrypted or counted.  A locked vault's own note reports 0 rather than
+        admitting anything about its notes.
         """
         space = self._known_space(space_id)
         clean_id = self._note_id_text(space, note_id)
@@ -868,7 +916,27 @@ class Api:
                 return {"count": 0}
             if not index.has(clean_id):
                 return {"count": 0}
-        return {"count": len(index.backlinks(clean_id))}
+        same_space = len(index.backlinks(clean_id))
+        if space != "plain":
+            return {"count": same_space}
+
+        per_space = {space: same_space} if same_space else {}
+        title = index.title_of(clean_id)
+        if title:
+            for other, sources in self._links_out_to_plain(title).items():
+                per_space[other] = len(sources)
+        return {
+            "count": sum(per_space.values()),
+            "spaces": [
+                {"space_id": key, "name": SPACE_NAMES[key], "count": value}
+                for key, value in per_space.items()
+            ],
+            "locked": [
+                {"space_id": key, "name": SPACE_NAMES[key]}
+                for key, store in self.vault_stores.items()
+                if store.locked and store.has_header
+            ],
+        }
 
     @bridge_method
     def delete_note(self, space_id: str, note_id: str) -> dict[str, Any]:
@@ -948,11 +1016,15 @@ class Api:
         return store.read_note(note_id)
 
     def _count_broken_links_on_move(self, space_id: str, note: Note) -> int:
-        """Count same-space links that break when a note leaves its space.
+        """Count the links that break when a note leaves its space.
 
-        Links never cross spaces, so moving a note breaks both the notes that
-        link to it and the note's own links to its old neighbours.  A note
-        linking to itself keeps working after the move and is not counted.
+        Moving a note breaks the notes that link to it and its own links to
+        its old neighbours, counted as the move dialog shows them: linking
+        notes, and the notes this one links to.  A Plain note also leaves its
+        ``[[Plain:Title]]`` links in AI-Notes and unlocked vaults behind (a
+        locked vault is never asked), while a ``[[Plain:Title]]`` the note
+        holds keeps working wherever it goes.  A note linking to itself keeps
+        working after the move and is not counted.
         """
         index = self._sync_index(space_id)
         if index is None:
@@ -960,11 +1032,10 @@ class Api:
         if not index.has(note.id):
             index.update(note)
         incoming = len(index.backlinks(note.id))
-        outgoing = 0
-        for link in index.links_of(note.id):
-            target = index.resolve(link.target)
-            if target is not None and target != note.id:
-                outgoing += 1
+        if space_id == "plain":
+            incoming += sum(len(sources) for sources in self._links_out_to_plain(note.title).values())
+        # outgoing() leaves out self-links and links naming another space.
+        outgoing = sum(1 for link in index.outgoing(note.id) if link["resolved"])
         return incoming + outgoing
 
     @bridge_method
@@ -974,7 +1045,8 @@ class Api:
         The note is created in the target space first; the source copy is
         only removed afterwards, so a failure never loses the note. Returns
         ``{new_id, title, broken_links}`` where ``broken_links`` counts the
-        same-space links that stop working because of the move.
+        links that stop working because of the move (see
+        :meth:`_count_broken_links_on_move`).
         """
         space = self._known_space(space_id)
         target = self._known_space(target_space_id)

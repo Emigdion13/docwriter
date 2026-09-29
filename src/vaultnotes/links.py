@@ -11,9 +11,9 @@ What it provides
 ``resolve(target, titles)``
     Turn a link target into a note id, ignoring case, surrounding whitespace
     and a trailing ``.md``.
-``rename_links(body, old_title, new_title)``
+``rename_links(body, old_title, new_title, *, spaces=None)``
     Rewrite every form of a link when a note is renamed, keeping the display
-    text and the heading.
+    text and the heading.  ``spaces`` limits it to links naming those spaces.
 ``render_links_for_preview(body, titles, *, spaces=None, embeds=False)``
     Rewrite note links into internal Markdown addresses (``#vn-open/`` for a
     note that exists, ``#vn-new/`` for one that does not) before markdown-it
@@ -46,8 +46,12 @@ M10 additions, on top of section 4.7
   ``[[Personal:…]]``) is refused outright, so a link can never reach into a
   locked or unlocked vault.  A missing cross-space note is addressed
   ``#vn-missing/``: the app must not offer to create the note in the wrong space.
-* A rename rewrites the author's syntax (``!``, ``#Heading``, ``|alias``) and
-  only ever touches links in the space being renamed.
+* A rename rewrites the author's syntax (``!``, ``#Heading``, ``|alias``).
+  Renaming a Plain note also rewrites the ``[[Plain:Title]]`` links in
+  AI-Notes and unlocked vaults (never a locked one), and only those: there a
+  bare ``[[Title]]`` names a note of that space, not the Plain note.  For the
+  same reason a vault or AI-Notes index never resolves ``[[Plain:Title]]``
+  against its own titles, and renaming a note there leaves those links alone.
 
 Security rule 11: a vault's index exists only in memory while the vault is
 unlocked.  It is never written to disk, and :meth:`LinkIndex.clear` is called
@@ -60,7 +64,7 @@ import re
 import urllib.parse
 from bisect import bisect_right
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Collection, Iterable, Mapping, Sequence
 
 __all__ = [
     "CROSS_SPACES",
@@ -647,12 +651,23 @@ def _replacement_for_rename(link: Link, new_title: str) -> str:
     return f"{embed_mark}[[{space_part}{new_title}{heading}{separator}{alias}]]"
 
 
-def rename_links(body: str, old_title: str, new_title: str) -> tuple[str, int]:
+def rename_links(
+    body: str,
+    old_title: str,
+    new_title: str,
+    *,
+    spaces: Collection[str] | None = None,
+) -> tuple[str, int]:
     """Rewrite every link to ``old_title`` so it points at ``new_title``.
 
     Returns ``(new_body, links_updated)``.  Matching ignores case, whitespace
     at the ends and a trailing ``.md``; display text and headings are kept and
     code is never touched.
+
+    ``spaces`` limits the rewrite to links whose :attr:`Link.space` is one of
+    them: ``""`` is a same-space link, ``"plain"`` a ``[[Plain:Title]]`` one.
+    A Plain rename passes ``{"plain"}`` for a vault note, whose own
+    ``[[Title]]`` names a vault note.  ``None`` rewrites every link.
     """
     if not isinstance(body, str) or not body:
         return (body if isinstance(body, str) else ""), 0
@@ -664,7 +679,11 @@ def rename_links(body: str, old_title: str, new_title: str) -> tuple[str, int]:
     if not old_folded or not clean_new:
         return body, 0
 
-    links = [link for link in parse_links(body) if _fold(link.target) == old_folded]
+    links = [
+        link
+        for link in parse_links(body)
+        if _fold(link.target) == old_folded and (spaces is None or link.space in spaces)
+    ]
     if not links:
         return body, 0
 
@@ -745,6 +764,11 @@ class LinkIndex:
     Resolution is incremental: a link to a note that does not exist yet is
     remembered as *pending* and starts working as soon as that note is created,
     so build order does not matter and single-note updates stay cheap.
+
+    A link naming another space (``[[Plain:Title]]`` in a vault or AI-Notes
+    note) is kept for :meth:`link_count` and :meth:`sources_linking_out`, but
+    never resolved here: it is not a backlink, an outgoing link or a missing
+    note of this space.
     """
 
     def __init__(self, space_id: str = "") -> None:
@@ -889,6 +913,22 @@ class LinkIndex:
         """Note ids that link to ``note_id`` (same data as :meth:`backlinks`)."""
         return [item["id"] for item in self.backlinks(note_id)]
 
+    def sources_linking_out(self, space: str, title: str) -> list[str]:
+        """Note ids holding a link that names ``space`` and points at ``title``.
+
+        That is ``[[Plain:Title]]`` (M10): the Plain note is not in this index,
+        so :meth:`backlinks` cannot see these notes, yet a Plain rename must
+        rewrite them.  Only the stored links are read, never a note body.
+        """
+        folded = _fold(_strip_md_suffix(title if isinstance(title, str) else ""))
+        if not space or not folded:
+            return []
+        return [
+            note_id
+            for note_id, links in self._links.items()
+            if any(link.space == space and _fold(link.target) == folded for link in links)
+        ]
+
     # -- internals -----------------------------------------------------
     def _set_title(self, note_id: str, title: str) -> None:
         if not note_id:
@@ -926,6 +966,10 @@ class LinkIndex:
         resolved = self._resolved.setdefault(note_id, {})
         unresolved = self._unresolved.setdefault(note_id, {})
         for link in links:
+            if link.space and link.space != self.space_id:
+                # [[Plain:Title]] outside Plain names a Plain note, which is
+                # not in this index: it is neither a link here nor a missing one.
+                continue
             folded = _fold(link.target)
             target_id = self._id_by_folded.get(folded)
             if target_id is None:

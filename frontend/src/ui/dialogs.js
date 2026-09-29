@@ -104,7 +104,7 @@ export function createMoveDialog() {
     if (e.key === 'Enter' && selectedTarget) close(selectedTarget);
   });
 
-  function renderWarnings(sourceSpace, targetSpace, incomingLinks, outgoingLinks) {
+  function renderWarnings(sourceSpace, targetSpace, incomingLinks, outgoingLinks, lockedVaults) {
     const box = overlay.querySelector('#move-warnings');
     const parts = [];
     if (incomingLinks > 0 || outgoingLinks > 0) {
@@ -112,7 +112,7 @@ export function createMoveDialog() {
       if (incomingLinks > 0) bits.push(`${incomingLinks} incoming link${incomingLinks === 1 ? '' : 's'}`);
       if (outgoingLinks > 0) bits.push(`${outgoingLinks} outgoing link${outgoingLinks === 1 ? '' : 's'}`);
       parts.push(`
-        <div class="setup-warning">
+        <div class="setup-warning" data-link-warning>
           ${icon('alert', 15)}
           <span><b>${bits.join(' and ')}</b> will break. Links only work within the same space.</span>
         </div>`);
@@ -138,11 +138,19 @@ export function createMoveDialog() {
         </div>`);
     }
     box.innerHTML = parts.join('');
+    // A Plain note's [[Plain:…]] links in a locked vault were not counted.
+    // Added as text, never as HTML.
+    const linkWarning = box.querySelector('[data-link-warning] span');
+    if (linkWarning && lockedVaults.length) {
+      linkWarning.append(
+        ` ${lockedVaults.join(' and ')} ${lockedVaults.length === 1 ? 'is' : 'are'} locked, so links there were not counted.`
+      );
+    }
   }
 
   return {
     element: overlay,
-    open({ spaces, currentSpaceId, noteTitle, incomingLinks = 0, outgoingLinks = 0 }) {
+    open({ spaces, currentSpaceId, noteTitle, incomingLinks = 0, outgoingLinks = 0, lockedVaults = [] }) {
       const source = spaces.find(s => s.id === currentSpaceId);
       const targets = spaces.filter(s => s.id !== currentSpaceId);
       const firstOpen = targets.find(t => !t.locked) || null;
@@ -177,7 +185,7 @@ export function createMoveDialog() {
             el.classList.toggle('sel', on);
             el.setAttribute('aria-checked', String(on));
           });
-          renderWarnings(source, t, incomingLinks, outgoingLinks);
+          renderWarnings(source, t, incomingLinks, outgoingLinks, lockedVaults);
         };
         list.appendChild(btn);
       });
@@ -191,7 +199,7 @@ export function createMoveDialog() {
             <span>Every other space is locked. Unlock a vault to move this note.</span>
           </div>`;
       } else {
-        renderWarnings(source, targets.find(t => t.id === selectedTarget), incomingLinks, outgoingLinks);
+        renderWarnings(source, targets.find(t => t.id === selectedTarget), incomingLinks, outgoingLinks, lockedVaults);
       }
 
       overlay.classList.add('open');
