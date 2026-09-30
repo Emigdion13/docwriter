@@ -28,6 +28,7 @@ export const ICONS = {
   undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>',
   upload: '<path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 20h16"/>',
   download: '<path d="M12 4v12M7 11l5 5 5-5"/><path d="M4 20h16"/>',
+  refresh: '<path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/>',
   sort: '<path d="M8 4v16M4 8l4-4 4 4M16 20V4M12 16l4 4 4-4"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>',
   graph: '<circle cx="5.5" cy="7" r="2.5"/><circle cx="17" cy="6" r="2.5"/><circle cx="12" cy="17" r="2.8"/><path d="M7.8 8.4 10 14.7M14.6 15.6 15.9 8.4M8 7h6.5"/>',

@@ -667,6 +667,18 @@ async function toggleImportant() {
   }
 }
 
+/* Re-read the open space from disk, for notes an AI helper or another editor
+   changed while the app was open.  The open note is left alone, so nothing
+   being typed is lost. */
+async function reloadList() {
+  const space = getActiveSpace();
+  if (!space || space.locked) return;
+  await refreshSpaces();
+  await refreshNoteList(false);
+  await refreshTitles();
+  toast(`${space.name} list refreshed`, { icon: 'refresh' });
+}
+
 function toggleImportantFilter() {
   const space = getActiveSpace();
   if (state.trashMode || space?.locked) return;
@@ -1434,6 +1446,7 @@ async function getPaletteCommands() {
       { label: `Export “${state.currentNote.title}” to .md`, sub: space.name, icon: 'download', run: () => exportCurrentNote() }
     ] : []),
     ...(!space?.locked ? [
+      { label: `Refresh ${space?.name || 'this space'} list`, icon: 'refresh', run: () => reloadList() },
       { label: `Import .md files into ${space?.name || 'this space'}…`, icon: 'upload', run: () => importNotes() },
       {
         label: state.trashMode ? `Back to ${space?.name || ''} notes` : `Show ${space?.name || ''} trash`,
@@ -1802,6 +1815,7 @@ async function init() {
     onImport: () => importNotes(),
     onTrashToggle: () => toggleTrashMode(),
     onImportantFilter: () => toggleImportantFilter(),
+    onRefresh: () => reloadList(),
     onRestoreNote: (noteId) => restoreTrashedNote(noteId),
     onPurgeNote: (noteId) => purgeTrashedNote(noteId),
     onEmptyTrash: () => emptyTrash()
