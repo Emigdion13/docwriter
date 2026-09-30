@@ -183,3 +183,36 @@ def test_notes_cli_lists_important_notes_first(api: Api) -> None:
     assert rows[0] == [rows[0][0], rows[0][1], "Bravo", "important"]
     assert all(len(row) == 3 for row in rows[1:])
     assert "Alpha" in [row[0] for row in rows[1:]]
+
+
+def test_notes_cli_marks_and_clears_ai_notes(api: Api) -> None:
+    root = str(api.config.notes_root)
+    api.create_note("ai", "PR review")
+
+    def cli(*args: str) -> tuple[int, str]:
+        out = io.StringIO()
+        return notes_cli.run(["--root", root, *args], out=out), out.getvalue()
+
+    code, out = cli("mark", "ai", "pr review")  # the exact title, in any case
+    assert code == 0 and "important" in out
+    assert [p.name for p in (Path(root) / "ai-notes").glob("PR*.md")] == ["PR review.md"]
+    assert api.open_note("ai", "PR review")["body"] == "---\nimportant: true\n---\n# PR review\n\n"
+    assert api.list_notes("ai")[0]["title"] == "PR review"
+
+    code, out = cli("mark", "ai", "PR review")
+    assert code == 0 and "already marked important" in out
+
+    code, out = cli("mark", "ai", "PR review", "--clear")
+    assert code == 0 and "Cleared" in out
+    assert api.open_note("ai", "PR review")["body"] == "# PR review\n\n"
+
+
+def test_notes_cli_mark_stays_inside_ai_notes(api: Api) -> None:
+    root = str(api.config.notes_root)
+    api.create_note("plain", "Mine")
+    before = api.open_note("plain", "Mine")["body"]
+
+    assert notes_cli.run(["--root", root, "mark", "plain", "Mine"], out=io.StringIO()) == notes_cli.EXIT_REFUSED
+    assert notes_cli.run(["--root", root, "mark", "encrypted", "x"], out=io.StringIO()) == notes_cli.EXIT_REFUSED
+    assert notes_cli.run(["--root", root, "mark", "ai", "PR"], out=io.StringIO()) == notes_cli.EXIT_ERROR  # no fragments
+    assert api.open_note("plain", "Mine")["body"] == before
