@@ -16,7 +16,7 @@ import { spaceIcon } from './icons.js';
 
 // UI Modules
 import { createToolbar, updateToolbarView, updateToolbarTheme, updateToolbarPanels } from './ui/toolbar.js';
-import { createSidebar, renderSpaces, updateDriveCard } from './ui/sidebar.js';
+import { createSidebar, renderSpaces, updateDriveCard, setCmdEntry } from './ui/sidebar.js';
 import {
   createNoteList,
   renderNotes,
@@ -47,6 +47,8 @@ import { createVaultSetupDialog } from './ui/vaultSetup.js';
 import { createCommandPalette } from './ui/commandPalette.js';
 import { createSettingsOverlay } from './ui/settings.js';
 import { createGraphOverlay } from './ui/graphView.js';
+import { createTerminal } from './ui/terminal.js';
+import { createCommandList } from './ui/commandList.js';
 import { toast, initToasts } from './ui/toasts.js';
 import {
   createStatusBar,
@@ -81,6 +83,7 @@ const state = {
   sort: 'modified', // 'modified' | 'title'
   viewMode: 'split', // 'edit' | 'split' | 'preview'
   panelsCollapsed: false, // Spaces and the note list hidden, the note gets the width
+  terminalMode: false,  // the CMD space is showing instead of a note space
   theme: 'nebula',
   effects: 'full',
   editorFontSize: 13.5,
@@ -123,6 +126,8 @@ let settingsOverlay = null;
 let graphOverlay = null;
 let moveDialog = null;
 let tagBox = null;
+let terminalView = null;
+let commandList = null;
 
 // Timers
 let saveTimer = null;
@@ -535,8 +540,69 @@ async function flushSave() {
   return ok && !pendingSave;
 }
 
+/* =================================================================
+   The CMD space: a shell instead of notes.  It is not one of state.spaces,
+   so everything built around note spaces (links, graph, backup, notes.py)
+   never sees it.
+   ================================================================= */
+
+function cmdEntrySub(t = terminalView?.getState()) {
+  if (!t?.enabled) return 'Off';
+  return t.running ? t.shellName : 'Not started';
+}
+
+async function enterTerminalMode() {
+  if (!(await flushSave())) return;
+  if (!state.terminalMode) {
+    state.terminalMode = true;
+    document.getElementById('app')?.classList.add('terminal-mode');
+    setAccentColor('--cmd');
+    setCmdEntry({ active: true });
+    const ws = document.getElementById('workspace');
+    if (ws) replay(ws, 'swap');
+  }
+  await terminalView.show();
+}
+
+function leaveTerminalMode() {
+  if (!state.terminalMode) return;
+  state.terminalMode = false;
+  terminalView.hide();
+  document.getElementById('app')?.classList.remove('terminal-mode');
+  setCmdEntry({ active: false });
+  setAccentColor(getActiveSpace()?.colorVar || '--accent');
+}
+
+async function insertCommand(command, run = false) {
+  if (!state.terminalMode) await enterTerminalMode();
+  if (!terminalView.getState().enabled) {
+    toast('Turn on the CMD space first.', { icon: 'terminal' });
+    return;
+  }
+  await terminalView.insert(command, run);
+}
+
+async function enableTerminal() {
+  const ok = await terminalView.enable();
+  if (ok) toast('The CMD space is on.', { icon: 'terminal' });
+  return ok;
+}
+
+async function disableTerminal() {
+  const ok = await confirmAction({
+    title: 'Turn off the CMD space?',
+    message: 'The running shell is stopped. Your favorite and recent commands are kept.',
+    confirmLabel: 'Turn off',
+    iconName: 'terminal'
+  });
+  if (!ok) return;
+  await terminalView.disable();
+  toast('The CMD space is off.', { icon: 'terminal' });
+}
+
 async function selectSpace(spaceId, targetNoteId = null, animate = true) {
   if (!(await flushSave())) return;
+  leaveTerminalMode();
   const prevSpaceId = state.currentSpaceId;
   state.currentSpaceId = spaceId;
   state.trashMode = false;
@@ -580,6 +646,7 @@ async function selectSpace(spaceId, targetNoteId = null, animate = true) {
 
 async function openNote(noteId) {
   if (!(await flushSave())) return;
+  leaveTerminalMode();
   state.trashMode = false;
   state.currentNoteId = noteId;
   const space = getActiveSpace();
@@ -1568,9 +1635,33 @@ async function saveBackupSettings(changes) {
 
 async function getPaletteCommands() {
   const space = getActiveSpace();
-  const hasOpenNote = !!state.currentNote && !space?.locked && !state.trashMode;
+  const hasOpenNote = !!state.currentNote && !space?.locked && !state.trashMode && !state.terminalMode;
+  const term = terminalView?.getState() || { enabled: false, shells: [], favorites: [] };
   const commands = [
     { label: 'New note', hint: 'Ctrl N', icon: 'plus', run: () => createNote() },
+    state.terminalMode
+      ? { label: `Back to ${space?.name || 'notes'}`, icon: spaceIcon(space), colorVar: space?.colorVar, run: () => selectSpace(state.currentSpaceId) }
+      : { label: 'Open CMD', sub: term.enabled ? term.shellName : 'off until you turn it on', icon: 'terminal', colorVar: '--cmd', run: () => enterTerminalMode() },
+    ...(term.enabled ? [
+      { label: 'CMD: Restart the shell', sub: term.shellName, icon: 'refresh', colorVar: '--cmd', run: async () => { await enterTerminalMode(); await terminalView.restart(); } },
+      ...term.shells.filter(sh => sh.id !== term.shell).map(sh => ({
+        label: `CMD: Switch to ${sh.name}`,
+        icon: 'terminal',
+        colorVar: '--cmd',
+        run: async () => { await enterTerminalMode(); await terminalView.restart(sh.id); }
+      })),
+      ...term.favorites.map(cmd => ({
+        label: cmd,
+        sub: 'Favorite command · puts it at the prompt',
+        icon: 'terminal',
+        colorVar: '--cmd',
+        run: () => insertCommand(cmd, false)
+      })),
+      { label: 'CMD: Clear recent commands', sub: 'favorites stay', icon: 'trash', colorVar: '--cmd', run: () => terminalView.clearRecent() },
+      { label: 'Turn off the CMD space', icon: 'terminal', colorVar: '--cmd', run: () => disableTerminal() }
+    ] : [
+      { label: 'Turn on the CMD space…', sub: 'Windows asks you to confirm', icon: 'terminal', colorVar: '--cmd', run: async () => { await enterTerminalMode(); await enableTerminal(); } }
+    ]),
     ...(hasOpenNote ? [
       state.currentNote.important
         ? { label: `Unmark “${state.currentNote.title}” as important`, hint: 'Ctrl D', icon: 'star', run: () => toggleImportant() }
@@ -1757,6 +1848,22 @@ function setupShortcuts() {
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
 
+    // Inside the terminal every key belongs to the shell (Ctrl+C, Ctrl+D,
+    // Ctrl+F, Esc...), except the palette, Lock all and the panels toggle.
+    if (e.target?.closest?.('.ws-terminal .term-host')) {
+      if (!mod || !(key === 'k' || key === 'l' || e.key === '\\')) return;
+    }
+    // Keys about the open note do nothing while the CMD space shows.
+    if (state.terminalMode && mod && ['n', 'd', 's', 'e'].includes(key)) {
+      e.preventDefault();
+      return;
+    }
+    if (state.terminalMode && mod && key === 'f') {
+      e.preventDefault();
+      commandList?.focusFilter();
+      return;
+    }
+
     if (mod && key === 'k') {
       e.preventDefault();
       commandPalette?.open();
@@ -1940,7 +2047,7 @@ async function init() {
   // Mount Sidebar
   const sidebarContainer = document.getElementById('sidebar');
   const sidebarEl = createSidebar({
-    onSelectSpace: (id) => selectSpace(id),
+    onSelectSpace: (id) => (id === 'cmd' ? enterTerminalMode() : selectSpace(id)),
     onNewVault: async () => {
       // The setup dialog creates any missing built-in vaults. When both
       // vaults already exist there is nothing to set up in v1.
@@ -1980,6 +2087,36 @@ async function init() {
     onEmptyTrash: () => emptyTrash()
   });
   noteListContainer.replaceWith(noteListEl);
+
+  // The CMD space: its command list shares the note list's column, and the
+  // terminal sits in the workspace; CSS shows them only in terminal mode.
+  commandList = createCommandList({
+    onInsert: (cmd) => insertCommand(cmd, false),
+    onRun: (cmd) => insertCommand(cmd, true),
+    onFavorite: (cmd, favorite) => terminalView.setFavorite(cmd, favorite),
+    onForget: (cmd) => terminalView.forget(cmd),
+    onClearRecent: async () => {
+      const ok = await confirmAction({
+        title: 'Clear recent commands?',
+        message: 'Your favorite commands stay.',
+        confirmLabel: 'Clear',
+        iconName: 'terminal'
+      });
+      if (ok) terminalView.clearRecent();
+    }
+  });
+  noteListEl.after(commandList.element);
+
+  terminalView = createTerminal({
+    onListsChanged: (t) => commandList.render(t),
+    onStateChanged: (t) => {
+      commandList.render(t);
+      setCmdEntry({ sub: cmdEntrySub(t) });
+    },
+    notify: (message) => toast(message, { icon: 'terminal' })
+  });
+  document.getElementById('workspace')?.appendChild(terminalView.element);
+  await terminalView.refresh();
 
   // Mount Status Bar
   const statusBarContainer = document.getElementById('statusbar');
@@ -2131,7 +2268,10 @@ async function init() {
       }
       toast('Settings saved', { icon: 'check' });
     },
-    onChooseFolder: () => chooseNotesFolder()
+    onChooseFolder: () => chooseNotesFolder(),
+    getTerminal: () => terminalView.getState(),
+    onEnableTerminal: () => enableTerminal(),
+    onDisableTerminal: () => disableTerminal()
   });
   overlaysRoot.appendChild(settingsOverlay.element);
 

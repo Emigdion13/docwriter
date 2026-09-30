@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from vaultnotes.storage.atomic import atomic_write
+from vaultnotes.terminal import MAX_FAVORITES, MAX_RECENT, SHELL_IDS, clean_command_list
 
 
 def get_app_dir() -> Path:
@@ -55,6 +56,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "interval_minutes": 60,
         "drive_folder_id": None,
         "last_backup": None,
+    },
+    # The CMD space.  Off until the user allows it in a native Windows dialog
+    # (api.terminal_enable); the page can never switch it on by itself.
+    "terminal": {
+        "enabled": False,
+        "shell": "cmd",
+        "recent": [],
+        "favorites": [],
     },
 }
 
@@ -235,11 +244,11 @@ class Config:
             self.data["autolock_minutes"] = defaults["autolock_minutes"]
             reset.append("autolock_minutes")
 
-        for block in ("look", "backup"):
+        for block in ("look", "backup", "terminal"):
             if not isinstance(self.data.get(block), dict):
                 self.data[block] = defaults[block]
                 reset.append(block)
-        look, backup = self.data["look"], self.data["backup"]
+        look, backup, terminal = self.data["look"], self.data["backup"], self.data["terminal"]
         checks = {
             ("look", "theme"): look.get("theme") in ("nebula", "synthwave", "arctic"),
             ("look", "effects"): look.get("effects") in ("full", "lite", "off"),
@@ -252,11 +261,19 @@ class Config:
             or isinstance(backup.get("drive_folder_id"), str),
             ("backup", "last_backup"): backup.get("last_backup") is None
             or isinstance(backup.get("last_backup"), str),
+            ("terminal", "enabled"): isinstance(terminal.get("enabled"), bool),
+            ("terminal", "shell"): terminal.get("shell") in SHELL_IDS,
+            ("terminal", "recent"): isinstance(terminal.get("recent"), list),
+            ("terminal", "favorites"): isinstance(terminal.get("favorites"), list),
         }
         for (block, key), ok in checks.items():
             if not ok:
                 self.data[block][key] = defaults[block][key]
                 reset.append(f"{block}.{key}")
+
+        # Odd entries in the command lists are dropped quietly, not reported.
+        terminal["recent"] = clean_command_list(terminal["recent"], MAX_RECENT)
+        terminal["favorites"] = clean_command_list(terminal["favorites"], MAX_FAVORITES)
 
         if reset:
             self.warnings.append(

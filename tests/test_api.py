@@ -555,6 +555,18 @@ BRIDGE_SURFACE = [
     # Extra: tags, kept in the note's own front matter, and the filter bar.
     "set_tags",
     "list_tags",
+    # Extra: the CMD space (tests/test_terminal.py covers what they do).
+    "terminal_state",
+    "terminal_enable",
+    "terminal_disable",
+    "terminal_start",
+    "terminal_write",
+    "terminal_resize",
+    "terminal_stop",
+    "terminal_remember",
+    "terminal_set_favorite",
+    "terminal_forget",
+    "terminal_clear_recent",
 ]
 
 

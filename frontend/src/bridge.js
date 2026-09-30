@@ -312,6 +312,55 @@ function simulateBackup(kind, stepMs = 420) {
   }, stepMs * (total + 1));
 }
 
+/* A pretend shell for the browser preview only: it echoes what is typed and
+   answers every command with one line, so the CMD space can be reviewed
+   without Python.  The desktop app runs a real shell instead. */
+const mockTerminal = {
+  enabled: false,
+  shell: 'cmd',
+  recent: ['git status', 'npm run build'],
+  favorites: ['python run.py --dev'],
+  session: null,
+  line: ''
+};
+const MOCK_SHELLS = [
+  { id: 'cmd', name: 'CMD' },
+  { id: 'powershell', name: 'PowerShell' },
+  { id: 'bash', name: 'Git Bash' }
+];
+const MOCK_PROMPTS = { cmd: 'C:\\Users\\you>', powershell: 'PS C:\\Users\\you> ', bash: '$ ' };
+
+function mockTermOut(data) {
+  const id = mockTerminal.session;
+  if (id) setTimeout(() => events.emit('terminal_output', { id, data }), 5);
+}
+
+function mockTermLists() {
+  return { recent: [...mockTerminal.recent], favorites: [...mockTerminal.favorites] };
+}
+
+function mockTermType(data) {
+  const prompt = MOCK_PROMPTS[mockTerminal.shell];
+  for (const ch of data) {
+    if (ch === '\r') {
+      const cmd = mockTerminal.line.trim();
+      mockTerminal.line = '';
+      mockTermOut(cmd ? `\r\n(preview) ${cmd}\r\n${prompt}` : `\r\n${prompt}`);
+    } else if (ch === '\x7f') {
+      if (mockTerminal.line) {
+        mockTerminal.line = mockTerminal.line.slice(0, -1);
+        mockTermOut('\b \b');
+      }
+    } else if (ch === '\x1b' || ch === '\x15') {
+      mockTerminal.line = '';
+      mockTermOut(`\r\x1b[K${prompt}`);
+    } else if (ch >= ' ') {
+      mockTerminal.line += ch;
+      mockTermOut(ch);
+    }
+  }
+}
+
 export const bridge = {
   async get_state() {
     const api = await waitForBridge();
@@ -749,5 +798,100 @@ export const bridge = {
     const api = await waitForBridge();
     if (api?.prune_drive_backup) return await api.prune_drive_backup();
     return { ok: true, removed: 0 };
+  },
+
+  /* ---- The CMD space.  Python picks the program for a shell id; the page
+     never sends a path or a command line. ---- */
+  async terminal_state() {
+    const api = await waitForBridge();
+    if (api?.terminal_state) return await api.terminal_state();
+    return {
+      enabled: mockTerminal.enabled,
+      shells: MOCK_SHELLS,
+      shell: mockTerminal.shell,
+      running: null,
+      ...mockTermLists()
+    };
+  },
+
+  /** Python asks in a native Windows dialog before the shell is allowed. */
+  async terminal_enable() {
+    const api = await waitForBridge();
+    if (api?.terminal_enable) return await api.terminal_enable();
+    mockTerminal.enabled = true;
+    return { ok: true, enabled: true };
+  },
+
+  async terminal_disable() {
+    const api = await waitForBridge();
+    if (api?.terminal_disable) return await api.terminal_disable();
+    mockTerminal.enabled = false;
+    mockTerminal.session = null;
+    return { ok: true, enabled: false };
+  },
+
+  async terminal_start(shell_id, cols = 80, rows = 24) {
+    const api = await waitForBridge();
+    if (api?.terminal_start) return await api.terminal_start(shell_id, cols, rows);
+    if (!mockTerminal.enabled) return { error: 'terminal_off', message: 'The CMD space is off. Turn it on first.' };
+    const shell = MOCK_SHELLS.find(s => s.id === shell_id) || MOCK_SHELLS[0];
+    mockTerminal.shell = shell.id;
+    mockTerminal.session = `mock-${Date.now()}`;
+    mockTerminal.line = '';
+    mockTermOut(`Browser preview: a pretend ${shell.name}. The app runs the real one.\r\n\r\n${MOCK_PROMPTS[shell.id]}`);
+    return { ok: true, id: mockTerminal.session, shell: shell.id, name: shell.name };
+  },
+
+  async terminal_write(session_id, data) {
+    const api = await waitForBridge();
+    if (api?.terminal_write) return await api.terminal_write(session_id, data);
+    if (session_id !== mockTerminal.session) return { error: 'not_running', message: 'That shell is not running any more.' };
+    mockTermType(data);
+    return { ok: true };
+  },
+
+  async terminal_resize(session_id, cols, rows) {
+    const api = await waitForBridge();
+    if (api?.terminal_resize) return await api.terminal_resize(session_id, cols, rows);
+    return { ok: true };
+  },
+
+  async terminal_stop() {
+    const api = await waitForBridge();
+    if (api?.terminal_stop) return await api.terminal_stop();
+    mockTerminal.session = null;
+    return { ok: true };
+  },
+
+  async terminal_remember(command) {
+    const api = await waitForBridge();
+    if (api?.terminal_remember) return await api.terminal_remember(command);
+    const text = typeof command === 'string' && !/^\s/.test(command) ? command.trimEnd() : '';
+    if (text) mockTerminal.recent = [text, ...mockTerminal.recent.filter(c => c !== text)].slice(0, 50);
+    return { ok: true, saved: !!text, ...mockTermLists() };
+  },
+
+  async terminal_set_favorite(command, favorite) {
+    const api = await waitForBridge();
+    if (api?.terminal_set_favorite) return await api.terminal_set_favorite(command, favorite);
+    const text = String(command).trimEnd();
+    mockTerminal.favorites = favorite
+      ? [...mockTerminal.favorites.filter(c => c !== text), text]
+      : mockTerminal.favorites.filter(c => c !== text);
+    return { ok: true, ...mockTermLists() };
+  },
+
+  async terminal_forget(command) {
+    const api = await waitForBridge();
+    if (api?.terminal_forget) return await api.terminal_forget(command);
+    mockTerminal.recent = mockTerminal.recent.filter(c => c !== command);
+    return { ok: true, ...mockTermLists() };
+  },
+
+  async terminal_clear_recent() {
+    const api = await waitForBridge();
+    if (api?.terminal_clear_recent) return await api.terminal_clear_recent();
+    mockTerminal.recent = [];
+    return { ok: true, ...mockTermLists() };
   },
 };

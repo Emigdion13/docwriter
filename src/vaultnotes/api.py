@@ -69,6 +69,16 @@ from vaultnotes.tags import (
     unique_tags,
 )
 from vaultnotes.storage.atomic import atomic_write
+from vaultnotes.terminal import (
+    MAX_FAVORITES,
+    MAX_RECENT,
+    TerminalError,
+    TerminalManager,
+    available_shells,
+    clean_command,
+    clean_command_list,
+    remember,
+)
 from vaultnotes.storage.plain_store import MAX_TITLE_LENGTH, PlainStore, make_snippet, sanitize_title
 from vaultnotes.storage.vault_store import (
     DamagedVaultError,
@@ -161,7 +171,7 @@ def bridge_method(method: Callable[..., Any]) -> Callable[..., Any]:
     def guarded(self: "Api", *args: Any, **kwargs: Any) -> Any:
         try:
             return method(self, *args, **kwargs)
-        except BridgeError as exc:
+        except (BridgeError, TerminalError) as exc:
             return _error(exc.code, exc.message)
         except VaultLockedError as exc:
             return _error("locked", str(exc) or "Vault is locked")
@@ -260,6 +270,10 @@ class Api:
         )
         self.backup.configure(**self._backup_schedule_settings())
 
+        #: The CMD space's shell.  Output goes to the page as events from the
+        #: terminal's own threads, never through the call lock.
+        self.terminal = TerminalManager(emit=lambda name, data: self._emit(name, data))
+
     def set_window(self, window: Any) -> None:
         """Store the pywebview window used for native file dialogs/events."""
         self.window = window
@@ -268,6 +282,7 @@ class Api:
         """Stop the timers, make a final backup if asked to, and clear state."""
         # Outside the call lock: the backup's own callbacks need it.
         self.backup.finish_on_close()
+        self.terminal.stop()
         with self._calls:
             self.autolock.stop()
             for store in self.vault_stores.values():
@@ -2426,6 +2441,159 @@ class Api:
         except Exception as exc:  # noqa: BLE001
             return _error("network", f"The cleanup stopped early ({type(exc).__name__}).")
         return {"ok": True, "removed": len(removed)}
+
+    # ------------------------------------------------------------------
+    # The CMD space: a shell, and its recent and favorite commands
+    # ------------------------------------------------------------------
+    def _terminal_settings(self) -> dict[str, Any]:
+        block = self.config.data.get("terminal")
+        if not isinstance(block, dict):
+            block = {"enabled": False, "shell": "cmd", "recent": [], "favorites": []}
+            self.config.data["terminal"] = block
+        return block
+
+    def _terminal_lists(self) -> dict[str, list[str]]:
+        block = self._terminal_settings()
+        return {
+            "recent": clean_command_list(block.get("recent"), MAX_RECENT),
+            "favorites": clean_command_list(block.get("favorites"), MAX_FAVORITES),
+        }
+
+    def _save_terminal(self, **changes: Any) -> None:
+        self._terminal_settings().update(changes)
+        self.config.save()
+
+    def _require_terminal(self) -> None:
+        if self._terminal_settings().get("enabled") is not True:
+            raise BridgeError("terminal_off", "The CMD space is off. Turn it on first.")
+
+    @bridge_method
+    def terminal_state(self) -> dict[str, Any]:
+        """Whether the CMD space is on, the shells this PC has, and the lists."""
+        block = self._terminal_settings()
+        enabled = block.get("enabled") is True
+        shells = available_shells()
+        shell = block.get("shell")
+        if shells and shell not in {row["id"] for row in shells}:
+            shell = shells[0]["id"]
+        return {
+            "enabled": enabled,
+            "shells": shells,
+            "shell": shell,
+            "running": self.terminal.running() if enabled else None,
+            **self._terminal_lists(),
+        }
+
+    @bridge_method
+    def terminal_enable(self) -> dict[str, Any]:
+        """Turn the CMD space on, but only after the user says yes in a native dialog.
+
+        Python asks in a Windows dialog, not the page, so nothing running in
+        the page can switch the shell on by itself.
+        """
+        if self._terminal_settings().get("enabled") is True:
+            return {"ok": True, "enabled": True}
+        if self.window is None:
+            raise BridgeError("no_window", "The CMD space can only be turned on in the app window.")
+        if not available_shells():
+            raise BridgeError("no_shell", "No shell was found on this PC.")
+        try:
+            with self._calls.released():
+                allowed = self.window.create_confirmation_dialog(
+                    "Turn on the CMD space?",
+                    "The CMD space runs a real shell (CMD, PowerShell or Git Bash) inside VaultNotes. "
+                    "Anything typed there runs on this PC with your permissions, exactly like a "
+                    "normal command window.\n\nTurn it on?",
+                )
+        except Exception as exc:  # noqa: BLE001
+            raise BridgeError("dialog_failed", f"The question could not be shown ({type(exc).__name__}).") from exc
+        if allowed is not True:
+            return _error("cancelled", "The CMD space stays off.")
+        self._save_terminal(enabled=True)
+        return {"ok": True, "enabled": True}
+
+    @bridge_method
+    def terminal_disable(self) -> dict[str, Any]:
+        """Stop the shell and turn the CMD space off (no question needed)."""
+        self.terminal.stop()
+        self._save_terminal(enabled=False)
+        return {"ok": True, "enabled": False}
+
+    @bridge_method
+    def terminal_start(self, shell_id: str, cols: int = 80, rows: int = 24) -> dict[str, Any]:
+        """Start a shell by id (``cmd``, ``powershell``, ``bash``), replacing any running one."""
+        self._require_terminal()
+        started = self.terminal.start(shell_id, cols, rows)
+        if self._terminal_settings().get("shell") != shell_id:
+            self._save_terminal(shell=shell_id)
+        return {"ok": True, **started}
+
+    @bridge_method
+    def terminal_write(self, session_id: str, data: str) -> dict[str, bool]:
+        """Keys typed (or text pasted) into the terminal."""
+        self._require_terminal()
+        self.terminal.write(session_id, data)
+        return {"ok": True}
+
+    @bridge_method
+    def terminal_resize(self, session_id: str, cols: int, rows: int) -> dict[str, bool]:
+        """The terminal's size in character cells changed."""
+        self._require_terminal()
+        self.terminal.resize(session_id, cols, rows)
+        return {"ok": True}
+
+    @bridge_method
+    def terminal_stop(self) -> dict[str, bool]:
+        """End the running shell, if any."""
+        self.terminal.stop()
+        return {"ok": True}
+
+    @bridge_method
+    def terminal_remember(self, command: str) -> dict[str, Any]:
+        """Put a command that was just run at the top of Recent.
+
+        A command with a leading space, or more than one line, is not kept.
+        """
+        text = clean_command(command)
+        lists = self._terminal_lists()
+        if text is None:
+            return {"ok": True, "saved": False, **lists}
+        lists["recent"] = remember(lists["recent"], text, MAX_RECENT)
+        self._save_terminal(recent=lists["recent"])
+        return {"ok": True, "saved": True, **lists}
+
+    @bridge_method
+    def terminal_set_favorite(self, command: str, favorite: bool) -> dict[str, Any]:
+        """Star or unstar a command."""
+        text = clean_command(command)
+        if text is None:
+            raise BridgeError(
+                "invalid_input", "That is not a command that can be kept (one line, no leading space)."
+            )
+        lists = self._terminal_lists()
+        if favorite is True:
+            if text not in lists["favorites"]:
+                if len(lists["favorites"]) >= MAX_FAVORITES:
+                    raise BridgeError("too_many", f"You can keep up to {MAX_FAVORITES} favorite commands.")
+                lists["favorites"] = [*lists["favorites"], text]
+        else:
+            lists["favorites"] = [item for item in lists["favorites"] if item != text]
+        self._save_terminal(favorites=lists["favorites"])
+        return {"ok": True, **lists}
+
+    @bridge_method
+    def terminal_forget(self, command: str) -> dict[str, Any]:
+        """Take one command off Recent."""
+        lists = self._terminal_lists()
+        lists["recent"] = [item for item in lists["recent"] if item != command]
+        self._save_terminal(recent=lists["recent"])
+        return {"ok": True, **lists}
+
+    @bridge_method
+    def terminal_clear_recent(self) -> dict[str, Any]:
+        """Empty Recent; favorites stay."""
+        self._save_terminal(recent=[])
+        return {"ok": True, **self._terminal_lists()}
 
 
 def bridge_function_names() -> tuple[str, ...]:
