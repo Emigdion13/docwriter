@@ -291,6 +291,7 @@ def test_api_settings_validation(api: Api) -> None:
     assert api.update_settings({"look": {"theme": "nope"}}).get("error") == "invalid_settings"
     assert api.update_settings({"look": {"effects": "nope"}}).get("error") == "invalid_settings"
     assert api.update_settings({"look": {"view_mode": "nope"}}).get("error") == "invalid_settings"
+    assert api.update_settings({"look": {"panels_collapsed": "yes"}}).get("error") == "invalid_settings"
     assert api.update_settings({"look": {"editor_font_size": 99}}).get("error") == "invalid_settings"
     assert api.update_settings({"look": {"editor_font_size": "big"}}).get("error") == "invalid_settings"
     assert api.update_settings({"autolock_minutes": 0}).get("error") == "invalid_settings"
@@ -301,6 +302,7 @@ def test_api_settings_validation(api: Api) -> None:
         {"look": {"editor_font_size": 15}, "autolock_minutes": 1}
     )
     assert ok["look"]["editor_font_size"] == 15
+    assert api.update_settings({"look": {"panels_collapsed": True}})["look"]["panels_collapsed"] is True
     assert ok["autolock_minutes"] == 1
 
 

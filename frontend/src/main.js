@@ -15,7 +15,7 @@ import { bridge, events } from './bridge.js';
 import { spaceIcon } from './icons.js';
 
 // UI Modules
-import { createToolbar, updateToolbarView, updateToolbarTheme } from './ui/toolbar.js';
+import { createToolbar, updateToolbarView, updateToolbarTheme, updateToolbarPanels } from './ui/toolbar.js';
 import { createSidebar, renderSpaces, updateDriveCard } from './ui/sidebar.js';
 import {
   createNoteList,
@@ -80,6 +80,7 @@ const state = {
   trashMode: false,
   sort: 'modified', // 'modified' | 'title'
   viewMode: 'split', // 'edit' | 'split' | 'preview'
+  panelsCollapsed: false, // Spaces and the note list hidden, the note gets the width
   theme: 'nebula',
   effects: 'full',
   editorFontSize: 13.5,
@@ -390,6 +391,21 @@ function setViewMode(mode) {
   }
   updateToolbarView(mode);
   bridge.update_settings({ look: { view_mode: mode } });
+}
+
+/**
+ * Hide or show the Spaces sidebar and the note list together, so the note can
+ * take the whole window.  Remembered across restarts like the view mode.
+ */
+function setPanelsCollapsed(collapsed, quiet = false) {
+  state.panelsCollapsed = !!collapsed;
+  document.getElementById('app')?.classList.toggle('panels-collapsed', state.panelsCollapsed);
+  updateToolbarPanels(state.panelsCollapsed);
+  if (!quiet) bridge.update_settings({ look: { panels_collapsed: state.panelsCollapsed } });
+}
+
+function togglePanels() {
+  setPanelsCollapsed(!state.panelsCollapsed);
 }
 
 function cycleViewMode() {
@@ -1616,6 +1632,13 @@ async function getPaletteCommands() {
     ]),
     { label: 'Switch view: Edit / Split / Preview', hint: 'Ctrl E', icon: 'columns', run: () => cycleViewMode() },
     {
+      label: state.panelsCollapsed ? 'Show Spaces and notes' : 'Hide Spaces and notes',
+      sub: 'Give the note the whole window',
+      hint: 'Ctrl \\',
+      icon: 'panel',
+      run: () => togglePanels()
+    },
+    {
       label: 'Link graph for this space',
       sub: 'Notes as dots, joined by their links',
       icon: 'graph',
@@ -1743,6 +1766,9 @@ function setupShortcuts() {
     } else if (mod && key === 'e') {
       e.preventDefault();
       cycleViewMode();
+    } else if (mod && e.key === '\\') {
+      e.preventDefault();
+      togglePanels();
     } else if (mod && key === 'n') {
       e.preventDefault();
       createNote();
@@ -1891,6 +1917,7 @@ async function init() {
   state.theme = appState.look?.theme || 'nebula';
   state.effects = appState.look?.effects || 'full';
   state.viewMode = appState.look?.view_mode || 'split';
+  state.panelsCollapsed = appState.look?.panels_collapsed === true;
   state.editorFontSize = appState.look?.editor_font_size || 13.5;
   state.notesRoot = appState.notes_root || '';
   state.autolockMinutes = appState.autolock_minutes || state.autolockMinutes;
@@ -1905,7 +1932,8 @@ async function init() {
     onLockAll: () => lockAllVaults(),
     onBackup: runBackup,
     onThemeChange: setTheme,
-    onOpenPalette: () => commandPalette?.open()
+    onOpenPalette: () => commandPalette?.open(),
+    onTogglePanels: togglePanels
   });
   toolbarContainer.replaceWith(toolbarEl);
 
@@ -2112,6 +2140,7 @@ async function init() {
   setFx(state.effects, true);
   setEditorFontSize(state.editorFontSize, true);
   setViewMode(state.viewMode);
+  setPanelsCollapsed(state.panelsCollapsed, true);
   paintBackupIdle();
 
   // Select initial space (Plain space with first note)

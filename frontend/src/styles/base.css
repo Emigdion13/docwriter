@@ -146,6 +146,28 @@ button {
   grid-template-rows: 58px minmax(0, 1fr) 36px;
   gap: 10px;
   padding: 10px;
+  transition: grid-template-columns .35s var(--ease), column-gap .35s var(--ease);
+}
+
+/* Spaces and the note list folded away (toolbar button, Ctrl \): the note
+   takes the whole width.  The two columns shrink to nothing and their panels
+   fade out, so nothing hidden can still take a click. */
+.app.panels-collapsed {
+  grid-template-columns: 0 0 minmax(0, 1fr);
+  column-gap: 0;
+}
+
+.app > .sidebar,
+.app > .notelist {
+  transition: opacity .25s, visibility 0s;
+}
+
+.app.panels-collapsed > .sidebar,
+.app.panels-collapsed > .notelist {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity .2s, visibility 0s .2s;
 }
 
 .toolbar { grid-column: 1 / -1; }

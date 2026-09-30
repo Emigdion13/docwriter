@@ -2089,6 +2089,8 @@ class Api:
                 return {"error": "invalid_settings", "message": "Unknown effects level"}
             if "view_mode" in look and look["view_mode"] not in ("edit", "split", "preview"):
                 return {"error": "invalid_settings", "message": "Unknown view mode"}
+            if "panels_collapsed" in look and not isinstance(look["panels_collapsed"], bool):
+                return {"error": "invalid_settings", "message": "Panels collapsed must be true or false"}
             if "editor_font_size" in look:
                 try:
                     font_size = float(look["editor_font_size"])
