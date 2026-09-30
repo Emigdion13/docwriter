@@ -39,6 +39,7 @@ from typing import Sequence
 
 from vaultnotes.config import AI_NOTES_FOLDER, ensure_ai_notes_folder
 from vaultnotes.crypto.keyfile import KeyFileError, PassphraseRequired, load_key_file
+from vaultnotes.frontmatter import is_important
 from vaultnotes.models import Note
 from vaultnotes.storage.plain_store import MAX_TITLE_LENGTH, PlainStore, sanitize_title
 from vaultnotes.storage.vault_store import VaultStore, VaultStoreError
@@ -399,8 +400,11 @@ def run(argv: Sequence[str] | None = None, out=None, stdin=None) -> int:
 
         reader = NotesReader(root, Path(args.personal_key) if args.personal_key else None)
         if args.command == "list":
-            for note in reader.notes(space):
-                print(f"{note.title}\t{note.modified}\t{note.id}", file=out)
+            # The user's important notes first, flagged in a fourth column.
+            notes = sorted(reader.notes(space), key=lambda note: not is_important(note.body))
+            for note in notes:
+                flag = "\timportant" if is_important(note.body) else ""
+                print(f"{note.title}\t{note.modified}\t{note.id}{flag}", file=out)
         elif args.command == "read":
             note = _find(reader.notes(space), args.note)
             print(f"<!-- {space} / {note.title} · {note.id} · modified {note.modified} -->", file=out)

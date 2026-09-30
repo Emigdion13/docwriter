@@ -17,11 +17,12 @@ import { spaceIcon } from './icons.js';
 // UI Modules
 import { createToolbar, updateToolbarView, updateToolbarTheme } from './ui/toolbar.js';
 import { createSidebar, renderSpaces, updateDriveCard } from './ui/sidebar.js';
-import { createNoteList, renderNotes, renderTrash } from './ui/noteList.js';
+import { createNoteList, renderNotes, renderTrash, setImportantOnly, isImportantOnly } from './ui/noteList.js';
 import { confirmAction, createMoveDialog } from './ui/dialogs.js';
 import {
   initEditor,
   setEditorContent,
+  replaceEditorContent,
   getEditorContent,
   focusEditor,
   setEditorCursorToEnd,
@@ -122,9 +123,12 @@ function getActiveSpace() {
   return state.spaces.find(s => s.id === state.currentSpaceId) || state.spaces[0];
 }
 
+// The front matter block ("important: true") is not part of what the note says.
+const FRONT_MATTER_RE = /^﻿?---\r?\n[\s\S]*?\r?\n(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/;
+
 function wordCount(text) {
   if (!text) return 0;
-  return text.replace(/[#*`>|[\]-]/g, ' ').split(/\s+/).filter(Boolean).length;
+  return text.replace(FRONT_MATTER_RE, '').replace(/[#*`>|[\]-]/g, ' ').split(/\s+/).filter(Boolean).length;
 }
 
 /**
@@ -450,6 +454,11 @@ async function sendSave(job, refreshList) {
   if (!pendingSave) setSavingState(false);
   if (isShowing(job)) {
     state.currentNote.modified = res.modified;
+    // The mark can also be typed or deleted by hand in the front matter.
+    if (typeof res.important === 'boolean') {
+      state.currentNote.important = res.important;
+      updateImportantButton();
+    }
     const meta = document.getElementById('meta');
     if (meta) meta.textContent = `Edited ${res.modified} · ${wordCount(job.body)} words`;
     if (refreshList) {
@@ -595,6 +604,8 @@ function renderWorkspace() {
     meta.textContent = `Edited ${note.modified || 'just now'} · ${wordCount(note.body)} words`;
   }
 
+  updateImportantButton();
+
   // Editor content
   setEditorContent(note.body);
 
@@ -609,6 +620,60 @@ function renderWorkspace() {
 /* =================================================================
    Note Actions
    ================================================================= */
+
+function updateImportantButton() {
+  const btn = document.getElementById('important');
+  if (!btn) return;
+  const on = !!state.currentNote?.important;
+  btn.classList.toggle('on', on);
+  btn.setAttribute('aria-pressed', String(on));
+  btn.title = on ? 'Important. Click to unmark (Ctrl D)' : 'Mark as important (Ctrl D)';
+  btn.setAttribute('aria-label', btn.title);
+}
+
+/**
+ * Marks the open note important, or clears the mark.  The engine writes the
+ * "important: true" front matter line, so the edits in flight are saved first
+ * and the new text is merged into the editor without moving the cursor.
+ */
+async function toggleImportant() {
+  const space = getActiveSpace();
+  if (!state.currentNote || space?.locked || state.trashMode) return;
+  const target = !state.currentNote.important;
+  const job = { spaceId: space.id, noteId: state.currentNote.id };
+
+  // Typing while the call is out puts an edit in front of it; save that and ask
+  // again (the call is idempotent), so neither the mark nor the text is lost.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (!(await flushSave())) return;
+    if (!isShowing(job)) return;
+    const before = getEditorContent();
+    const res = await bridge.set_important(job.spaceId, job.noteId, target);
+    if (res?.error) {
+      toast(res.message || 'The note could not be marked.', { icon: 'alert' });
+      return;
+    }
+    if (!isShowing(job)) return;
+    if (getEditorContent() !== before) continue;
+
+    replaceEditorContent(res.body);
+    state.currentNote = { ...state.currentNote, ...res };
+    updateImportantButton();
+    const meta = document.getElementById('meta');
+    if (meta) meta.textContent = `Edited ${res.modified} · ${wordCount(res.body)} words`;
+    await refreshNoteList(false);
+    toast(target ? `“${res.title}” is marked important` : `“${res.title}” is no longer important`, { icon: 'star' });
+    return;
+  }
+}
+
+function toggleImportantFilter() {
+  const space = getActiveSpace();
+  if (state.trashMode || space?.locked) return;
+  setImportantOnly(!isImportantOnly());
+  refreshNoteList(false);
+  toast(isImportantOnly() ? 'Showing important notes only' : 'Showing all notes', { icon: 'star' });
+}
 
 async function createNote(initialTitle = 'Untitled') {
   if (!(await flushSave())) return;
@@ -1362,6 +1427,9 @@ async function getPaletteCommands() {
   const commands = [
     { label: 'New note', hint: 'Ctrl N', icon: 'plus', run: () => createNote() },
     ...(hasOpenNote ? [
+      state.currentNote.important
+        ? { label: `Unmark “${state.currentNote.title}” as important`, hint: 'Ctrl D', icon: 'star', run: () => toggleImportant() }
+        : { label: `Mark “${state.currentNote.title}” as important`, hint: 'Ctrl D', icon: 'star', run: () => toggleImportant() },
       { label: `Move “${state.currentNote.title}” to another space…`, sub: space.name, icon: 'move', run: () => moveCurrentNote() },
       { label: `Export “${state.currentNote.title}” to .md`, sub: space.name, icon: 'download', run: () => exportCurrentNote() }
     ] : []),
@@ -1376,6 +1444,11 @@ async function getPaletteCommands() {
         label: state.sort === 'title' ? 'Sort: Modified (newest first)' : 'Sort: Title (A–Z)',
         icon: 'sort',
         run: () => toggleSort()
+      },
+      {
+        label: isImportantOnly() ? 'Show all notes' : 'Show only important notes',
+        icon: 'star',
+        run: () => toggleImportantFilter()
       }
     ] : []),
     { label: 'Lock all vaults', hint: 'Ctrl L', icon: 'lock', run: () => lockAllVaults() },
@@ -1482,8 +1555,8 @@ async function getPaletteCommands() {
     (Array.isArray(notes) ? notes : []).forEach(n => {
       commands.push({
         label: n.title,
-        sub: s.name,
-        icon: spaceIcon(s),
+        sub: n.important ? `${s.name} · important` : s.name,
+        icon: n.important ? 'star' : spaceIcon(s),
         colorVar: s.colorVar,
         run: () => selectSpace(s.id, n.id)
       });
@@ -1534,6 +1607,9 @@ function setupShortcuts() {
     } else if (mod && key === 'b') {
       e.preventDefault();
       runBackup();
+    } else if (mod && key === 'd') {
+      e.preventDefault();
+      toggleImportant();
     } else if (mod && key === 's') {
       e.preventDefault();
       if (state.currentNote && !getActiveSpace().locked) {
@@ -1592,6 +1668,10 @@ function setupShortcuts() {
       state.historyIndex++;
       jumpHistory(state.history[state.historyIndex]);
     }
+  });
+
+  document.getElementById('important')?.addEventListener('click', () => {
+    toggleImportant();
   });
 
   document.getElementById('move')?.addEventListener('click', () => {
@@ -1721,6 +1801,7 @@ async function init() {
     onSortToggle: () => toggleSort(),
     onImport: () => importNotes(),
     onTrashToggle: () => toggleTrashMode(),
+    onImportantFilter: () => toggleImportantFilter(),
     onRestoreNote: (noteId) => restoreTrashedNote(noteId),
     onPurgeNote: (noteId) => purgeTrashedNote(noteId),
     onEmptyTrash: () => emptyTrash()

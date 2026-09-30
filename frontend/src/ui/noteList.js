@@ -9,6 +9,18 @@ import { glyphs, isCalm } from './effects.js';
 
 let noiseInterval = null;
 
+// "Important only" is a way of looking at every space, so it outlives a
+// space switch; main.js flips it and redraws.
+let importantOnly = false;
+
+export function setImportantOnly(value) {
+  importantOnly = !!value;
+}
+
+export function isImportantOnly() {
+  return importantOnly;
+}
+
 // Rows that get an entrance animation.  Past this the list is drawn at once,
 // so a space with hundreds of notes opens instantly instead of rippling.
 const STAGGER_LIMIT = 12;
@@ -29,6 +41,7 @@ export function createNoteList({
   onSortToggle,
   onImport,
   onTrashToggle,
+  onImportantFilter,
   onRestoreNote,
   onPurgeNote,
   onEmptyTrash
@@ -44,6 +57,9 @@ export function createNoteList({
         <div class="nl-count" id="list-count">0 notes</div>
       </div>
       <div class="nl-actions">
+        <button class="btn icon small" id="important-filter" aria-pressed="false" aria-label="Show only important notes" title="Show only important notes">
+          ${icon('star', 15)}
+        </button>
         <button class="btn icon small" id="sort-toggle" aria-label="Toggle sort order" title="Sort: Modified">
           ${icon('sort', 15)}
         </button>
@@ -69,6 +85,7 @@ export function createNoteList({
   section.querySelector('#sort-toggle').onclick = () => onSortToggle?.();
   section.querySelector('#import-btn').onclick = () => onImport?.();
   section.querySelector('#trash-toggle').onclick = () => onTrashToggle?.();
+  section.querySelector('#important-filter').onclick = () => onImportantFilter?.();
 
   const searchInput = section.querySelector('#search');
   searchInput.addEventListener('input', () => {
@@ -104,6 +121,15 @@ function setHeaderButtons({ sort = 'modified', trashMode = false, locked = false
   const importBtn = document.getElementById('import-btn');
   const trashBtn = document.getElementById('trash-toggle');
   const newBtn = document.getElementById('new-note');
+  const importantBtn = document.getElementById('important-filter');
+  if (importantBtn) {
+    const on = importantOnly && !trashMode;
+    importantBtn.classList.toggle('on', on);
+    importantBtn.setAttribute('aria-pressed', String(on));
+    importantBtn.title = on ? 'Show all notes' : 'Show only important notes';
+    importantBtn.setAttribute('aria-label', importantBtn.title);
+    importantBtn.disabled = locked || trashMode;
+  }
   if (sortBtn) {
     sortBtn.classList.toggle('on', sort === 'title');
     sortBtn.title = sort === 'title' ? 'Sort: Title (A–Z)' : 'Sort: Modified (newest first)';
@@ -170,13 +196,27 @@ export function renderNotes(space, notes, activeNoteId, animate = true, opts = {
 
   if (searchInput) searchInput.disabled = false;
   const count = notes.length;
-  if (countEl) countEl.textContent = `${count} note${count === 1 ? '' : 's'}`;
+  const importantCount = notes.filter(n => n.important).length;
+  if (countEl) {
+    // Numbers and our own icon only, so innerHTML is safe here.
+    const total = `${count} note${count === 1 ? '' : 's'}`;
+    const star = `<span class="nl-imp" title="Important">${icon('star', 11)}${importantCount}</span>`;
+    countEl.innerHTML = importantOnly
+      ? `${star} of ${count}`
+      : importantCount ? `${total} · ${star}` : total;
+  }
+
+  // The engine already lists important notes first; the filter only hides.
+  const allNotes = notes;
+  notes = importantOnly ? notes.filter(n => n.important) : notes;
 
   if (!notes.length) {
     const q = searchInput?.value?.trim();
-    notesContainer.innerHTML = q
-      ? `<div class="empty-list">No notes match “${escapeHtml(q)}”</div>`
-      : `<div class="empty-list">No notes in this space yet</div>`;
+    notesContainer.innerHTML = importantOnly && allNotes.length
+      ? `<div class="empty-list">No important notes${q ? ` match “${escapeHtml(q)}”` : ' here'}.<br>Mark one with ${icon('star', 12)} or Ctrl D.</div>`
+      : q
+        ? `<div class="empty-list">No notes match “${escapeHtml(q)}”</div>`
+        : `<div class="empty-list">No notes in this space yet</div>`;
     return;
   }
 
@@ -188,12 +228,14 @@ export function renderNotes(space, notes, activeNoteId, animate = true, opts = {
     const isActive = n.id === activeNoteId;
     const lc = n.link_count || 0;
     const delay = staggered ? Math.min(i, STAGGER_LIMIT) * 45 : 0;
+    // A line between the important notes and the rest.
+    const firstOfRest = !n.important && i > 0 && notes[i - 1].important;
 
     return `
-      <button class="note ${isActive ? 'active' : ''} ${staggered ? '' : 'still'}"
+      <button class="note ${isActive ? 'active' : ''} ${staggered ? '' : 'still'} ${n.important ? 'important' : ''} ${firstOfRest ? 'first-of-rest' : ''}"
               data-note="${escapeHtml(n.id)}"
               style="animation-delay:${delay}ms">
-        <span class="t">${escapeHtml(n.title)}</span>
+        <span class="t">${n.important ? `<span class="imp" title="Important">${icon('star', 12)}</span>` : ''}${escapeHtml(n.title)}</span>
         <span class="s">${escapeHtml(n.snippet || '')}</span>
         <span class="m">
           <span>${escapeHtml(n.modified || 'today')}</span>

@@ -546,6 +546,59 @@
   gap: 4px;
 }
 
+/* Important notes: an amber star in every space, so the mark never reads as
+   the space's own accent. */
+.note .imp {
+  display: inline-flex;
+  vertical-align: -1px;
+  margin-right: 6px;
+  color: var(--warning);
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--warning) 55%, transparent));
+}
+
+.note .imp svg,
+.btn.important-toggle.on svg,
+#important-filter.on svg {
+  fill: currentColor;
+}
+
+.nl-count .nl-imp {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--warning);
+}
+
+.nl-count .nl-imp svg {
+  fill: currentColor;
+}
+
+.note.first-of-rest {
+  margin-top: 10px;
+}
+
+.note.first-of-rest::after {
+  content: "";
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  top: -7px;
+  height: 1px;
+  background: var(--glass-border);
+}
+
+.btn.important-toggle.on,
+#important-filter.on {
+  color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 45%, transparent);
+  box-shadow: 0 0 16px -4px color-mix(in srgb, var(--warning) 60%, transparent);
+}
+
+.empty-list .i {
+  vertical-align: -2px;
+  color: var(--warning);
+}
+
 .empty-list {
   padding: 30px 10px;
   text-align: center;

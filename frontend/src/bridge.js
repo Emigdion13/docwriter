@@ -75,7 +75,7 @@ const mockSpaces = [
         id: 'Shopping list',
         title: 'Shopping list',
         modified: 'Today 09:12',
-        body: `# Shopping list\n\n- [x] Coffee beans\n- [ ] Oat milk\n- [ ] Batteries for the [[Home lab]] sensors\n- [ ] Birthday card for Ana`
+        body: `---\nimportant: true\n---\n# Shopping list\n\n- [x] Coffee beans\n- [ ] Oat milk\n- [ ] Batteries for the [[Home lab]] sensors\n- [ ] Birthday card for Ana`
       },
       {
         id: 'Home lab',
@@ -169,6 +169,7 @@ function mockPreview(space_id, body) {
   const titles = mockTitles(space_id).map(t => t.toLowerCase());
   const plainTitles = mockTitles('plain').map(t => t.toLowerCase());
   const escaped = String(body ?? '')
+    .replace(MOCK_FRONT_MATTER, '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
@@ -227,6 +228,21 @@ const MOCK_BACKUP = {
 };
 
 const mockBackup = { ...MOCK_BACKUP };
+
+/* Rough stand-ins for vaultnotes.frontmatter, for the browser preview only:
+   the app itself always asks Python whether a note is important. */
+const MOCK_FRONT_MATTER = /^---\n([\s\S]*?)\n---\n?/;
+
+function mockImportant(body) {
+  const block = MOCK_FRONT_MATTER.exec(body || '');
+  return !!block && /^important:\s*(true|yes|on)\s*$/im.test(block[1]);
+}
+
+function mockSetImportant(body, important) {
+  if (mockImportant(body) === important) return body;
+  if (important) return `---\nimportant: true\n---\n${body}`;
+  return body.replace(MOCK_FRONT_MATTER, '');
+}
 
 /**
  * No Python, no network: walk the status bar through the same event sequence
@@ -307,10 +323,11 @@ export const bridge = {
     return list.map(n => ({
       id: n.id,
       title: n.title,
-      snippet: n.body.slice(0, 80),
+      snippet: n.body.replace(MOCK_FRONT_MATTER, '').slice(0, 80),
       modified: n.modified,
-      link_count: 0
-    }));
+      link_count: 0,
+      important: mockImportant(n.body)
+    })).sort((a, b) => Number(b.important) - Number(a.important));
   },
 
   async open_note(space_id, note_id) {
@@ -325,6 +342,7 @@ export const bridge = {
       title: n.title,
       body: n.body,
       modified: n.modified,
+      important: mockImportant(n.body),
       backlinks: []
     };
   },
@@ -356,7 +374,22 @@ export const bridge = {
     if (!n) return { error: 'not_found', message: 'Note not found' };
     n.body = body;
     n.modified = 'just now';
-    return { modified: n.modified };
+    return { modified: n.modified, important: mockImportant(body) };
+  },
+
+  async set_important(space_id, note_id, important) {
+    const api = await waitForBridge();
+    if (api?.set_important) return await api.set_important(space_id, note_id, important);
+    const s = mockSpaces.find(x => x.id === space_id);
+    if (!s || s.locked) return { error: 'locked', message: 'Vault is locked' };
+    const n = s.notes.find(x => x.id === note_id);
+    if (!n) return { error: 'not_found', message: 'Note not found' };
+    const body = mockSetImportant(n.body, important);
+    if (body !== n.body) {
+      n.body = body;
+      n.modified = 'just now';
+    }
+    return this.open_note(space_id, note_id);
   },
 
   async rename_note(space_id, note_id, new_title, update_links = true) {

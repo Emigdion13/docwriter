@@ -26,6 +26,7 @@ from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import TextLexer, get_lexer_by_name
 
+from vaultnotes.frontmatter import strip_front_matter
 from vaultnotes.links import (
     EMBED_BLOCK_OPEN,
     EMBED_CLOSE,
@@ -167,6 +168,9 @@ class _RenderContext:
 
     def render(self, body: str) -> str:
         """Rewrite links, render Markdown, then substitute embeds."""
+        # Front matter (the important mark, Obsidian properties) is data about
+        # the note: markdown-it would draw it as a rule and a heading.
+        body = strip_front_matter(body)
         if not body:
             return ""
         source = body
