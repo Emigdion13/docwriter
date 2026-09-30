@@ -10,6 +10,7 @@ read-only, and the Encrypted vault is always refused.
     python -m vaultnotes.notes_cli --root <notes folder> write ai "PR 42 review" --file review.md
     python -m vaultnotes.notes_cli --root <notes folder> append ai "Session log" --text "Done: tests"
     python -m vaultnotes.notes_cli --root <notes folder> delete ai "Old draft"
+    python -m vaultnotes.notes_cli --root <notes folder> mark ai "PR 42 review" [--clear]
 
 ``--root`` and ``--personal-key`` can also come from the ``VAULTNOTES_ROOT`` and
 ``VAULTNOTES_PERSONAL_KEY`` environment variables.  The app's settings.json is
@@ -39,7 +40,7 @@ from typing import Sequence
 
 from vaultnotes.config import AI_NOTES_FOLDER, ensure_ai_notes_folder
 from vaultnotes.crypto.keyfile import KeyFileError, PassphraseRequired, load_key_file
-from vaultnotes.frontmatter import is_important
+from vaultnotes.frontmatter import is_important, set_important
 from vaultnotes.models import Note
 from vaultnotes.storage.plain_store import MAX_TITLE_LENGTH, PlainStore, sanitize_title
 from vaultnotes.storage.vault_store import VaultStore, VaultStoreError
@@ -50,7 +51,7 @@ WRITABLE_SPACES = ("ai",)
 SPACE_NAMES = {"plain": "Plain", "personal": "Personal", "ai": "AI-Notes"}
 SPACE_ALIASES = {"ai-notes": "ai", "ai_notes": "ai", "ai notes": "ai", "ainotes": "ai"}
 
-WRITE_COMMANDS = ("write", "append", "delete")
+WRITE_COMMANDS = ("write", "append", "delete", "mark")
 
 #: The largest note this tool writes: the same limit as importing a .md file.
 MAX_NOTE_BYTES = 5 * 1024 * 1024
@@ -324,6 +325,21 @@ def _delete(store: PlainStore | None, wanted: str) -> str:
     return f'Moved "{existing.title}" to the AI-Notes trash; it can be restored from there in VaultNotes.'
 
 
+def _mark(store: PlainStore | None, wanted: str, important: bool) -> str:
+    """Set or clear the important mark, the same front matter line the app writes."""
+    existing = _existing(store, wanted) if store is not None else None
+    if existing is None:
+        raise CliError(f"AI-Notes has no note titled {wanted!r}. mark needs the exact title.")
+    body = set_important(existing.body, important)
+    if body == existing.body:
+        state = "already marked important" if important else "not marked important"
+        return f'"{existing.title}" is {state}; nothing changed.'
+    note = store.save_note(existing.id, body)
+    if important:
+        return f'Marked "{note.title}" important; it now sits at the top of the AI-Notes list.'
+    return f'Cleared the important mark on "{note.title}".'
+
+
 def _matching_lines(body: str, needle: str, limit: int = 3) -> list[str]:
     lines = [line.strip() for line in body.splitlines() if needle in line.casefold()]
     return lines[:limit]
@@ -370,6 +386,10 @@ def _parser() -> argparse.ArgumentParser:
     delete = commands.add_parser("delete", help="move an AI-Notes note to its trash")
     delete.add_argument("space", help="must be ai")
     delete.add_argument("note", help="the note's exact title")
+    mark = commands.add_parser("mark", help="mark an AI-Notes note important (--clear removes the mark)")
+    mark.add_argument("space", help="must be ai")
+    mark.add_argument("note", help="the note's exact title")
+    mark.add_argument("--clear", action="store_true", help="remove the important mark instead")
     return parser
 
 
@@ -396,6 +416,9 @@ def run(argv: Sequence[str] | None = None, out=None, stdin=None) -> int:
             return 0
         if args.command == "delete":
             print(_delete(_ai_store(root, create=False), args.note), file=out)
+            return 0
+        if args.command == "mark":
+            print(_mark(_ai_store(root, create=False), args.note, not args.clear), file=out)
             return 0
 
         reader = NotesReader(root, Path(args.personal_key) if args.personal_key else None)

@@ -240,7 +240,8 @@ You can type or delete those lines by hand, and Obsidian shows them as the note'
 properties. Other front matter keys are kept as they are. The preview and the list
 snippet leave the block out. In a vault the mark is encrypted with the rest of the
 note, and it moves with a note to another space. `notes.py list` puts important notes
-first and adds a fourth column, `important`.
+first and adds a fourth column, `important`, and `notes.py mark ai "Title"` sets
+the mark on an AI-Notes note (`--clear` removes it).
 
 **Word count** is in the note's meta line. **Themes:** Nebula (default), Synthwave and
 Arctic. **Effects:** *Lite* and *Off* drop the blur and glow for older machines
@@ -261,7 +262,7 @@ the app:
 
 | Space | What `notes.py` may do |
 |---|---|
-| `ai` (AI-Notes) | list, read, search, **write, append, delete** (to its trash) |
+| `ai` (AI-Notes) | list, read, search, **write, append, delete** (to its trash), **mark** |
 | `plain`, `personal` | list, read, search — never write |
 | `encrypted` | nothing: it never lists that vault, opens its folder or uses its key |
 
@@ -274,11 +275,12 @@ Use Encrypted for anything a helper must not see, such as PHI.
 .venv\Scripts\python notes.py --root ... write ai "PR 42 review" --file review.md
 .venv\Scripts\python notes.py --root ... append ai "Session log" --text "Tests pass now."
 .venv\Scripts\python notes.py --root ... delete ai "Old draft"
+.venv\Scripts\python notes.py --root ... mark ai "PR 42 review" --clear
 ```
 
 `--root` and `--personal-key` can be set once as `VAULTNOTES_ROOT` and
 `VAULTNOTES_PERSONAL_KEY`. `read` accepts a note id, its title, or a unique part of the
-title; `append` and `delete` need the exact title. `write` refuses a title that is
+title; `append`, `delete` and `mark` need the exact title. `write` refuses a title that is
 already taken unless you add `--replace`, and `append` creates the note if it is
 missing. The text comes from `--text`, `--file` or standard input. Prefer `--file`
 for anything long: Windows PowerShell 5.1 turns accented letters into `?` when it
