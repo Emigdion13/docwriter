@@ -56,6 +56,7 @@ from vaultnotes.crypto.keyfile import (
     load_key_file,
 )
 from vaultnotes.events import emit_event
+from vaultnotes.frontmatter import is_important, set_important
 from vaultnotes.links import LinkIndex, count_links, rename_links
 from vaultnotes.models import Note
 from vaultnotes.render import render_preview
@@ -632,6 +633,7 @@ class Api:
             "snippet": make_snippet(note.body),
             "modified": note.modified,
             "link_count": self._link_count(space_id, note),
+            "important": is_important(note.body),
         }
 
     def _note_result(
@@ -650,6 +652,7 @@ class Api:
             "tags": list(note.tags),
             "snippet": make_snippet(note.body),
             "link_count": self._link_count(space_id, note),
+            "important": is_important(note.body),
             "backlinks": backlinks if backlinks is not None else [],
         }
 
@@ -663,7 +666,11 @@ class Api:
         query: str = "",
         sort: str = "modified",
     ) -> list[dict[str, Any]] | dict[str, str]:
-        """List note summaries in one space; locked vaults return no titles."""
+        """List note summaries in one space; locked vaults return no titles.
+
+        Important notes come first, each group in the requested order, so the
+        notes the user marked sit at the top of the list.
+        """
         space = self._known_space(space_id)
         text_query = self._text(query, "Search text", max_length=1024)
         text_sort = self._text(sort, "Sort") or "modified"
@@ -673,15 +680,15 @@ class Api:
         plain = self._plain(space)
         if plain is not None:
             notes = plain.list_notes(query=text_query, sort=text_sort)
-            return [self._note_summary(space, note) for note in notes]
-
-        store = self.vault_stores[space]
-        if store.locked:
-            return []
-        return [
-            self._note_summary(space, note)
-            for note in store.list_notes(query=text_query, sort=text_sort)
-        ]
+        else:
+            store = self.vault_stores[space]
+            if store.locked:
+                return []
+            notes = store.list_notes(query=text_query, sort=text_sort)
+        rows = [self._note_summary(space, note) for note in notes]
+        # A stable sort: the store's order survives inside each group.
+        rows.sort(key=lambda row: not row["important"])
+        return rows
 
     @bridge_method
     def open_note(self, space_id: str, note_id: str) -> dict[str, Any]:
@@ -779,7 +786,41 @@ class Api:
         self._index_update(space, note)
         if self._any_vault_unlocked():
             self.autolock.touch()
-        return {"modified": note.modified}
+        # The mark can be typed by hand too, so the header star follows saves.
+        return {"modified": note.modified, "important": is_important(note.body)}
+
+    @bridge_method
+    def set_important(self, space_id: str, note_id: str, important: bool) -> dict[str, Any]:
+        """Mark a note important, or clear the mark, and return the full note.
+
+        The mark is an ``important: true`` line in the note's front matter
+        (see :mod:`vaultnotes.frontmatter`), so this is an ordinary save of a
+        new body: encrypted in a vault, a plain ``.md`` write elsewhere.
+        """
+        space = self._known_space(space_id)
+        clean_id = self._note_id_text(space, note_id)
+        if not isinstance(important, bool):
+            raise BridgeError("invalid_input", "Important must be true or false.")
+
+        plain = self._plain(space)
+        if plain is not None:
+            note = self._read_plain_note(space, clean_id)
+        else:
+            store = self.vault_stores[space]
+            if store.locked:
+                return _error("locked", "Vault is locked")
+            try:
+                note = store.read_note(clean_id)
+            except FileNotFoundError:
+                return _error("not_found", f"Note not found: {clean_id}")
+
+        body = set_important(note.body, important)
+        if body != note.body:
+            note = plain.save_note(clean_id, body) if plain is not None else store.save_note(clean_id, body)
+            self._index_update(space, note)
+            if self._any_vault_unlocked():
+                self.autolock.touch()
+        return self._note_result(space, note, self._backlinks_for(space, note))
 
     @bridge_method
     def rename_note(

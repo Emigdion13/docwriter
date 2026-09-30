@@ -548,6 +548,8 @@ BRIDGE_SURFACE = [
     # and Drive state is reported inside get_state() rather than by inventing
     # another status endpoint.
     "prune_drive_backup",
+    # Extra: the important mark, kept in the note's own front matter.
+    "set_important",
 ]
 
 

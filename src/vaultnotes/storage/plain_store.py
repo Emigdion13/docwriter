@@ -8,6 +8,7 @@ import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from vaultnotes.frontmatter import strip_front_matter
 from vaultnotes.models import Note
 from vaultnotes.storage.atomic import atomic_write
 
@@ -74,6 +75,8 @@ def make_snippet(body: str, max_length: int = 120) -> str:
     """
     if not isinstance(body, str) or not body:
         return ""
+    # "important: true" is a mark, not something the note says.
+    body = strip_front_matter(body)
 
     cleaned_lines: list[str] = []
     for line in body.split("\n", _SNIPPET_LINE_LIMIT)[:_SNIPPET_LINE_LIMIT]:

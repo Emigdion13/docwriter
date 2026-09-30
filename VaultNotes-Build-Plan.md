@@ -361,10 +361,11 @@ The frontend calls Python with `await window.pywebview.api.<name>(...)`, after t
 | Function | Returns |
 |---|---|
 | `get_state()` | spaces (id, name, kind `plain`/`vault`, locked, note count), look settings, last backup time |
-| `list_notes(space_id, query="", sort="modified")` | `[{id, title, snippet, modified, link_count}]` |
+| `list_notes(space_id, query="", sort="modified")` | `[{id, title, snippet, modified, link_count, important}]`, important notes first |
 | `open_note(space_id, note_id)` | `{id, title, body, modified, backlinks: [{id, title}]}` |
 | `create_note(space_id, title)` | the new note |
-| `save_note(space_id, note_id, body)` | `{modified}` |
+| `save_note(space_id, note_id, body)` | `{modified, important}` |
+| `set_important(space_id, note_id, important)` | the note, with `important: true` added to or removed from its front matter (section 7, *Important notes*) |
 | `rename_note(space_id, note_id, new_title, update_links)` | `{title, links_updated}` |
 | `count_links_to(space_id, note_id)` | `{count}`, used by the rename prompt and the move warning. For a Plain note, `count` includes the `[[Plain:Title]]` links in AI-Notes and unlocked vaults, and the result adds `spaces` (where the linking notes are) and `locked` (the vaults it did not look in) |
 | `delete_note`, `restore_note`, `list_trash` | trash handling |

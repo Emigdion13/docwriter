@@ -199,6 +199,7 @@ Key files (`.vnkey`) are never uploaded, and `client_secret.json` stays home too
 | Ctrl+S | Save now (the app also auto-saves about a second after you stop typing) |
 | Ctrl+F | Search this space |
 | Ctrl+E | Edit / Split / Preview |
+| Ctrl+D | Mark the open note important, or clear the mark |
 | Ctrl+L | Lock all vaults |
 | Ctrl+B | Back up now |
 | Esc | Close a dialog, the palette or the graph |
@@ -216,6 +217,30 @@ rewrites the links that point at it; "Linked from" sits under the preview. Typin
 
 Ctrl+click (Cmd+click) a `[[link]]` in the **editor** opens it, or offers to create it
 if the note does not exist yet.
+
+### Important notes
+
+Press **Ctrl+D**, the star beside the note's title, or *Mark … as important* in the
+palette to mark a note important. Important notes sit at the top of the list with an
+amber star, in either sort order, and the list header counts them. The star in the
+list header shows only the important notes; that filter stays on as you switch
+spaces, so you can walk through everything that needs you. In the palette, important
+notes carry a star as well.
+
+The mark is kept in the note itself, as front matter at the very top of the file:
+
+```
+---
+important: true
+---
+# Call the bank
+```
+
+You can type or delete those lines by hand, and Obsidian shows them as the note's
+properties. Other front matter keys are kept as they are. The preview and the list
+snippet leave the block out. In a vault the mark is encrypted with the rest of the
+note, and it moves with a note to another space. `notes.py list` puts important notes
+first and adds a fourth column, `important`.
 
 **Word count** is in the note's meta line. **Themes:** Nebula (default), Synthwave and
 Arctic. **Effects:** *Lite* and *Off* drop the blur and glow for older machines
@@ -286,11 +311,13 @@ Things the spec forbids, so the app does not do them:
   move warning counts a Plain note's links the same way.
 - Backup uploads the whole notes folder on its first run; deleting notes locally does
   not delete them from Drive until you press *Clean up Drive…*.
-- No frameless window (the toolbar stays inside a normal title bar), no tag or pin
-  system, and no encrypted index cache for fast unlocks. The first is a Windows-only
-  cosmetic risk, the second would need hidden metadata next to Plain notes, and the
-  third would put a searchable copy of vault titles on disk — all three are optional
-  extras the plan allows leaving out, so they are left out rather than half-built.
+- No frameless window (the toolbar stays inside a normal title bar), no tag system,
+  and no encrypted index cache for fast unlocks. The first is a Windows-only cosmetic
+  risk, the second would need either hidden metadata next to Plain notes or a tag
+  parser over every note, and the third would put a searchable copy of vault titles
+  on disk — all three are optional extras the plan allows leaving out, so they are
+  left out rather than half-built. The *important* mark (§7) avoids the metadata
+  problem by living in the note's own front matter.
 
 ## 9. Layout of this repository
 

@@ -324,6 +324,32 @@ export function setEditorContent(text) {
   }
 }
 
+/**
+ * Swaps in a new version of the same note (the important mark was added or
+ * removed) as one small change, so the cursor, the scroll position and the
+ * undo history stay where the user left them.
+ */
+export function replaceEditorContent(text) {
+  if (!editorView) return;
+  const current = editorView.state.doc.toString();
+  const next = text || "";
+  if (current === next) return;
+
+  let from = 0;
+  const shortest = Math.min(current.length, next.length);
+  while (from < shortest && current[from] === next[from]) from++;
+  let tail = 0;
+  while (
+    tail < shortest - from &&
+    current[current.length - 1 - tail] === next[next.length - 1 - tail]
+  ) tail++;
+
+  editorView.dispatch({
+    changes: { from, to: current.length - tail, insert: next.slice(from, next.length - tail) },
+    annotations: [programmaticEdit.of(true), Transaction.addToHistory.of(false)]
+  });
+}
+
 export function getEditorContent() {
   return editorView ? editorView.state.doc.toString() : "";
 }
