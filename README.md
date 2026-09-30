@@ -243,6 +243,50 @@ note, and it moves with a note to another space. `notes.py list` puts important 
 first and adds a fourth column, `important`, and `notes.py mark ai "Title"` sets
 the mark on an AI-Notes note (`--clear` removes it).
 
+### Tags
+
+Each note has a **tag box** under its title. It works like the *To* line of an
+email: type a tag and press **Space**, **Enter** or a comma, and it becomes a bubble.
+Click a bubble to edit it, press **×** to remove it, or press **Backspace** in the
+empty box to bring the last one back as text. While you type, the box suggests the
+tags this space already uses, so a tag is spelled the same way every time.
+*Add tags to …* in the palette jumps to the box.
+
+A tag is letters, digits, `-`, `_` or `/`, with at least one letter, so `q3-2026`
+works and `2026` does not. `project/alpha` is a nested tag. Case does not matter:
+`Work` and `work` are the same tag.
+
+Tags go only in that box. A `#` in the text of a note stays plain Markdown, so
+`# Shopping list` is still a heading, and `C#` or `#12` are never tags.
+
+**Filtering.** The row of tags above the note list shows every tag in the list, with
+the number of notes that have it. Click one to show only those notes. Click more
+than one to show only the notes that have all of them. **Clear** shows every note
+again. A tag on a note card works the same way. You can also type `#work` in the
+search box: `#work budget` finds "budget" in the notes tagged `work`. Filtering by
+`project` also finds `project/alpha`. Like the important filter, the tags you pick
+stay picked when you switch spaces, and the palette has *Filter by #…* for each tag
+in the space.
+
+The tags are kept in the note itself, in the same front matter as the important
+mark:
+
+```
+---
+important: true
+tags: [finance, todo]
+---
+# Call the bank
+```
+
+You can also edit that line by hand (the box follows as soon as the note saves).
+Obsidian reads it as the note's tags, and the preview and list snippet leave it
+out. In a vault the tags are encrypted with the rest of the note, and a locked vault
+shows none. `notes.py tags plain` lists a space's tags with their counts,
+`notes.py list plain --tag work` lists only the tagged notes, and
+`notes.py tag ai "Title" review backend` tags an AI-Notes note (`--remove` takes tags
+off).
+
 **Word count** is in the note's meta line. **Themes:** Nebula (default), Synthwave and
 Arctic. **Effects:** *Lite* and *Off* drop the blur and glow for older machines
 (Settings, the status bar, or the palette).
@@ -262,8 +306,8 @@ the app:
 
 | Space | What `notes.py` may do |
 |---|---|
-| `ai` (AI-Notes) | list, read, search, **write, append, delete** (to its trash), **mark** |
-| `plain`, `personal` | list, read, search — never write |
+| `ai` (AI-Notes) | list, read, search, tags, **write, append, delete** (to its trash), **mark, tag** |
+| `plain`, `personal` | list, read, search, tags — never write |
 | `encrypted` | nothing: it never lists that vault, opens its folder or uses its key |
 
 Use Encrypted for anything a helper must not see, such as PHI.
@@ -276,11 +320,13 @@ Use Encrypted for anything a helper must not see, such as PHI.
 .venv\Scripts\python notes.py --root ... append ai "Session log" --text "Tests pass now."
 .venv\Scripts\python notes.py --root ... delete ai "Old draft"
 .venv\Scripts\python notes.py --root ... mark ai "PR 42 review" --clear
+.venv\Scripts\python notes.py --root ... tag ai "PR 42 review" review backend
+.venv\Scripts\python notes.py --root ... list plain --tag work
 ```
 
 `--root` and `--personal-key` can be set once as `VAULTNOTES_ROOT` and
 `VAULTNOTES_PERSONAL_KEY`. `read` accepts a note id, its title, or a unique part of the
-title; `append`, `delete` and `mark` need the exact title. `write` refuses a title that is
+title; `append`, `delete`, `mark` and `tag` need the exact title. `write` refuses a title that is
 already taken unless you add `--replace`, and `append` creates the note if it is
 missing. The text comes from `--text`, `--file` or standard input. Prefer `--file`
 for anything long: Windows PowerShell 5.1 turns accented letters into `?` when it
@@ -315,13 +361,13 @@ Things the spec forbids, so the app does not do them:
   move warning counts a Plain note's links the same way.
 - Backup uploads the whole notes folder on its first run; deleting notes locally does
   not delete them from Drive until you press *Clean up Drive…*.
-- No frameless window (the toolbar stays inside a normal title bar), no tag system,
-  and no encrypted index cache for fast unlocks. The first is a Windows-only cosmetic
-  risk, the second would need either hidden metadata next to Plain notes or a tag
-  parser over every note, and the third would put a searchable copy of vault titles
-  on disk — all three are optional extras the plan allows leaving out, so they are
-  left out rather than half-built. The *important* mark (§7) avoids the metadata
-  problem by living in the note's own front matter.
+- No frameless window (the toolbar stays inside a normal title bar) and no encrypted
+  index cache for fast unlocks. The first is a Windows-only cosmetic risk, and the
+  second would put a searchable copy of vault titles on disk. Both are optional
+  extras the plan allows leaving out, so they are left out rather than half-built.
+  The *important* mark and the tags (§7) avoid hidden metadata by living in the
+  note's own front matter, and a vault's tags are held in memory only while it is
+  unlocked, like its links.
 
 ## 9. Layout of this repository
 

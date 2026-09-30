@@ -2161,3 +2161,195 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* ---------------------------------------------------------------------
+   Tags: the filter bar above the note list, the tags on each card, and the
+   tag box under a note's title (ui/tagInput.js).
+   --------------------------------------------------------------------- */
+.tagbar {
+  display: flex;
+  gap: 6px;
+  margin: -4px 4px 10px;
+  padding-right: 24px;
+  overflow-x: auto;
+  flex-shrink: 0;
+  /* Scrolled with the wheel (noteList.js); the fade says there is more. */
+  scrollbar-width: none;
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+}
+
+.tagbar::-webkit-scrollbar {
+  display: none;
+}
+
+.tagbar[hidden] {
+  display: none;
+}
+
+.tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  flex-shrink: 0;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: var(--r-chip);
+  border: 1px solid var(--glass-border);
+  background: var(--glass);
+  color: var(--muted);
+  font: 500 11px/1 var(--font-mono);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color .15s, background .2s, border-color .2s, box-shadow .2s;
+}
+
+.tag-chip .h {
+  color: var(--accent);
+  opacity: .75;
+}
+
+.tag-chip .c {
+  margin-left: 6px;
+  color: var(--faint);
+}
+
+.tag-chip:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.tag-chip.on {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 48%, transparent);
+  box-shadow: 0 0 14px -4px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+.tag-chip.on .c {
+  color: color-mix(in srgb, var(--accent) 70%, var(--faint));
+}
+
+.tag-chip.clear {
+  gap: 4px;
+  border-style: dashed;
+}
+
+/* The tag box: bubbles, then the text field, like an email's "To" line. */
+.tag-box {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  margin-top: 6px;
+  padding: 2px 0;
+  border-bottom: 1px solid transparent;
+  cursor: text;
+  transition: border-color .2s;
+}
+
+.tag-box:focus-within {
+  border-bottom-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.tag-box.is-disabled {
+  display: none;
+}
+
+.tag-bubbles {
+  display: contents;
+}
+
+.tag-bubble {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  border-radius: var(--r-chip);
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, transparent);
+  background: color-mix(in srgb, var(--accent) 11%, transparent);
+  color: color-mix(in srgb, var(--accent) 85%, var(--text));
+  font: 500 11px/1 var(--font-mono);
+}
+
+.tag-bubble button {
+  height: 100%;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.tag-bubble .tb-label {
+  padding: 0 4px 0 8px;
+}
+
+.tag-bubble .tb-remove {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px 0 2px;
+  opacity: .55;
+}
+
+.tag-bubble .tb-remove:hover {
+  opacity: 1;
+  color: var(--danger);
+}
+
+.tag-bubble:hover {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.tag-input {
+  flex: 1;
+  min-width: 90px;
+  height: 22px;
+  padding: 0 2px;
+  background: none;
+  border: 0;
+  outline: none;
+  color: var(--text);
+  font: 500 11.5px/1 var(--font-mono);
+}
+
+.tag-input::placeholder {
+  color: var(--faint);
+}
+
+.tag-input.invalid {
+  color: var(--danger);
+}
+
+.note .m .tags {
+  display: inline-flex;
+  gap: 6px;
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+}
+
+.note .m .tag {
+  color: color-mix(in srgb, var(--accent) 70%, var(--muted));
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.note .m .tag:hover,
+.note .m .tag.on {
+  color: var(--accent);
+}
+
+.note .m .tag.more {
+  color: var(--faint);
+  cursor: default;
+}
+
+.empty-list .ghost-btn {
+  margin-top: 10px;
+}
+
+/* Suggestions still open while typing; the arrow only takes room. */
+.tag-input::-webkit-calendar-picker-indicator {
+  display: none !important;
+}

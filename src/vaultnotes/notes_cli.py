@@ -4,13 +4,15 @@ AI helpers have a space of their own, **AI-Notes** (``ai``): they may create,
 change and delete notes there and nowhere else.  Plain and Personal are
 read-only, and the Encrypted vault is always refused.
 
-    python -m vaultnotes.notes_cli --root <notes folder> list plain
+    python -m vaultnotes.notes_cli --root <notes folder> list plain [--tag work]
+    python -m vaultnotes.notes_cli --root <notes folder> tags plain
     python -m vaultnotes.notes_cli --root <notes folder> read plain "Shopping list"
     python -m vaultnotes.notes_cli --root <notes folder> --personal-key <file> search personal flights
     python -m vaultnotes.notes_cli --root <notes folder> write ai "PR 42 review" --file review.md
     python -m vaultnotes.notes_cli --root <notes folder> append ai "Session log" --text "Done: tests"
     python -m vaultnotes.notes_cli --root <notes folder> delete ai "Old draft"
     python -m vaultnotes.notes_cli --root <notes folder> mark ai "PR 42 review" [--clear]
+    python -m vaultnotes.notes_cli --root <notes folder> tag ai "PR 42 review" review backend [--remove]
 
 ``--root`` and ``--personal-key`` can also come from the ``VAULTNOTES_ROOT`` and
 ``VAULTNOTES_PERSONAL_KEY`` environment variables.  The app's settings.json is
@@ -40,10 +42,11 @@ from typing import Sequence
 
 from vaultnotes.config import AI_NOTES_FOLDER, ensure_ai_notes_folder
 from vaultnotes.crypto.keyfile import KeyFileError, PassphraseRequired, load_key_file
-from vaultnotes.frontmatter import is_important, set_important
+from vaultnotes.frontmatter import is_important, set_important, set_tags
 from vaultnotes.models import Note
 from vaultnotes.storage.plain_store import MAX_TITLE_LENGTH, PlainStore, sanitize_title
 from vaultnotes.storage.vault_store import VaultStore, VaultStoreError
+from vaultnotes.tags import MAX_TAGS_PER_NOTE, clean_tag, count_tags, extract_tags, has_tags, tag_key, unique_tags
 
 #: The only spaces this tool opens, and the one it may write.
 SPACES = ("plain", "personal", "ai")
@@ -51,7 +54,7 @@ WRITABLE_SPACES = ("ai",)
 SPACE_NAMES = {"plain": "Plain", "personal": "Personal", "ai": "AI-Notes"}
 SPACE_ALIASES = {"ai-notes": "ai", "ai_notes": "ai", "ai notes": "ai", "ainotes": "ai"}
 
-WRITE_COMMANDS = ("write", "append", "delete", "mark")
+WRITE_COMMANDS = ("write", "append", "delete", "mark", "tag")
 
 #: The largest note this tool writes: the same limit as importing a .md file.
 MAX_NOTE_BYTES = 5 * 1024 * 1024
@@ -340,6 +343,29 @@ def _mark(store: PlainStore | None, wanted: str, important: bool) -> str:
     return f'Cleared the important mark on "{note.title}".'
 
 
+def _tag(store: PlainStore | None, wanted: str, tags: list[str], remove: bool) -> str:
+    """Add or remove tags: the same front matter line the app's tag box writes."""
+    existing = _existing(store, wanted) if store is not None else None
+    if existing is None:
+        raise CliError(f"AI-Notes has no note titled {wanted!r}. tag needs the exact title.")
+    clean = [clean_tag(tag) for tag in tags]
+    if not all(clean):
+        raise CliError(f"Not a tag: {tags[clean.index('')]!r}. Use letters, digits, - _ or /.")
+    current = extract_tags(existing.body)
+    if remove:
+        gone = {tag_key(tag) for tag in clean}
+        new = [tag for tag in current if tag_key(tag) not in gone]
+    else:
+        new = unique_tags(current + clean)
+    if len(new) > MAX_TAGS_PER_NOTE:
+        raise CliError(f"A note can have up to {MAX_TAGS_PER_NOTE} tags.")
+    if new == current:
+        return f'"{existing.title}" already has those tags; nothing changed.'
+    note = store.save_note(existing.id, set_tags(existing.body, new))
+    shown = " ".join(f"#{tag}" for tag in new) or "no tags"
+    return f'"{note.title}" now has {shown}.'
+
+
 def _matching_lines(body: str, needle: str, limit: int = 3) -> list[str]:
     lines = [line.strip() for line in body.splitlines() if needle in line.casefold()]
     return lines[:limit]
@@ -360,7 +386,12 @@ def _parser() -> argparse.ArgumentParser:
         help="the Personal vault's .vnkey file (needed for the personal space)",
     )
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("list", help="list note titles").add_argument("space")
+    listing = commands.add_parser("list", help="list note titles")
+    listing.add_argument("space")
+    listing.add_argument(
+        "--tag", action="append", default=[], help="only notes with this #tag (repeat for several)"
+    )
+    commands.add_parser("tags", help="list the #tags used in a space, with note counts").add_argument("space")
     read = commands.add_parser("read", help="print one note")
     read.add_argument("space")
     read.add_argument("note", help="an id, a title, or a unique part of a title")
@@ -390,6 +421,11 @@ def _parser() -> argparse.ArgumentParser:
     mark.add_argument("space", help="must be ai")
     mark.add_argument("note", help="the note's exact title")
     mark.add_argument("--clear", action="store_true", help="remove the important mark instead")
+    tag = commands.add_parser("tag", help="add tags to an AI-Notes note (--remove takes them off)")
+    tag.add_argument("space", help="must be ai")
+    tag.add_argument("note", help="the note's exact title")
+    tag.add_argument("tags", nargs="+", help="one or more tags, with or without #")
+    tag.add_argument("--remove", action="store_true", help="remove these tags instead")
     return parser
 
 
@@ -420,14 +456,24 @@ def run(argv: Sequence[str] | None = None, out=None, stdin=None) -> int:
         if args.command == "mark":
             print(_mark(_ai_store(root, create=False), args.note, not args.clear), file=out)
             return 0
+        if args.command == "tag":
+            print(_tag(_ai_store(root, create=False), args.note, args.tags, args.remove), file=out)
+            return 0
 
         reader = NotesReader(root, Path(args.personal_key) if args.personal_key else None)
         if args.command == "list":
+            wanted = [clean_tag(tag) for tag in args.tag]
+            if not all(wanted):
+                raise CliError(f"Not a tag: {args.tag[wanted.index('')]!r}. Tags look like #work or work.")
+            notes = [note for note in reader.notes(space) if has_tags(extract_tags(note.body), wanted)]
             # The user's important notes first, flagged in a fourth column.
-            notes = sorted(reader.notes(space), key=lambda note: not is_important(note.body))
+            notes = sorted(notes, key=lambda note: not is_important(note.body))
             for note in notes:
                 flag = "\timportant" if is_important(note.body) else ""
                 print(f"{note.title}\t{note.modified}\t{note.id}{flag}", file=out)
+        elif args.command == "tags":
+            for row in count_tags(extract_tags(note.body) for note in reader.notes(space)):
+                print(f"#{row['tag']}	{row['count']}", file=out)
         elif args.command == "read":
             note = _find(reader.notes(space), args.note)
             print(f"<!-- {space} / {note.title} · {note.id} · modified {note.modified} -->", file=out)

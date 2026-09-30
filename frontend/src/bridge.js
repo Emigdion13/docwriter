@@ -75,13 +75,13 @@ const mockSpaces = [
         id: 'Shopping list',
         title: 'Shopping list',
         modified: 'Today 09:12',
-        body: `---\nimportant: true\n---\n# Shopping list\n\n- [x] Coffee beans\n- [ ] Oat milk\n- [ ] Batteries for the [[Home lab]] sensors\n- [ ] Birthday card for Ana`
+        body: `---\nimportant: true\ntags: [errands, home]\n---\n# Shopping list\n\n- [x] Coffee beans\n- [ ] Oat milk\n- [ ] Batteries for the [[Home lab]] sensors\n- [ ] Birthday card for Ana`
       },
       {
         id: 'Home lab',
         title: 'Home lab',
         modified: 'Yesterday',
-        body: `# Home lab\n\nIdeas for the little server shelf.\n\n| Device | Status |\n|---|---|\n| Raspberry Pi 5 | running |\n| NAS | ordering |\n| Air sensor | needs batteries |\n\nParts go on the [[Shopping list]].`
+        body: `---\ntags: [home, projects/homelab]\n---\n# Home lab\n\nIdeas for the little server shelf.\n\n| Device | Status |\n|---|---|\n| Raspberry Pi 5 | running |\n| NAS | ordering |\n| Air sensor | needs batteries |\n\nParts go on the [[Shopping list]].`
       }
     ],
     trash: []
@@ -109,7 +109,7 @@ const mockSpaces = [
         id: 'Diary',
         title: 'Diary',
         modified: 'Monday',
-        body: `# Diary\n\nQuiet week. The router password lives in the [[Home lab]] note - Plain keeps the shared parts, this vault keeps mine.\n\nRead [[Plain:Shopping list]] for what to buy.`
+        body: `---\ntags: [journal]\n---\n# Diary\n\nQuiet week. The router password lives in the [[Home lab]] note - Plain keeps the shared parts, this vault keeps mine.\n\nRead [[Plain:Shopping list]] for what to buy.`
       }
     ],
     trash: []
@@ -125,7 +125,7 @@ const mockSpaces = [
         id: 'Home lab check',
         title: 'Home lab check',
         modified: 'Today 09:40',
-        body: `# Home lab check\n\nThe air sensor in [[Plain:Home lab]] still needs batteries; they are already on [[Plain:Shopping list]].\n\n- [x] Read the Plain notes\n- [ ] Order the NAS\n\nMore in [[About AI-Notes]].`
+        body: `---\ntags: [projects/homelab]\n---\n# Home lab check\n\nThe air sensor in [[Plain:Home lab]] still needs batteries; they are already on [[Plain:Shopping list]].\n\n- [x] Read the Plain notes\n- [ ] Order the NAS\n\nMore in [[About AI-Notes]].`
       },
       {
         id: 'About AI-Notes',
@@ -238,6 +238,28 @@ function mockImportant(body) {
   return !!block && /^important:\s*(true|yes|on)\s*$/im.test(block[1]);
 }
 
+// The "tags: [a, b]" line only; vaultnotes.tags reads every form Obsidian writes.
+function mockTags(body) {
+  const block = MOCK_FRONT_MATTER.exec(body || '');
+  const line = block && /^tags:\s*\[?([^\]\n]*)\]?\s*$/im.exec(block[1]);
+  return line ? line[1].split(/[,\s]+/).map(t => t.trim()).filter(Boolean) : [];
+}
+
+function mockSetTags(body, tags) {
+  const block = MOCK_FRONT_MATTER.exec(body || '');
+  const line = tags.length ? `tags: [${tags.join(', ')}]` : '';
+  if (!block) return line ? `---\n${line}\n---\n${body}` : body;
+  const others = block[1].split('\n').filter(l => l.trim() && !/^tags:/i.test(l));
+  const inner = [...others, ...(line ? [line] : [])];
+  const rest = body.slice(block[0].length);
+  return inner.length ? `---\n${inner.join('\n')}\n---\n${rest}` : rest;
+}
+
+function mockHasTags(tags, wanted) {
+  const keys = tags.map(t => t.toLowerCase());
+  return wanted.every(w => keys.some(k => k === w || k.startsWith(`${w}/`)));
+}
+
 function mockSetImportant(body, important) {
   if (mockImportant(body) === important) return body;
   if (important) return `---\nimportant: true\n---\n${body}`;
@@ -318,15 +340,20 @@ export const bridge = {
     const s = mockSpaces.find(x => x.id === space_id);
     if (!s || s.locked) return [];
     let list = s.notes;
-    const q = (query || '').toLowerCase().trim();
+    // "#work budget": the #words are tags, the rest is searched for.
+    const words = (query || '').toLowerCase().split(/\s+/).filter(Boolean);
+    const wanted = words.filter(w => /^#[\p{L}\p{N}_/-]+$/u.test(w)).map(w => w.slice(1));
+    const q = words.filter(w => !/^#[\p{L}\p{N}_/-]+$/u.test(w)).join(' ');
     if (q) list = list.filter(n => n.title.toLowerCase().includes(q) || n.body.toLowerCase().includes(q));
+    if (wanted.length) list = list.filter(n => mockHasTags(mockTags(n.body), wanted));
     return list.map(n => ({
       id: n.id,
       title: n.title,
       snippet: n.body.replace(MOCK_FRONT_MATTER, '').slice(0, 80),
       modified: n.modified,
       link_count: 0,
-      important: mockImportant(n.body)
+      important: mockImportant(n.body),
+      tags: mockTags(n.body)
     })).sort((a, b) => Number(b.important) - Number(a.important));
   },
 
@@ -343,6 +370,7 @@ export const bridge = {
       body: n.body,
       modified: n.modified,
       important: mockImportant(n.body),
+      tags: mockTags(n.body),
       backlinks: []
     };
   },
@@ -374,7 +402,7 @@ export const bridge = {
     if (!n) return { error: 'not_found', message: 'Note not found' };
     n.body = body;
     n.modified = 'just now';
-    return { modified: n.modified, important: mockImportant(body) };
+    return { modified: n.modified, important: mockImportant(body), tags: mockTags(body) };
   },
 
   async set_important(space_id, note_id, important) {
@@ -385,6 +413,23 @@ export const bridge = {
     const n = s.notes.find(x => x.id === note_id);
     if (!n) return { error: 'not_found', message: 'Note not found' };
     const body = mockSetImportant(n.body, important);
+    if (body !== n.body) {
+      n.body = body;
+      n.modified = 'just now';
+    }
+    return this.open_note(space_id, note_id);
+  },
+
+  async set_tags(space_id, note_id, tags) {
+    const api = await waitForBridge();
+    if (api?.set_tags) return await api.set_tags(space_id, note_id, tags);
+    const s = mockSpaces.find(x => x.id === space_id);
+    if (!s || s.locked) return { error: 'locked', message: 'Vault is locked' };
+    const n = s.notes.find(x => x.id === note_id);
+    if (!n) return { error: 'not_found', message: 'Note not found' };
+    const clean = [...new Map(tags.map(t => String(t).replace(/^#/, '').trim()).filter(Boolean)
+      .map(t => [t.toLowerCase(), t])).values()];
+    const body = mockSetTags(n.body, clean);
     if (body !== n.body) {
       n.body = body;
       n.modified = 'just now';
@@ -544,6 +589,20 @@ export const bridge = {
       }
     }
     return { space_id, nodes, edges, locked: false };
+  },
+
+  async list_tags(space_id) {
+    const api = await waitForBridge();
+    if (api?.list_tags) return await api.list_tags(space_id);
+    const s = mockSpaces.find(x => x.id === space_id);
+    if (!s || s.locked) return [];
+    const counts = new Map();
+    s.notes.forEach(n => mockTags(n.body).forEach(tag => {
+      const row = counts.get(tag.toLowerCase()) || { tag, count: 0 };
+      row.count += 1;
+      counts.set(tag.toLowerCase(), row);
+    }));
+    return [...counts.values()].sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
   },
 
   async list_titles(space_id) {

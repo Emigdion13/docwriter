@@ -56,10 +56,18 @@ from vaultnotes.crypto.keyfile import (
     load_key_file,
 )
 from vaultnotes.events import emit_event
-from vaultnotes.frontmatter import is_important, set_important
+from vaultnotes.frontmatter import is_important, set_important, set_tags
 from vaultnotes.links import LinkIndex, count_links, rename_links
 from vaultnotes.models import Note
 from vaultnotes.render import render_preview
+from vaultnotes.tags import (
+    MAX_TAGS_PER_NOTE,
+    clean_tag,
+    extract_tags,
+    has_tags,
+    split_query,
+    unique_tags,
+)
 from vaultnotes.storage.atomic import atomic_write
 from vaultnotes.storage.plain_store import MAX_TITLE_LENGTH, PlainStore, make_snippet, sanitize_title
 from vaultnotes.storage.vault_store import (
@@ -625,6 +633,13 @@ class Api:
             return index.link_count(note.id)
         return count_links(note.body)
 
+    def _note_tags(self, space_id: str, note: Note) -> list[str]:
+        """A note's tags, from the index when possible."""
+        index = self.link_indexes.get(space_id)
+        if index is not None and index.has(note.id):
+            return index.tags_of(note.id)
+        return extract_tags(note.body)
+
     def _note_summary(self, space_id: str, note: Note) -> dict[str, Any]:
         """One row of the note list (section 4.8)."""
         return {
@@ -634,6 +649,7 @@ class Api:
             "modified": note.modified,
             "link_count": self._link_count(space_id, note),
             "important": is_important(note.body),
+            "tags": self._note_tags(space_id, note),
         }
 
     def _note_result(
@@ -649,7 +665,9 @@ class Api:
             "body": note.body,
             "modified": note.modified,
             "created": note.created,
-            "tags": list(note.tags),
+            # The front matter's tags: line (vaultnotes.tags), so a tag set in
+            # the app, in Obsidian or by an AI helper is the same tag.
+            "tags": self._note_tags(space_id, note),
             "snippet": make_snippet(note.body),
             "link_count": self._link_count(space_id, note),
             "important": is_important(note.body),
@@ -669,10 +687,12 @@ class Api:
         """List note summaries in one space; locked vaults return no titles.
 
         Important notes come first, each group in the requested order, so the
-        notes the user marked sit at the top of the list.
+        notes the user marked sit at the top of the list.  ``#tag`` words in
+        the query keep only the notes with every one of those tags, and the
+        rest of the query is searched for as usual.
         """
         space = self._known_space(space_id)
-        text_query = self._text(query, "Search text", max_length=1024)
+        text_query, wanted_tags = split_query(self._text(query, "Search text", max_length=1024))
         text_sort = self._text(sort, "Sort") or "modified"
 
         # Keeps link counts honest and a locked vault's index empty.
@@ -686,6 +706,8 @@ class Api:
                 return []
             notes = store.list_notes(query=text_query, sort=text_sort)
         rows = [self._note_summary(space, note) for note in notes]
+        if wanted_tags:
+            rows = [row for row in rows if has_tags(row["tags"], wanted_tags)]
         # A stable sort: the store's order survives inside each group.
         rows.sort(key=lambda row: not row["important"])
         return rows
@@ -786,8 +808,12 @@ class Api:
         self._index_update(space, note)
         if self._any_vault_unlocked():
             self.autolock.touch()
-        # The mark can be typed by hand too, so the header star follows saves.
-        return {"modified": note.modified, "important": is_important(note.body)}
+        # The mark and the tags can be typed by hand too, so the header follows saves.
+        return {
+            "modified": note.modified,
+            "important": is_important(note.body),
+            "tags": self._note_tags(space, note),
+        }
 
     @bridge_method
     def set_important(self, space_id: str, note_id: str, important: bool) -> dict[str, Any]:
@@ -816,6 +842,48 @@ class Api:
 
         body = set_important(note.body, important)
         if body != note.body:
+            note = plain.save_note(clean_id, body) if plain is not None else store.save_note(clean_id, body)
+            self._index_update(space, note)
+            if self._any_vault_unlocked():
+                self.autolock.touch()
+        return self._note_result(space, note, self._backlinks_for(space, note))
+
+    @bridge_method
+    def set_tags(self, space_id: str, note_id: str, tags: list[str]) -> dict[str, Any]:
+        """Replace a note's tags and return the full note.
+
+        The tags are the ``tags: [...]`` line of the note's front matter (see
+        :mod:`vaultnotes.tags`), so like the important mark this is an ordinary
+        save of a new body.  ``[]`` removes the line.
+        """
+        space = self._known_space(space_id)
+        clean_id = self._note_id_text(space, note_id)
+        if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+            raise BridgeError("invalid_input", "Tags must be a list of words.")
+        for tag in tags:
+            if tag.strip() and not clean_tag(tag):
+                raise BridgeError(
+                    "invalid_input",
+                    f"“{tag[:40]}” is not a tag. Use letters, digits, - _ or /, with at least one letter.",
+                )
+        wanted = unique_tags(tags)
+        if len(wanted) > MAX_TAGS_PER_NOTE:
+            raise BridgeError("too_large", f"A note can have up to {MAX_TAGS_PER_NOTE} tags.")
+
+        plain = self._plain(space)
+        if plain is not None:
+            note = self._read_plain_note(space, clean_id)
+        else:
+            store = self.vault_stores[space]
+            if store.locked:
+                return _error("locked", "Vault is locked")
+            try:
+                note = store.read_note(clean_id)
+            except FileNotFoundError:
+                return _error("not_found", f"Note not found: {clean_id}")
+
+        if wanted != extract_tags(note.body):
+            body = set_tags(note.body, wanted)
             note = plain.save_note(clean_id, body) if plain is not None else store.save_note(clean_id, body)
             self._index_update(space, note)
             if self._any_vault_unlocked():
@@ -1389,6 +1457,17 @@ class Api:
         """Return the ``[[`` suggestion titles for an open space only."""
         space = self._known_space(space_id)
         return self._titles_for(space)
+
+    @bridge_method
+    def list_tags(self, space_id: str) -> list[dict[str, Any]]:
+        """``[{tag, count}]`` for an open space, the most used tag first.
+
+        Comes from the space's index, like the titles, so a locked vault never
+        reveals a tag (security rule 11) and a long list costs no disk reads.
+        """
+        space = self._known_space(space_id)
+        index = self._sync_index(space)
+        return index.tag_counts() if index is not None else []
 
     @bridge_method
     def note_links(self, space_id: str, note_id: str) -> dict[str, Any]:

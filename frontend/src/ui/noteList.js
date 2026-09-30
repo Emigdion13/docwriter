@@ -1,7 +1,7 @@
 /* =================================================================
    NOTE LIST  (frontend/src/ui/noteList.js)
-   Middle panel: Search bar, sort/import/trash actions, note cards list,
-   trash view with restore, encrypted noise mode.
+   Middle panel: Search bar, #tag filter bar, sort/import/trash actions,
+   note cards list, trash view with restore, encrypted noise mode.
    ================================================================= */
 
 import { icon } from '../icons.js';
@@ -20,6 +20,49 @@ export function setImportantOnly(value) {
 export function isImportantOnly() {
   return importantOnly;
 }
+
+// Tags picked in the tag bar; a note must carry all of them.  Kept across a
+// space switch like "important only": #work can mean work in every space.
+let activeTags = [];
+
+const tagKey = tag => String(tag).toLowerCase();
+
+export function getActiveTags() {
+  return [...activeTags];
+}
+
+export function setActiveTags(tags) {
+  const seen = new Set();
+  activeTags = (tags || []).filter(tag => {
+    const key = tagKey(tag);
+    if (!tag || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+export function isTagActive(tag) {
+  return activeTags.some(t => tagKey(t) === tagKey(tag));
+}
+
+/** Adds the tag to the filter, or takes it off again. */
+export function toggleActiveTag(tag) {
+  setActiveTags(isTagActive(tag)
+    ? activeTags.filter(t => tagKey(t) !== tagKey(tag))
+    : [...activeTags, tag]);
+}
+
+/** The same rule as vaultnotes.tags.has_tags: #project also finds #project/alpha. */
+function hasTags(noteTags, wanted) {
+  const keys = (noteTags || []).map(tagKey);
+  return wanted.every(w => {
+    const want = tagKey(w);
+    return keys.some(k => k === want || k.startsWith(`${want}/`));
+  });
+}
+
+// Tags shown on one card before the rest fold into "+3".
+const CARD_TAG_LIMIT = 3;
 
 // Rows that get an entrance animation.  Past this the list is drawn at once,
 // so a space with hundreds of notes opens instantly instead of rippling.
@@ -42,6 +85,8 @@ export function createNoteList({
   onImport,
   onTrashToggle,
   onImportantFilter,
+  onTagToggle,
+  onClearTags,
   onRefresh,
   onRestoreNote,
   onPurgeNote,
@@ -80,8 +125,9 @@ export function createNoteList({
     </div>
     <label class="search">
       ${icon('search', 15)}
-      <input id="search" placeholder="Search this space" autocomplete="off" aria-label="Search this space">
+      <input id="search" placeholder="Search this space, or #tag" autocomplete="off" aria-label="Search this space">
     </label>
+    <div class="tagbar" id="tagbar" role="toolbar" aria-label="Filter by tag" hidden></div>
     <div class="notes" id="notes"></div>
   `;
 
@@ -91,6 +137,23 @@ export function createNoteList({
   section.querySelector('#trash-toggle').onclick = () => onTrashToggle?.();
   section.querySelector('#important-filter').onclick = () => onImportantFilter?.();
   section.querySelector('#refresh-list').onclick = () => onRefresh?.();
+
+  const tagbar = section.querySelector('#tagbar');
+  tagbar.addEventListener('click', (e) => {
+    if (e.target.closest('[data-clear-tags]')) {
+      onClearTags?.();
+      return;
+    }
+    const chip = e.target.closest('[data-tag]');
+    if (chip) onTagToggle?.(chip.dataset.tag);
+  });
+  // One row that scrolls sideways: let the mouse wheel do that.
+  tagbar.addEventListener('wheel', (e) => {
+    if (Math.abs(e.deltaY) > Math.abs(e.deltaX) && tagbar.scrollWidth > tagbar.clientWidth) {
+      e.preventDefault();
+      tagbar.scrollLeft += e.deltaY;
+    }
+  }, { passive: false });
 
   const searchInput = section.querySelector('#search');
   searchInput.addEventListener('input', () => {
@@ -109,6 +172,17 @@ export function createNoteList({
     }
     if (e.target.closest('#empty-trash-btn')) {
       onEmptyTrash?.();
+      return;
+    }
+    if (e.target.closest('[data-clear-tags]')) {
+      onClearTags?.();
+      return;
+    }
+    // A tag on a card filters by it instead of opening the note.
+    const tagChip = e.target.closest('[data-tag]');
+    if (tagChip) {
+      e.stopPropagation();
+      onTagToggle?.(tagChip.dataset.tag);
       return;
     }
     const noteEl = e.target.closest('.note');
@@ -154,6 +228,53 @@ function setHeaderButtons({ sort = 'modified', trashMode = false, locked = false
 }
 
 /**
+ * The chips above the list: the picked tags first, then every other tag of
+ * the notes listed (so a search narrows the tags too), most used first.
+ */
+function renderTagBar(notes, { hidden = false } = {}) {
+  const bar = document.getElementById('tagbar');
+  if (!bar) return;
+  const counts = new Map();
+  if (!hidden) {
+    notes.forEach(n => (n.tags || []).forEach(tag => {
+      const row = counts.get(tagKey(tag)) || { tag, count: 0 };
+      row.count += 1;
+      counts.set(tagKey(tag), row);
+    }));
+  }
+  const picked = activeTags.map(tag => ({ tag, count: counts.get(tagKey(tag))?.count || 0, on: true }));
+  const rest = [...counts.values()]
+    .filter(row => !isTagActive(row.tag))
+    .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag, undefined, { sensitivity: 'base' }));
+
+  if (hidden || (!picked.length && !rest.length)) {
+    bar.hidden = true;
+    bar.innerHTML = '';
+    return;
+  }
+  bar.hidden = false;
+  const chip = ({ tag, count, on }) => `
+    <button class="tag-chip ${on ? 'on' : ''}" data-tag="${escapeHtml(tag)}" aria-pressed="${on}"
+            title="${on ? `Stop filtering by #${escapeHtml(tag)}` : `Show only notes tagged #${escapeHtml(tag)}`}">
+      <span class="h">#</span>${escapeHtml(tag)}<span class="c">${count}</span>
+    </button>`;
+  bar.innerHTML = (picked.length
+    ? `<button class="tag-chip clear" data-clear-tags title="Show every note again">${icon('x', 11)}<span>Clear</span></button>`
+    : '') + picked.map(chip).join('') + rest.map(chip).join('');
+}
+
+function cardTags(tags) {
+  if (!tags?.length) return '';
+  const shown = tags.slice(0, CARD_TAG_LIMIT).map(tag =>
+    `<span class="tag ${isTagActive(tag) ? 'on' : ''}" data-tag="${escapeHtml(tag)}" title="Filter by #${escapeHtml(tag)}">#${escapeHtml(tag)}</span>`
+  ).join('');
+  const more = tags.length > CARD_TAG_LIMIT
+    ? `<span class="tag more" title="${escapeHtml(tags.slice(CARD_TAG_LIMIT).map(t => `#${t}`).join(' '))}">+${tags.length - CARD_TAG_LIMIT}</span>`
+    : '';
+  return `<span class="tags">${shown}${more}</span>`;
+}
+
+/**
  * Renders notes or encrypted noise into the list panel.
  */
 export function renderNotes(space, notes, activeNoteId, animate = true, opts = {}) {
@@ -169,6 +290,7 @@ export function renderNotes(space, notes, activeNoteId, animate = true, opts = {
   setHeaderButtons({ sort: opts.sort || 'modified', trashMode: false, locked: space.locked });
 
   if (space.locked) {
+    renderTagBar([], { hidden: true });
     if (searchInput) {
       searchInput.value = '';
       searchInput.disabled = true;
@@ -204,22 +326,29 @@ export function renderNotes(space, notes, activeNoteId, animate = true, opts = {
   if (searchInput) searchInput.disabled = false;
   const count = notes.length;
   const importantCount = notes.filter(n => n.important).length;
+  // The engine already lists important notes first; the filters only hide.
+  const allNotes = notes;
+  notes = importantOnly ? notes.filter(n => n.important) : notes;
+  renderTagBar(notes);
+  if (activeTags.length) notes = notes.filter(n => hasTags(n.tags, activeTags));
+
   if (countEl) {
     // Numbers and our own icon only, so innerHTML is safe here.
     const total = `${count} note${count === 1 ? '' : 's'}`;
     const star = `<span class="nl-imp" title="Important">${icon('star', 11)}${importantCount}</span>`;
-    countEl.innerHTML = importantOnly
-      ? `${star} of ${count}`
-      : importantCount ? `${total} · ${star}` : total;
+    countEl.innerHTML = activeTags.length
+      ? `${notes.length} of ${count} · tagged${importantOnly ? ` · ${star}` : ''}`
+      : importantOnly
+        ? `${star} of ${count}`
+        : importantCount ? `${total} · ${star}` : total;
   }
-
-  // The engine already lists important notes first; the filter only hides.
-  const allNotes = notes;
-  notes = importantOnly ? notes.filter(n => n.important) : notes;
 
   if (!notes.length) {
     const q = searchInput?.value?.trim();
-    notesContainer.innerHTML = importantOnly && allNotes.length
+    const tagList = activeTags.map(t => `#${escapeHtml(t)}`).join(' ');
+    notesContainer.innerHTML = activeTags.length && allNotes.length
+      ? `<div class="empty-list">No ${importantOnly ? 'important ' : ''}notes tagged ${tagList}${q ? ` match “${escapeHtml(q)}”` : ' here'}.<br><button class="ghost-btn" data-clear-tags>Clear the tag filter</button></div>`
+      : importantOnly && allNotes.length
       ? `<div class="empty-list">No important notes${q ? ` match “${escapeHtml(q)}”` : ' here'}.<br>Mark one with ${icon('star', 12)} or Ctrl D.</div>`
       : q
         ? `<div class="empty-list">No notes match “${escapeHtml(q)}”</div>`
@@ -247,6 +376,7 @@ export function renderNotes(space, notes, activeNoteId, animate = true, opts = {
         <span class="m">
           <span>${escapeHtml(n.modified || 'today')}</span>
           ${lc ? `<span>${icon('link', 11)}${lc}</span>` : ''}
+          ${cardTags(n.tags)}
         </span>
       </button>
     `;
@@ -267,6 +397,7 @@ export function renderTrash(space, trashEntries) {
 
   if (titleEl) titleEl.textContent = `${space.name} · Trash`;
   if (searchInput) searchInput.disabled = true;
+  renderTagBar([], { hidden: true });
   setHeaderButtons({ trashMode: true, locked: false });
 
   const count = trashEntries.length;

@@ -361,11 +361,13 @@ The frontend calls Python with `await window.pywebview.api.<name>(...)`, after t
 | Function | Returns |
 |---|---|
 | `get_state()` | spaces (id, name, kind `plain`/`vault`, locked, note count), look settings, last backup time |
-| `list_notes(space_id, query="", sort="modified")` | `[{id, title, snippet, modified, link_count, important}]`, important notes first |
+| `list_notes(space_id, query="", sort="modified")` | `[{id, title, snippet, modified, link_count, important, tags}]`, important notes first; `#tag` words in `query` keep only notes with those tags |
 | `open_note(space_id, note_id)` | `{id, title, body, modified, backlinks: [{id, title}]}` |
 | `create_note(space_id, title)` | the new note |
-| `save_note(space_id, note_id, body)` | `{modified, important}` |
+| `save_note(space_id, note_id, body)` | `{modified, important, tags}` |
 | `set_important(space_id, note_id, important)` | the note, with `important: true` added to or removed from its front matter (section 7, *Important notes*) |
+| `set_tags(space_id, note_id, tags)` | the note, with its front matter `tags: [...]` line replaced (section 7, *Tags*); `[]` removes it |
+| `list_tags(space_id)` | `[{tag, count}]` for an open space, most used first; empty while a vault is locked |
 | `rename_note(space_id, note_id, new_title, update_links)` | `{title, links_updated}` |
 | `count_links_to(space_id, note_id)` | `{count}`, used by the rename prompt and the move warning. For a Plain note, `count` includes the `[[Plain:Title]]` links in AI-Notes and unlocked vaults, and the result adds `spaces` (where the linking notes are) and `locked` (the vaults it did not look in) |
 | `delete_note`, `restore_note`, `list_trash` | trash handling |
