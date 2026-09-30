@@ -290,9 +290,11 @@ that vault in the app.
 `notes.py` writes nothing outside `ai-notes\`. It refuses key files, `.vnote` files,
 anything in the vault folders, and any text that is a key file. It creates `ai-notes\`
 on its first write if the app has not yet, but only inside a real notes folder, and
-reading never creates anything. The app picks up a helper's changes by itself, but
-it does not reload a note that is open in the editor: type in it after a helper
-changed it and your version is saved over theirs.
+reading never creates anything. The app shows a helper's changes the next time it
+reads the list (switching spaces, searching, saving), or at once with the
+**refresh** button in the list header (*Refresh … list* in the palette). It does not
+reload a note that is open in the editor: type in it after a helper changed it and
+your version is saved over theirs.
 
 ---
 

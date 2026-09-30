@@ -42,6 +42,7 @@ export function createNoteList({
   onImport,
   onTrashToggle,
   onImportantFilter,
+  onRefresh,
   onRestoreNote,
   onPurgeNote,
   onEmptyTrash
@@ -57,6 +58,9 @@ export function createNoteList({
         <div class="nl-count" id="list-count">0 notes</div>
       </div>
       <div class="nl-actions">
+        <button class="btn icon small" id="refresh-list" aria-label="Refresh list" title="Refresh list (picks up notes changed outside the app)">
+          ${icon('refresh', 15)}
+        </button>
         <button class="btn icon small" id="important-filter" aria-pressed="false" aria-label="Show only important notes" title="Show only important notes">
           ${icon('star', 15)}
         </button>
@@ -86,6 +90,7 @@ export function createNoteList({
   section.querySelector('#import-btn').onclick = () => onImport?.();
   section.querySelector('#trash-toggle').onclick = () => onTrashToggle?.();
   section.querySelector('#important-filter').onclick = () => onImportantFilter?.();
+  section.querySelector('#refresh-list').onclick = () => onRefresh?.();
 
   const searchInput = section.querySelector('#search');
   searchInput.addEventListener('input', () => {
@@ -122,6 +127,8 @@ function setHeaderButtons({ sort = 'modified', trashMode = false, locked = false
   const trashBtn = document.getElementById('trash-toggle');
   const newBtn = document.getElementById('new-note');
   const importantBtn = document.getElementById('important-filter');
+  const refreshBtn = document.getElementById('refresh-list');
+  if (refreshBtn) refreshBtn.disabled = locked;
   if (importantBtn) {
     const on = importantOnly && !trashMode;
     importantBtn.classList.toggle('on', on);
