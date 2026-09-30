@@ -17,7 +17,17 @@ import { spaceIcon } from './icons.js';
 // UI Modules
 import { createToolbar, updateToolbarView, updateToolbarTheme } from './ui/toolbar.js';
 import { createSidebar, renderSpaces, updateDriveCard } from './ui/sidebar.js';
-import { createNoteList, renderNotes, renderTrash, setImportantOnly, isImportantOnly } from './ui/noteList.js';
+import {
+  createNoteList,
+  renderNotes,
+  renderTrash,
+  setImportantOnly,
+  isImportantOnly,
+  getActiveTags,
+  setActiveTags,
+  toggleActiveTag,
+  isTagActive
+} from './ui/noteList.js';
 import { confirmAction, createMoveDialog } from './ui/dialogs.js';
 import {
   initEditor,
@@ -29,6 +39,7 @@ import {
   refreshWikilinkDecorations
 } from './ui/editor.js';
 import { initPreview, renderPreview, scrollPreviewTo, scrollPreviewToHeading } from './ui/preview.js';
+import { createTagInput } from './ui/tagInput.js';
 import { renderBacklinks } from './ui/backlinks.js';
 import { createSealedHero, createEmptyHero, updateSealedDetails } from './ui/sealedVault.js';
 import { createUnlockDialog } from './ui/unlockDialog.js';
@@ -80,6 +91,7 @@ const state = {
   historyIndex: -1,
   titles: [],           // titles this space can link to, from bridge.list_titles
   plainTitles: [],      // Plain titles, for [[Plain:Title]] links from a vault (M10)
+  tags: [],             // [{tag, count}] of this space, from bridge.list_tags
   isBackingUp: false,
   lastBackup: null,
   backup: {
@@ -109,6 +121,7 @@ let commandPalette = null;
 let settingsOverlay = null;
 let graphOverlay = null;
 let moveDialog = null;
+let tagBox = null;
 
 // Timers
 let saveTimer = null;
@@ -182,8 +195,26 @@ async function refreshTitles() {
     }
   }
   await refreshPlainTitles(space);
+  await refreshTags(space);
   refreshWikilinkDecorations();
   return state.titles;
+}
+
+/**
+ * The #tags of the open space, for the editor's # suggestions and the
+ * palette.  Like the titles, a locked vault has none (security rule 11).
+ */
+async function refreshTags(space = getActiveSpace()) {
+  if (!space || space.locked) {
+    state.tags = [];
+    return;
+  }
+  try {
+    state.tags = asList(await bridge.list_tags(space.id));
+  } catch (err) {
+    console.error('Could not load tags:', err);
+    state.tags = [];
+  }
 }
 
 /**
@@ -459,9 +490,15 @@ async function sendSave(job, refreshList) {
       state.currentNote.important = res.important;
       updateImportantButton();
     }
+    // Tags typed by hand in the front matter show up as bubbles too.
+    if (Array.isArray(res.tags)) {
+      state.currentNote.tags = res.tags;
+      renderNoteTags({ reset: false });
+    }
     const meta = document.getElementById('meta');
     if (meta) meta.textContent = `Edited ${res.modified} · ${wordCount(job.body)} words`;
     if (refreshList) {
+      await refreshTags();
       const notes = asList(await bridge.list_notes(job.spaceId, document.getElementById('search')?.value || '', state.sort));
       if (isShowing(job)) {
         state.currentNotes = notes;
@@ -605,6 +642,7 @@ function renderWorkspace() {
   }
 
   updateImportantButton();
+  renderNoteTags();
 
   // Editor content
   setEditorContent(note.body);
@@ -636,24 +674,28 @@ function updateImportantButton() {
  * "important: true" front matter line, so the edits in flight are saved first
  * and the new text is merged into the editor without moving the cursor.
  */
-async function toggleImportant() {
+/**
+ * Has the engine rewrite the open note's front matter (the important mark,
+ * the tags): the edits in flight are saved first, and the new text is merged
+ * into the editor without moving the cursor.  Returns the note, or null.
+ */
+async function rewriteOpenNote(send, failMessage) {
   const space = getActiveSpace();
-  if (!state.currentNote || space?.locked || state.trashMode) return;
-  const target = !state.currentNote.important;
+  if (!state.currentNote || space?.locked || state.trashMode) return null;
   const job = { spaceId: space.id, noteId: state.currentNote.id };
 
   // Typing while the call is out puts an edit in front of it; save that and ask
-  // again (the call is idempotent), so neither the mark nor the text is lost.
+  // again (the calls are idempotent), so neither the change nor the text is lost.
   for (let attempt = 0; attempt < 3; attempt++) {
-    if (!(await flushSave())) return;
-    if (!isShowing(job)) return;
+    if (!(await flushSave())) return null;
+    if (!isShowing(job)) return null;
     const before = getEditorContent();
-    const res = await bridge.set_important(job.spaceId, job.noteId, target);
+    const res = await send(job.spaceId, job.noteId);
     if (res?.error) {
-      toast(res.message || 'The note could not be marked.', { icon: 'alert' });
-      return;
+      toast(res.message || failMessage, { icon: 'alert' });
+      return null;
     }
-    if (!isShowing(job)) return;
+    if (!isShowing(job)) return null;
     if (getEditorContent() !== before) continue;
 
     replaceEditorContent(res.body);
@@ -661,9 +703,47 @@ async function toggleImportant() {
     updateImportantButton();
     const meta = document.getElementById('meta');
     if (meta) meta.textContent = `Edited ${res.modified} · ${wordCount(res.body)} words`;
+    await refreshTags();
     await refreshNoteList(false);
+    return res;
+  }
+  return null;
+}
+
+async function toggleImportant() {
+  if (!state.currentNote) return;
+  const target = !state.currentNote.important;
+  const res = await rewriteOpenNote(
+    (spaceId, noteId) => bridge.set_important(spaceId, noteId, target),
+    'The note could not be marked.'
+  );
+  if (res) {
     toast(target ? `“${res.title}” is marked important` : `“${res.title}” is no longer important`, { icon: 'star' });
-    return;
+  }
+}
+
+/* Tag saves go out one at a time and only the newest list is sent, so
+   typing three tags quickly is at most two saves and never out of order. */
+let pendingTags = null;   // { spaceId, noteId, tags }
+let tagSaving = null;
+
+function saveNoteTags(tags) {
+  if (!state.currentNote) return;
+  pendingTags = { spaceId: state.currentSpaceId, noteId: state.currentNote.id, tags };
+  if (!tagSaving) tagSaving = drainTagSaves().finally(() => { tagSaving = null; });
+}
+
+async function drainTagSaves() {
+  while (pendingTags) {
+    const job = pendingTags;
+    pendingTags = null;
+    if (!isShowing(job)) continue;
+    const res = await rewriteOpenNote(
+      (spaceId, noteId) => bridge.set_tags(spaceId, noteId, job.tags),
+      'The tags could not be saved.'
+    );
+    // A newer list is on its way: showing this answer would flicker.
+    if (!pendingTags && isShowing(job)) renderNoteTags({ reset: !res });
   }
 }
 
@@ -677,6 +757,43 @@ async function reloadList() {
   await refreshNoteList(false);
   await refreshTitles();
   toast(`${space.name} list refreshed`, { icon: 'refresh' });
+}
+
+/**
+ * The open note's tags in the tag box under its title.  `reset: false`
+ * keeps what the user is typing there (a save came back meanwhile).
+ */
+function renderNoteTags({ reset = true } = {}) {
+  const space = getActiveSpace();
+  tagBox?.setTags(state.currentNote?.tags || [], {
+    disabled: !state.currentNote || !!space?.locked || state.trashMode,
+    reset
+  });
+}
+
+function toggleTagFilter(tag) {
+  const space = getActiveSpace();
+  if (!tag || state.trashMode || space?.locked) return;
+  toggleActiveTag(tag);
+  refreshNoteList(false);
+}
+
+/** From a tag in a note: show exactly the notes with that tag. */
+function showTag(tag) {
+  const space = getActiveSpace();
+  if (!tag || space?.locked) return;
+  if (state.trashMode) {
+    state.trashMode = false;
+  }
+  setActiveTags([tag]);
+  refreshNoteList(false);
+  toast(`Showing notes tagged #${tag}`, { icon: 'tag' });
+}
+
+function clearTagFilter() {
+  if (!getActiveTags().length) return;
+  setActiveTags([]);
+  refreshNoteList(false);
 }
 
 function toggleImportantFilter() {
@@ -1442,6 +1559,7 @@ async function getPaletteCommands() {
       state.currentNote.important
         ? { label: `Unmark “${state.currentNote.title}” as important`, hint: 'Ctrl D', icon: 'star', run: () => toggleImportant() }
         : { label: `Mark “${state.currentNote.title}” as important`, hint: 'Ctrl D', icon: 'star', run: () => toggleImportant() },
+      { label: `Add tags to “${state.currentNote.title}”`, sub: space.name, icon: 'tag', run: () => tagBox?.focus() },
       { label: `Move “${state.currentNote.title}” to another space…`, sub: space.name, icon: 'move', run: () => moveCurrentNote() },
       { label: `Export “${state.currentNote.title}” to .md`, sub: space.name, icon: 'download', run: () => exportCurrentNote() }
     ] : []),
@@ -1462,7 +1580,18 @@ async function getPaletteCommands() {
         label: isImportantOnly() ? 'Show all notes' : 'Show only important notes',
         icon: 'star',
         run: () => toggleImportantFilter()
-      }
+      },
+      ...(getActiveTags().length ? [{
+        label: `Clear the tag filter (${getActiveTags().map(t => `#${t}`).join(' ')})`,
+        icon: 'x',
+        run: () => clearTagFilter()
+      }] : []),
+      ...state.tags.map(({ tag, count }) => ({
+        label: isTagActive(tag) ? `Stop filtering by #${tag}` : `Filter by #${tag}`,
+        sub: `${count} note${count === 1 ? '' : 's'}`,
+        icon: 'tag',
+        run: () => (isTagActive(tag) ? toggleTagFilter(tag) : showTag(tag))
+      }))
     ] : []),
     { label: 'Lock all vaults', hint: 'Ctrl L', icon: 'lock', run: () => lockAllVaults() },
     { label: 'Back up now', hint: 'Ctrl B', icon: 'cloud', run: () => runBackup() },
@@ -1815,6 +1944,8 @@ async function init() {
     onImport: () => importNotes(),
     onTrashToggle: () => toggleTrashMode(),
     onImportantFilter: () => toggleImportantFilter(),
+    onTagToggle: (tag) => toggleTagFilter(tag),
+    onClearTags: () => clearTagFilter(),
     onRefresh: () => reloadList(),
     onRestoreNote: (noteId) => restoreTrashedNote(noteId),
     onPurgeNote: (noteId) => purgeTrashedNote(noteId),
@@ -1880,6 +2011,13 @@ async function init() {
       bridge.open_external(url);
       toast(`Opens ${url} in your browser`, { icon: 'link' });
     }
+  });
+
+  // The tag box under the title: Space turns a word into a tag bubble.
+  tagBox = createTagInput(document.getElementById('note-tags'), {
+    getSuggestions: () => state.tags.map(row => row.tag),
+    onChange: (tags) => saveNoteTags(tags),
+    onInvalid: (text) => toast(`“${text}” is not a tag. Use letters, digits, - _ or /.`, { icon: 'tag' })
   });
 
   // Mount Overlays (Unlock dialog, Command Palette, Settings, graph)

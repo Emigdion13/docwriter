@@ -3,11 +3,13 @@
 The Encrypted vault is always refused.
 
 Usage:
-    python notes.py --root <notes folder> list plain
+    python notes.py --root <notes folder> list plain [--tag work]
+    python notes.py --root <notes folder> tags plain
     python notes.py --root <notes folder> read plain "Shopping list"
     python notes.py --root <notes folder> --personal-key <file> search personal flights
     python notes.py --root <notes folder> write ai "PR 42 review" --file review.md
     python notes.py --root <notes folder> append ai "Session log" --text "Done: tests"
+    python notes.py --root <notes folder> tag ai "PR 42 review" review backend
 
 See vaultnotes/notes_cli.py for the details.
 """

@@ -21,8 +21,8 @@ What it provides
     marker that :mod:`vaultnotes.render` swaps for the other note's HTML, and
     ``spaces`` resolves the M10 cross-space form ``[[Plain:Title]]``.
 ``LinkIndex``
-    The in-memory link graph for **one space**: backlinks, outgoing links and
-    the title list used by the ``[[`` suggestions.
+    The in-memory link graph for **one space**: backlinks, outgoing links,
+    the title list used by the ``[[`` suggestions, and each note's tags.
 
 Rules implemented (section 4.7 of the build plan)
 -------------------------------------------------
@@ -65,6 +65,8 @@ import urllib.parse
 from bisect import bisect_right
 from dataclasses import dataclass
 from typing import Any, Collection, Iterable, Mapping, Sequence
+
+from vaultnotes.tags import count_tags, extract_tags
 
 __all__ = [
     "CROSS_SPACES",
@@ -780,6 +782,7 @@ class LinkIndex:
         self._incoming: dict[str, dict[str, None]] = {}
         self._unresolved: dict[str, dict[str, str]] = {}
         self._pending: dict[str, dict[str, None]] = {}
+        self._tags: dict[str, list[str]] = {}
 
     # -- lifecycle -----------------------------------------------------
     def clear(self) -> None:
@@ -791,6 +794,7 @@ class LinkIndex:
         self._incoming.clear()
         self._unresolved.clear()
         self._pending.clear()
+        self._tags.clear()
 
     def build(self, notes: Iterable[Any]) -> None:
         """(Re)index a whole space.  Titles are registered before links."""
@@ -800,6 +804,7 @@ class LinkIndex:
             self._set_title(note_id, title)
         for note_id, _title, body in items:
             self._index_links(note_id, body)
+            self._index_tags(note_id, body)
 
     def update(self, note: Any) -> None:
         """Index one new, changed or renamed note."""
@@ -810,6 +815,7 @@ class LinkIndex:
         self._set_title(note_id, title)
         self._promote_pending(note_id)
         self._index_links(note_id, body)
+        self._index_tags(note_id, body)
 
     def remove(self, note_id: str) -> None:
         """Drop one note: its links, its title, and the links pointing at it."""
@@ -820,6 +826,7 @@ class LinkIndex:
         for folded in self._unresolved.pop(note_id, {}):
             self._pending.get(folded, {}).pop(note_id, None)
         self._links.pop(note_id, None)
+        self._tags.pop(note_id, None)
 
         title = self._titles.pop(note_id, None)
         sources = self._incoming.pop(note_id, {})
@@ -871,6 +878,14 @@ class LinkIndex:
     def link_count(self, note_id: str) -> int:
         """How many ``[[wikilinks]]`` one note contains."""
         return sum(1 for link in self._links.get(note_id, ()) if link.kind == "wikilink")
+
+    def tags_of(self, note_id: str) -> list[str]:
+        """The tags of one note, as :func:`vaultnotes.tags.extract_tags` reads them."""
+        return list(self._tags.get(note_id, ()))
+
+    def tag_counts(self) -> list[dict[str, Any]]:
+        """``[{tag, count}]`` for the whole space, the most used tag first."""
+        return count_tags(self._tags.values())
 
     def backlinks(self, note_id: str) -> list[dict[str, str]]:
         """``[{id, title}]`` of the notes in this space that link to ``note_id``."""
@@ -957,6 +972,9 @@ class LinkIndex:
             if source in self._links:
                 self._resolved.setdefault(source, {})[note_id] = None
                 self._incoming.setdefault(note_id, {})[source] = None
+
+    def _index_tags(self, note_id: str, body: str) -> None:
+        self._tags[note_id] = extract_tags(body)
 
     def _index_links(self, note_id: str, body: str) -> None:
         links = parse_links(body)

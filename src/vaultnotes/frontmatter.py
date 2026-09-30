@@ -16,6 +16,9 @@ block as the note's properties.
 
 Only a block whose lines all look like YAML counts as front matter, so a note
 that merely opens with a ``---`` rule followed by prose is left alone.
+
+The same block holds the note's tags (``tags: [work, home]``), written by the
+tag box under the title; :mod:`vaultnotes.tags` explains what a tag is.
 """
 
 from __future__ import annotations
@@ -73,6 +76,88 @@ def is_important(body: str) -> bool:
     return any(
         _IMPORTANT_TRUE_RE.fullmatch(line.rstrip("\r\n")) for line in lines[start + 1 : end]
     )
+
+
+_TAGS_KEY_RE = re.compile(r"tags?[ \t]*:(.*)", re.IGNORECASE)
+_LIST_ITEM_RE = re.compile(r"[ \t]*-[ \t]+(.*)")
+
+
+def front_matter_tags(body: str) -> list[str]:
+    """The values of a ``tags:`` key, in the forms Obsidian writes.
+
+    ``tags: [work, home]``, ``tags: work, home``, ``tags: work home`` and a
+    block list (``tags:`` then ``- work`` lines) all work.  Values come back
+    as written, quotes and a leading ``#`` removed; :mod:`vaultnotes.tags`
+    decides which of them are real tags.
+    """
+    found = _front_matter(body)
+    if found is None:
+        return []
+    lines, start, end = found
+    inner = [line.rstrip("\r\n") for line in lines[start + 1 : end]]
+    values: list[str] = []
+    for index, line in enumerate(inner):
+        key = _TAGS_KEY_RE.fullmatch(line)
+        if key is None:
+            continue
+        rest = key.group(1).split(" #", 1)[0].strip()
+        if rest:
+            values.extend(re.split(r"[,\s]+", rest.strip("[]")))
+        else:
+            for item in inner[index + 1 :]:
+                listed = _LIST_ITEM_RE.fullmatch(item)
+                if listed is None:
+                    break
+                values.append(listed.group(1).split(" #", 1)[0])
+    cleaned = (value.strip().strip("'\"").strip().lstrip("#") for value in values)
+    return [value for value in cleaned if value]
+
+
+def set_tags(body: str, tags: list[str]) -> str:
+    """Return ``body`` with its ``tags:`` line set to ``tags`` (already clean).
+
+    The line is written ``tags: [work, home]`` where the old one stood, a
+    block list below the old key goes with it, and every other key stays as
+    it is.  No tags removes the line, and the whole block when nothing else
+    was in it, so tagging and untagging a note gives back its old text.
+    """
+    body = body if isinstance(body, str) else ""
+    newline = _newline(body)
+    line = f"tags: [{', '.join(tags)}]{newline}" if tags else ""
+    found = _front_matter(body)
+    all_lines = body.splitlines(keepends=True)
+
+    if found is None:
+        if not tags:
+            return body
+        # A byte order mark has to stay the first character of the file.
+        prefix = _BOM if body.startswith(_BOM) else ""
+        return prefix + f"---{newline}{line}---{newline}" + body.removeprefix(_BOM)
+
+    _, start, end = found
+    inner = all_lines[start + 1 : end]
+    kept: list[str] = []
+    placed = False
+    index = 0
+    while index < len(inner):
+        key = _TAGS_KEY_RE.fullmatch(inner[index].rstrip("\r\n"))
+        index += 1
+        if key is None:
+            kept.append(inner[index - 1])
+            continue
+        if not key.group(1).split(" #", 1)[0].strip():
+            while index < len(inner) and _LIST_ITEM_RE.fullmatch(inner[index].rstrip("\r\n")):
+                index += 1
+        if line and not placed:
+            kept.append(line)
+            placed = True
+    if line and not placed:
+        kept.append(line)
+    if any(text.strip() for text in kept):
+        return "".join(all_lines[: start + 1] + kept + all_lines[end:])
+    # The tags were the block's only content: drop the whole block.
+    prefix = _BOM if all_lines[start].startswith(_BOM) else ""
+    return prefix + "".join(all_lines[end + 1 :])
 
 
 def strip_front_matter(body: str) -> str:

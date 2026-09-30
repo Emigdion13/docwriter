@@ -550,6 +550,9 @@ BRIDGE_SURFACE = [
     "prune_drive_backup",
     # Extra: the important mark, kept in the note's own front matter.
     "set_important",
+    # Extra: tags, kept in the note's own front matter, and the filter bar.
+    "set_tags",
+    "list_tags",
 ]
 
 
