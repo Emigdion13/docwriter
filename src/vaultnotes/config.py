@@ -48,6 +48,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "effects": "full",
         "view_mode": "split",
         "editor_font_size": 13.5,
+        "panels_collapsed": False,
     },
     "backup": {
         "enabled": False,
@@ -244,6 +245,7 @@ class Config:
             ("look", "effects"): look.get("effects") in ("full", "lite", "off"),
             ("look", "view_mode"): look.get("view_mode") in ("edit", "split", "preview"),
             ("look", "editor_font_size"): number(look.get("editor_font_size"), 10, 20),
+            ("look", "panels_collapsed"): isinstance(look.get("panels_collapsed", False), bool),
             ("backup", "enabled"): isinstance(backup.get("enabled"), bool),
             ("backup", "interval_minutes"): number(backup.get("interval_minutes"), 5, 1440),
             ("backup", "drive_folder_id"): backup.get("drive_folder_id") is None

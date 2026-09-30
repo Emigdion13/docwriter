@@ -6,7 +6,7 @@
 
 import { icon } from '../icons.js';
 
-export function createToolbar({ onViewChange, onLockAll, onBackup, onThemeChange, onOpenPalette }) {
+export function createToolbar({ onViewChange, onLockAll, onBackup, onThemeChange, onOpenPalette, onTogglePanels }) {
   const header = document.createElement('header');
   header.className = 'toolbar glass';
 
@@ -26,6 +26,11 @@ export function createToolbar({ onViewChange, onLockAll, onBackup, onThemeChange
       </svg>
       <span class="brand-name">Vault<b>Notes</b></span>
     </div>
+
+    <button class="btn icon panels-toggle" id="panels-toggle" aria-pressed="false"
+            aria-label="Hide Spaces and notes (Ctrl \\)" title="Hide Spaces and notes (Ctrl \\)">
+      ${icon('panel', 16)}
+    </button>
 
     <button class="palette-trigger" id="open-palette" aria-label="Open command palette">
       ${icon('search', 16)}
@@ -56,6 +61,7 @@ export function createToolbar({ onViewChange, onLockAll, onBackup, onThemeChange
 
   // Attach event listeners
   header.querySelector('#open-palette').onclick = () => onOpenPalette?.();
+  header.querySelector('#panels-toggle').onclick = () => onTogglePanels?.();
   header.querySelector('#lock-all').onclick = () => onLockAll?.();
   header.querySelector('#backup-btn').onclick = () => onBackup?.();
 
@@ -87,6 +93,16 @@ export function updateToolbarView(viewMode) {
     const idx = views.indexOf(viewMode);
     thumb.style.transform = `translateX(${idx * 100}%)`;
   }
+}
+
+export function updateToolbarPanels(collapsed) {
+  const btn = document.getElementById('panels-toggle');
+  if (!btn) return;
+  const text = collapsed ? 'Show Spaces and notes (Ctrl \\)' : 'Hide Spaces and notes (Ctrl \\)';
+  btn.classList.toggle('on', collapsed);
+  btn.setAttribute('aria-pressed', String(collapsed));
+  btn.setAttribute('aria-label', text);
+  btn.title = text;
 }
 
 export function updateToolbarTheme(themeId) {

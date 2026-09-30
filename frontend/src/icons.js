@@ -17,6 +17,7 @@ export const ICONS = {
   link: '<path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1"/><path d="M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1"/>',
   edit: '<path d="M4 20h4L19 9a2.83 2.83 0 0 0-4-4L4 16z"/>',
   columns: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M12 4v16"/>',
+  panel: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M9 4v16M15 10l-2 2 2 2"/>',
   eye: '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
   left: '<path d="M19 12H5M11 18l-6-6 6-6"/>',
   right: '<path d="M5 12h14M13 6l6 6-6 6"/>',

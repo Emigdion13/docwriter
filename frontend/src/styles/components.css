@@ -661,26 +661,33 @@
   min-height: 0;
 }
 
+/* The crumb shares its row with the buttons; the title and the tags get
+   rows of their own, so they run the full width of the note. */
 .ws-head {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 16px 18px 14px 28px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 16px;
+  padding: 12px 18px 12px 28px;
   border-bottom: 1px solid var(--glass-border);
   transition: filter .4s, opacity .4s;
 }
 
 .ws-title-wrap {
-  flex: 1;
-  min-width: 0;
+  display: contents;
+}
+
+.ws-head .title-input,
+.ws-head .note-tags {
+  grid-column: 1 / -1;
 }
 
 .crumb {
+  grid-column: 1;
+  grid-row: 1;
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 7px;
   font: 500 11px/1 var(--font-mono);
   letter-spacing: .08em;
   text-transform: uppercase;
@@ -704,6 +711,7 @@
 
 .title-input {
   width: 100%;
+  margin-top: 6px;
   padding: 2px 0;
   background: none;
   border: 0;
@@ -720,6 +728,8 @@
 }
 
 .ws-actions {
+  grid-column: 2;
+  grid-row: 1;
   display: flex;
   align-items: center;
   gap: 6px;
