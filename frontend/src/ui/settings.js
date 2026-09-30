@@ -19,7 +19,10 @@ export function createSettingsOverlay({
   onDisconnectDrive,
   onBackupNow,
   onRestoreDrive,
-  onPruneDrive
+  onPruneDrive,
+  getTerminal,
+  onEnableTerminal,
+  onDisableTerminal
 }) {
   const overlay = document.createElement('div');
   overlay.className = 'overlay';
@@ -134,6 +137,20 @@ export function createSettingsOverlay({
         </p>
       </div>
 
+      <div class="settings-group">
+        <label>CMD space</label>
+        <div class="drive-state" id="set-term-state">
+          <span class="dot"></span>
+          <span class="grow" id="set-term-text">Off</span>
+          <button class="btn" id="set-term-toggle" type="button">${icon('terminal', 15)}<span>Turn on…</span></button>
+        </div>
+        <p class="settings-hint">
+          A real shell (CMD, PowerShell or Git Bash) under Spaces. It can run anything
+          on this PC, so Windows asks before it is turned on. Recent commands are kept
+          in settings.json; start a command with a space to keep it out.
+        </p>
+      </div>
+
       <div class="dlg-actions">
         <button class="btn" id="set-cancel" type="button">Close</button>
         <button class="btn primary" id="set-save" type="button">
@@ -194,6 +211,21 @@ export function createSettingsOverlay({
   overlay.querySelector('#set-drive-restore').onclick = () => runDriveAction(onRestoreDrive);
   overlay.querySelector('#set-drive-prune').onclick = () => runDriveAction(onPruneDrive);
 
+  const paintTerminal = () => {
+    const t = getTerminal?.() || { enabled: false };
+    overlay.querySelector('#set-term-state').classList.toggle('on', !!t.enabled);
+    overlay.querySelector('#set-term-text').textContent = t.enabled
+      ? `On · ${t.shellName}${t.running ? ' running' : ''}`
+      : 'Off';
+    overlay.querySelector('#set-term-toggle span').textContent = t.enabled ? 'Turn off' : 'Turn on…';
+  };
+
+  overlay.querySelector('#set-term-toggle').onclick = async () => {
+    const t = getTerminal?.() || { enabled: false };
+    await (t.enabled ? onDisableTerminal?.() : onEnableTerminal?.());
+    paintTerminal();
+  };
+
   overlay.querySelector('#set-browse').onclick = async () => {
     const result = await onChooseFolder?.();
     if (result?.ok) {
@@ -234,6 +266,7 @@ export function createSettingsOverlay({
       overlay.querySelector('#set-folder').value = current.notes_root || '';
       paintDrive(getBackup ? getBackup() : null);
 
+      paintTerminal();
       overlay.classList.add('open');
     },
     close: closeSettings,

@@ -78,8 +78,9 @@ REM  --add-data ships the built frontend inside the app, where vaultnotes.app
 REM  looks for it.  --collect-all webview is needed because pywebview picks its
 REM  GUI backend (EdgeChromium on Windows) at run time, which PyInstaller cannot
 REM  see by following imports; bottle and proxy_tools are that backend's own
-REM  runtime dependencies.
-"%PY%" -m PyInstaller --noconfirm --clean --windowed --onedir --name VaultNotes --paths src --add-data "src/vaultnotes/web;vaultnotes/web" --icon packaging\vaultnotes.ico --collect-all webview --hidden-import bottle --hidden-import proxy_tools run.py
+REM  runtime dependencies.  --collect-all winpty ships the CMD space's
+REM  pseudo-console: pywinpty's extension, conpty.dll and OpenConsole.exe.
+"%PY%" -m PyInstaller --noconfirm --clean --windowed --onedir --name VaultNotes --paths src --add-data "src/vaultnotes/web;vaultnotes/web" --icon packaging\vaultnotes.ico --collect-all webview --collect-all winpty --hidden-import bottle --hidden-import proxy_tools run.py
 if errorlevel 1 goto :fail
 
 echo.

@@ -8,5 +8,6 @@ google-api-python-client>=2.100
 google-auth-oauthlib>=1.2
 google-auth-httplib2>=0.2
 keyring>=25
+pywinpty>=2.0.14; sys_platform == "win32"
 pytest>=8
 pyinstaller>=6

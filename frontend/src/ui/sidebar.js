@@ -37,6 +37,10 @@ export function createSidebar({ onSelectSpace, onNewVault, onSyncDrive, onOpenDr
   aside.querySelector('#drive-details').onclick = () => onOpenDriveSettings?.();
 
   aside.querySelector('#spaces').addEventListener('click', (e) => {
+    if (e.target.closest('.space-cmd')) {
+      onSelectSpace?.('cmd');
+      return;
+    }
     const spaceBtn = e.target.closest('.space');
     if (spaceBtn) {
       const spaceId = spaceBtn.dataset.space;
@@ -47,14 +51,43 @@ export function createSidebar({ onSelectSpace, onNewVault, onSyncDrive, onOpenDr
   return aside;
 }
 
+/* The CMD entry under the note spaces.  It is not a space of notes, so it
+   keeps its own state; while it is open no note space is highlighted. */
+let cmdEntry = { active: false, sub: 'Off' };
+let lastSpaces = [];
+let lastActiveId = null;
+
+export function setCmdEntry(changes) {
+  cmdEntry = { ...cmdEntry, ...changes };
+  renderSpaces(lastSpaces, lastActiveId);
+}
+
+function cmdButton() {
+  const button = document.createElement('button');
+  button.className = `space space-cmd ${cmdEntry.active ? 'active' : ''}`;
+  button.dataset.space = 'cmd';
+  button.style.setProperty('--c', 'var(--cmd)');
+  button.innerHTML = `
+    <span class="ic">${icon('terminal', 17)}</span>
+    <span class="txt"><span class="nm">CMD</span><span class="sub"></span></span>
+    <span class="badge">${icon('right', 12)}</span>
+  `;
+  button.querySelector('.sub').textContent = cmdEntry.sub;
+  button.setAttribute('aria-label', `CMD, ${cmdEntry.sub}`);
+  return button;
+}
+
 /**
- * Renders the list of spaces into #spaces.
+ * Renders the list of spaces into #spaces, then the CMD entry.
  */
 export function renderSpaces(spaces, activeSpaceId) {
+  lastSpaces = spaces || [];
+  lastActiveId = activeSpaceId;
   const container = document.getElementById('spaces');
   if (!container) return;
+  if (cmdEntry.active) activeSpaceId = null;
 
-  container.innerHTML = spaces.map(s => {
+  container.innerHTML = lastSpaces.map(s => {
     const isPlain = s.kind === 'plain';
     const sub = s.id === 'ai' ? 'For AI helpers'
       : isPlain ? 'Always open' : s.created === false ? 'Not set up' : s.locked ? 'Locked' : 'Unlocked';
@@ -76,7 +109,8 @@ export function renderSpaces(spaces, activeSpaceId) {
         <span class="badge">${badgeContent}</span>
       </button>
     `;
-  }).join('');
+  }).join('') + '<div class="space-sep" role="separator"></div>';
+  container.appendChild(cmdButton());
 }
 
 export function updateDriveCard(statusText, opts = {}) {

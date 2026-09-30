@@ -302,12 +302,14 @@ The key that unlocks the vault key (KEK) is derived as `Scrypt(salt=salt, length
   ],
   "autolock_minutes": 10,
   "look": {"theme": "nebula", "effects": "full", "view_mode": "split", "editor_font_size": 13.5},
-  "backup": {"enabled": false, "interval_minutes": 60, "drive_folder_id": null, "last_backup": null}
+  "backup": {"enabled": false, "interval_minutes": 60, "drive_folder_id": null, "last_backup": null},
+  "terminal": {"enabled": false, "shell": "cmd", "recent": [], "favorites": []}
 }
 ```
 
 - `key_path` only remembers *where* the key file is. The key itself is never saved here. If `key_path` is empty, the app asks for the file each time.
 - `theme` is `nebula`, `synthwave` or `arctic`. `effects` is `full`, `lite` or `off` (section 6.7).
+- `terminal` is the CMD space (extra): `shell` is `cmd`, `powershell` or `bash`; `recent` (at most 50, newest first) and `favorites` (at most 100) are one-line commands. Only Python writes this block, through the `terminal_*` Bridge calls; `update_settings` refuses it (security rule 13).
 
 ### 4.7 Links between notes (Obsidian-style)
 
@@ -423,6 +425,11 @@ The frontend calls Python with `await window.pywebview.api.<name>(...)`, after t
       - Titles are cleaned.
       - **The frontend never sends file paths.** Python opens file pickers itself.
     - **g.** Release builds use `debug=False`, so developer tools are off.
+13. **The CMD space (extra) runs a real shell, so it is opt-in and narrow:**
+    - Off by default. Only `terminal_enable` turns it on, and only after the user says yes in a **native** confirmation dialog shown by Python. Every other `terminal_*` call that touches the shell is refused while it is off.
+    - The page names a shell by id (`cmd`, `powershell`, `bash`). Python finds the program itself; the page never sends a path, a program name or arguments.
+    - Keys and output travel only through the Bridge API and `terminal_output` events, in memory. Nothing the shell prints is written to disk.
+    - Recent and favorite commands are one line each, go to `settings.json` only (never the notes folder, so never to Drive), and a command typed with a leading space is never recorded.
 
 ### Limits you should know about
 
