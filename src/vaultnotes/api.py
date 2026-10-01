@@ -2480,7 +2480,7 @@ class Api:
             "enabled": enabled,
             "shells": shells,
             "shell": shell,
-            "running": self.terminal.running() if enabled else None,
+            "running": self.terminal.running() if enabled else [],
             **self._terminal_lists(),
         }
 
@@ -2521,7 +2521,7 @@ class Api:
 
     @bridge_method
     def terminal_start(self, shell_id: str, cols: int = 80, rows: int = 24) -> dict[str, Any]:
-        """Start a shell by id (``cmd``, ``powershell``, ``bash``), replacing any running one."""
+        """Start a shell by id (``cmd``, ``powershell``, ``bash``) for a new tab."""
         self._require_terminal()
         started = self.terminal.start(shell_id, cols, rows)
         if self._terminal_settings().get("shell") != shell_id:
@@ -2543,9 +2543,9 @@ class Api:
         return {"ok": True}
 
     @bridge_method
-    def terminal_stop(self) -> dict[str, bool]:
-        """End the running shell, if any."""
-        self.terminal.stop()
+    def terminal_stop(self, session_id: str | None = None) -> dict[str, bool]:
+        """End one tab's shell, or every shell when no id is given."""
+        self.terminal.stop(session_id)
         return {"ok": True}
 
     @bridge_method

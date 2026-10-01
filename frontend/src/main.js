@@ -548,6 +548,7 @@ async function flushSave() {
 
 function cmdEntrySub(t = terminalView?.getState()) {
   if (!t?.enabled) return 'Off';
+  if (t.tabs > 1) return `${t.tabs} shells`;
   return t.running ? t.shellName : 'Not started';
 }
 
@@ -591,7 +592,7 @@ async function enableTerminal() {
 async function disableTerminal() {
   const ok = await confirmAction({
     title: 'Turn off the CMD space?',
-    message: 'The running shell is stopped. Your favorite and recent commands are kept.',
+    message: 'Every open shell is stopped and its tab closed. Your favorite and recent commands are kept.',
     confirmLabel: 'Turn off',
     iconName: 'terminal'
   });
@@ -1643,13 +1644,23 @@ async function getPaletteCommands() {
       ? { label: `Back to ${space?.name || 'notes'}`, icon: spaceIcon(space), colorVar: space?.colorVar, run: () => selectSpace(state.currentSpaceId) }
       : { label: 'Open CMD', sub: term.enabled ? term.shellName : 'off until you turn it on', icon: 'terminal', colorVar: '--cmd', run: () => enterTerminalMode() },
     ...(term.enabled ? [
-      { label: 'CMD: Restart the shell', sub: term.shellName, icon: 'refresh', colorVar: '--cmd', run: async () => { await enterTerminalMode(); await terminalView.restart(); } },
-      ...term.shells.filter(sh => sh.id !== term.shell).map(sh => ({
-        label: `CMD: Switch to ${sh.name}`,
-        icon: 'terminal',
+      ...term.shells.map(sh => ({
+        label: `CMD: New ${sh.name} tab`,
+        hint: sh.id === term.shell ? 'Ctrl Shift T' : undefined,
+        icon: 'plus',
         colorVar: '--cmd',
-        run: async () => { await enterTerminalMode(); await terminalView.restart(sh.id); }
+        run: async () => { await enterTerminalMode(); await terminalView.newTab(sh.id); }
       })),
+      ...(term.tabs ? [
+        { label: 'CMD: Restart the shell', sub: `this tab · ${term.shellName}`, icon: 'refresh', colorVar: '--cmd', run: async () => { await enterTerminalMode(); await terminalView.restart(); } },
+        ...term.shells.filter(sh => sh.id !== term.shell).map(sh => ({
+          label: `CMD: Switch this tab to ${sh.name}`,
+          icon: 'terminal',
+          colorVar: '--cmd',
+          run: async () => { await enterTerminalMode(); await terminalView.restart(sh.id); }
+        })),
+        { label: 'CMD: Close this tab', sub: term.shellName, hint: 'Ctrl Shift W', icon: 'x', colorVar: '--cmd', run: async () => { await enterTerminalMode(); terminalView.closeTab(); } }
+      ] : []),
       ...term.favorites.map(cmd => ({
         label: cmd,
         sub: 'Favorite command · puts it at the prompt',

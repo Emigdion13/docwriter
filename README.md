@@ -349,10 +349,18 @@ CMD, PowerShell or Git Bash (the picker lists only the shells found on this PC).
 runs in a Windows pseudo-console, so colors, arrow-key history, tab completion and
 interactive programs work as in any terminal.
 
+- **Tabs:** open up to 8 shells at once, each in its own tab with its own screen and
+  folder. **+** (or Ctrl+Shift+T) opens a tab with the current tab's shell; the palette
+  has *CMD: New PowerShell tab* and the like. The picker in the header switches the
+  **open tab** to another shell, and ⟳ restarts it. Ctrl+Tab / Ctrl+Shift+Tab (or
+  Ctrl+PageDown / PageUp) move between tabs; ✕, a middle-click or Ctrl+Shift+W closes
+  one and ends its shell. A dot on a tab means it printed something while you were
+  looking at another one. Commands from the list go to the open tab.
+
 - **It is off until you turn it on.** A shell can run anything on this PC with your
   permissions, so *Turn on the CMD space…* (in the space itself, Settings or the
   palette) makes **Windows** ask you to confirm. The page cannot switch it on by
-  itself, and `update_settings` refuses to. *Turn off* stops the shell.
+  itself, and `update_settings` refuses to. *Turn off* stops every shell.
 - **The list column holds your commands.** *Favorites* (starred) come first, then
   *Recent*, newest first (the last 50). Click a command to type it at the prompt, so you
   can check or edit it, then press Enter; **▶** runs it straight away; **☆** stars it;
@@ -367,8 +375,8 @@ interactive programs work as in any terminal.
 - **Keys:** everything goes to the shell (Ctrl+C interrupts, Esc clears the line),
   except Ctrl+K (palette), Ctrl+L (lock all) and Ctrl+\\ (hide the panels). With text
   selected, Ctrl+C copies it; Ctrl+Shift+C always copies, and Ctrl+V pastes.
-- The shell starts in your home folder and keeps running while you look at notes;
-  closing the app ends it.
+- Each shell starts in your home folder and keeps running while you look at notes;
+  closing the app ends them all.
 
 ---
 

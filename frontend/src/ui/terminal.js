@@ -1,9 +1,9 @@
 /* =================================================================
    TERMINAL  (frontend/src/ui/terminal.js)
    The CMD space: a real shell (CMD, PowerShell or Git Bash) drawn by
-   xterm.js.  Python runs the shell in a Windows pseudo-console; keys go
-   out through bridge.terminal_write and the screen comes back as
-   terminal_output events.
+   xterm.js, one shell per tab.  Python runs each shell in its own Windows
+   pseudo-console; keys go out through bridge.terminal_write and the screen
+   comes back as terminal_output events, both tagged with the tab's session.
    ================================================================= */
 
 import { Terminal } from '@xterm/xterm';
@@ -28,6 +28,12 @@ const CLEAR_LINE = { cmd: '\x1b', powershell: '\x1b', bash: '\x05\x15' };
 
 // How long after Enter the line is read, so the shell's echo has landed.
 const RECORD_DELAY_MS = 150;
+
+// The most tabs open at once (Python's MAX_SESSIONS).
+export const MAX_TABS = 8;
+
+// Output that arrives before terminal_start has answered, kept per session.
+const EARLY_LIMIT = 65_536;
 
 const DARK_ANSI = {
   black: '#1b1e2e', red: '#fb7185', green: '#34d399', yellow: '#fbbf24',
@@ -68,25 +74,35 @@ export function createTerminal({ onListsChanged, onStateChanged, notify }) {
       <div class="crumb"><span class="crumb-dot"></span><span>CMD</span><span class="sep">/</span><span id="term-where">Shell</span></div>
       <div class="term-actions">
         <span class="meta" id="term-status"></span>
-        <select class="settings-select term-shell" id="term-shell" aria-label="Shell"></select>
+        <select class="settings-select term-shell" id="term-shell" aria-label="Shell for this tab" title="Shell for this tab"></select>
         <button class="btn icon" id="term-clear" type="button" aria-label="Clear the screen" title="Clear the screen">
           ${icon('eraser', 16)}
         </button>
-        <button class="btn icon" id="term-restart" type="button" aria-label="Restart the shell" title="Restart the shell">
+        <button class="btn icon" id="term-restart" type="button" aria-label="Restart this tab's shell" title="Restart this tab's shell">
           ${icon('refresh', 16)}
         </button>
       </div>
     </div>
-    <div class="term-body">
-      <div class="term-host" id="term-host"></div>
+    <div class="term-tabs">
+      <div class="term-tablist" id="term-tablist" role="tablist" aria-label="Shells"></div>
+      <button class="btn icon small term-new" id="term-new" type="button" aria-label="New tab" title="New tab (Ctrl+Shift+T)">
+        ${icon('plus', 15)}
+      </button>
+    </div>
+    <div class="term-body" id="term-body">
+      <div class="term-empty">
+        <p>No shell is open.</p>
+        <button class="btn" id="term-empty-new" type="button">${icon('plus', 15)}<span>New tab</span></button>
+      </div>
     </div>
     <div class="term-off">
       <div class="term-off-ic">${icon('terminal', 40)}</div>
       <span class="hud-tag">CMD</span>
       <h2>A command window inside VaultNotes</h2>
       <p>
-        Run CMD, PowerShell or Git Bash right here. Favorite and recent
-        commands sit in the list on the left, one click away.
+        Run CMD, PowerShell or Git Bash right here, several at once in tabs.
+        Favorite and recent commands sit in the list on the left, one click
+        away.
       </p>
       <p class="term-warn">
         ${icon('shield', 15)}
@@ -97,31 +113,75 @@ export function createTerminal({ onListsChanged, onStateChanged, notify }) {
     </div>
   `;
 
-  const host = root.querySelector('#term-host');
+  const body = root.querySelector('#term-body');
+  const tabList = root.querySelector('#term-tablist');
+  const newButton = root.querySelector('#term-new');
   const shellSelect = root.querySelector('#term-shell');
   const statusEl = root.querySelector('#term-status');
   const whereEl = root.querySelector('#term-where');
 
   let info = { enabled: false, shells: [], shell: 'cmd', recent: [], favorites: [] };
-  let term = null;
-  let fit = null;
-  let sessionId = null;
-  let sessionShell = null;
-  let starting = null;
-  let exited = false;
   let visible = false;
 
-  /* Keys are sent one call at a time, in order: pywebview runs every call on
-     its own thread, so two calls in flight could arrive swapped. */
-  let outgoing = '';
-  let sending = false;
-
-  function setStatus(text) {
-    statusEl.textContent = text;
-  }
+  /* Every tab owns its xterm, its shell session and its outgoing keys:
+     { key, shell, sessionId, exited, starting, status, unread, term, fit,
+       host, outgoing, sending }. */
+  const tabs = [];
+  let active = null;
+  let tabSeq = 0;
+  const early = new Map();
 
   function shellName(id) {
     return info.shells.find(s => s.id === id)?.name || 'Shell';
+  }
+
+  function tabBySession(id) {
+    return id ? tabs.find(t => t.sessionId === id) : undefined;
+  }
+
+  function tabByKey(key) {
+    return tabs.find(t => String(t.key) === key);
+  }
+
+  /* "CMD", or "CMD 2" once a second CMD tab is open. */
+  function tabLabel(tab) {
+    const same = tabs.filter(t => t.shell === tab.shell);
+    return same.length > 1 ? `${shellName(tab.shell)} ${same.indexOf(tab) + 1}` : shellName(tab.shell);
+  }
+
+  function paintTabs() {
+    tabList.replaceChildren(...tabs.map((tab) => {
+      const label = tabLabel(tab);
+      const el = document.createElement('div');
+      el.className = 'term-tab';
+      el.classList.toggle('on', tab === active);
+      el.classList.toggle('ended', tab.exited);
+      el.classList.toggle('unread', tab.unread);
+      el.dataset.key = String(tab.key);
+
+      const pick = document.createElement('button');
+      pick.type = 'button';
+      pick.className = 'term-tab-pick';
+      pick.setAttribute('role', 'tab');
+      pick.setAttribute('aria-selected', String(tab === active));
+      pick.tabIndex = tab === active ? 0 : -1;
+      pick.innerHTML = `${icon('terminal', 13)}<span class="nm"></span><span class="dot"></span>`; // fixed markup only
+      pick.querySelector('.nm').textContent = label;
+      pick.title = tab.exited ? `${label} (ended)` : label;
+
+      const close = document.createElement('button');
+      close.type = 'button';
+      close.className = 'term-tab-x';
+      close.setAttribute('aria-label', `Close ${label}`);
+      close.title = 'Close tab (Ctrl+Shift+W)';
+      close.tabIndex = -1;
+      close.innerHTML = icon('x', 12);
+
+      el.append(pick, close);
+      return el;
+    }));
+    newButton.disabled = !info.enabled || tabs.length >= MAX_TABS;
+    root.classList.toggle('no-tabs', !tabs.length);
   }
 
   function paint() {
@@ -132,18 +192,22 @@ export function createTerminal({ onListsChanged, onStateChanged, notify }) {
       option.textContent = s.name;
       return option;
     }));
-    shellSelect.value = sessionShell || info.shell;
+    shellSelect.value = active?.shell || info.shell;
     shellSelect.disabled = !info.enabled || !info.shells.length;
-    whereEl.textContent = info.enabled ? shellName(sessionShell || info.shell) : 'Off';
+    whereEl.textContent = !info.enabled ? 'Off' : active ? tabLabel(active) : 'No shell';
+    statusEl.textContent = active?.status || '';
+    paintTabs();
     onStateChanged?.(publicState());
   }
 
   function publicState() {
+    const shell = active?.shell || info.shell;
     return {
       enabled: info.enabled,
-      running: !!sessionId,
-      shell: sessionShell || info.shell,
-      shellName: shellName(sessionShell || info.shell),
+      running: tabs.some(t => t.sessionId),
+      tabs: tabs.length,
+      shell,
+      shellName: shellName(shell),
       shells: info.shells,
       recent: info.recent,
       favorites: info.favorites
@@ -156,29 +220,36 @@ export function createTerminal({ onListsChanged, onStateChanged, notify }) {
     onListsChanged?.(publicState());
   }
 
-  async function pump() {
-    if (sending) return;
-    sending = true;
+  function setStatus(tab, text) {
+    tab.status = text;
+    if (tab === active) statusEl.textContent = text;
+  }
+
+  /* Keys are sent one call at a time per tab, in order: pywebview runs every
+     call on its own thread, so two calls in flight could arrive swapped. */
+  async function pump(tab) {
+    if (tab.sending) return;
+    tab.sending = true;
     try {
-      while (outgoing && sessionId) {
-        const data = outgoing;
-        outgoing = '';
-        const res = await bridge.terminal_write(sessionId, data);
+      while (tab.outgoing && tab.sessionId) {
+        const data = tab.outgoing;
+        tab.outgoing = '';
+        const res = await bridge.terminal_write(tab.sessionId, data);
         if (res?.error === 'not_running') break;
       }
     } finally {
-      sending = false;
+      tab.sending = false;
     }
   }
 
-  function send(data) {
-    if (!sessionId || !data) return;
-    outgoing += data;
-    pump();
+  function send(tab, data) {
+    if (!tab?.sessionId || !data) return;
+    tab.outgoing += data;
+    pump(tab);
   }
 
   /* The whole logical line at buffer row `row`, wrapped rows joined. */
-  function lineAt(row) {
+  function lineAt(term, row) {
     const buf = term.buffer.active;
     let start = row;
     while (start > 0 && buf.getLine(start)?.isWrapped) start--;
@@ -191,12 +262,13 @@ export function createTerminal({ onListsChanged, onStateChanged, notify }) {
     return text;
   }
 
-  function recordLineLater() {
-    const buf = term.buffer.active;
+  function recordLineLater(tab) {
+    const buf = tab.term.buffer.active;
     const row = buf.baseY + buf.cursorY;
-    const shell = sessionShell;
+    const shell = tab.shell;
     setTimeout(async () => {
-      const match = PROMPTS[shell]?.exec(lineAt(row));
+      if (!tabs.includes(tab)) return;
+      const match = PROMPTS[shell]?.exec(lineAt(tab.term, row));
       const command = match?.[1] ?? '';
       // A leading space keeps a command out of the list on purpose.
       if (!command.trim() || /^\s/.test(command)) return;
@@ -204,7 +276,7 @@ export function createTerminal({ onListsChanged, onStateChanged, notify }) {
     }, RECORD_DELAY_MS);
   }
 
-  async function copySelection() {
+  async function copySelection(term) {
     const text = term.getSelection();
     if (!text) return;
     try {
@@ -215,8 +287,34 @@ export function createTerminal({ onListsChanged, onStateChanged, notify }) {
     term.clearSelection();
   }
 
-  function buildTerminal() {
-    term = new Terminal({
+  function fitActive() {
+    if (!visible || !active || root.offsetParent === null) return;
+    try { active.fit.fit(); } catch { /* not laid out yet */ }
+  }
+
+  /* The tab keys, read inside the shell since that is where the focus is:
+     Ctrl+Shift+T new, Ctrl+Shift+W close, Ctrl+Tab / Ctrl+PageDown next. */
+  function tabKey(e) {
+    const mod = e.ctrlKey || e.metaKey;
+    if (!mod || e.altKey) return null;
+    const key = e.key.toLowerCase();
+    if (e.shiftKey && key === 't') return () => newTab();
+    if (e.shiftKey && key === 'w') return () => closeTab(active);
+    if (e.key === 'Tab') return () => cycle(e.shiftKey ? -1 : 1);
+    if (!e.shiftKey && (e.key === 'PageDown' || e.key === 'PageUp')) return () => cycle(e.key === 'PageUp' ? -1 : 1);
+    return null;
+  }
+
+  function buildTab(shell) {
+    const tab = {
+      key: ++tabSeq, shell, sessionId: null, exited: false, starting: null, status: '', unread: false,
+      outgoing: '', sending: false
+    };
+    tab.host = document.createElement('div');
+    tab.host.className = 'term-host';
+    body.appendChild(tab.host);
+
+    tab.term = new Terminal({
       allowTransparency: true,
       cursorBlink: true,
       cursorStyle: 'bar',
@@ -234,19 +332,24 @@ export function createTerminal({ onListsChanged, onStateChanged, notify }) {
         allowNonHttpProtocols: false
       }
     });
-    fit = new FitAddon();
-    term.loadAddon(fit);
-    term.open(host);
+    tab.fit = new FitAddon();
+    tab.term.loadAddon(tab.fit);
 
     // The app's own shortcuts keep working; everything else is the shell's.
-    term.attachCustomKeyEventHandler((e) => {
+    tab.term.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown') return true;
       const mod = e.ctrlKey || e.metaKey;
       const key = e.key.toLowerCase();
-      if (mod && !e.shiftKey && !e.altKey && (key === 'k' || key === 'l' || e.key === '\\')) return false;
-      if (mod && key === 'c' && (e.shiftKey || term.hasSelection())) {
+      const tabAction = tabKey(e);
+      if (tabAction) {
         e.preventDefault();
-        copySelection();
+        tabAction();
+        return false;
+      }
+      if (mod && !e.shiftKey && !e.altKey && (key === 'k' || key === 'l' || e.key === '\\')) return false;
+      if (mod && key === 'c' && (e.shiftKey || tab.term.hasSelection())) {
+        e.preventDefault();
+        copySelection(tab.term);
         return false;
       }
       // Ctrl+V / Ctrl+Shift+V: let the browser paste; xterm turns it into input.
@@ -254,97 +357,218 @@ export function createTerminal({ onListsChanged, onStateChanged, notify }) {
       return true;
     });
 
-    term.onData((data) => {
-      if (exited) {
-        if (data.includes('\r')) start(sessionShell || info.shell);
+    tab.term.onData((data) => {
+      if (tab.exited) {
+        if (data.includes('\r')) startIn(tab, tab.shell, { reset: false });
         return;
       }
-      if (data.includes('\r')) recordLineLater();
-      send(data);
+      if (data.includes('\r')) recordLineLater(tab);
+      send(tab, data);
     });
 
     let resizeTimer = null;
-    term.onResize(({ cols, rows }) => {
+    tab.term.onResize(({ cols, rows }) => {
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
-        if (sessionId) bridge.terminal_resize(sessionId, cols, rows);
+        if (tab.sessionId) bridge.terminal_resize(tab.sessionId, cols, rows);
       }, 80);
     });
 
     new ResizeObserver(() => {
-      if (visible && root.offsetParent !== null) {
-        try { fit.fit(); } catch { /* not laid out yet */ }
-      }
-    }).observe(host);
+      if (tab === active) fitActive();
+    }).observe(tab.host);
 
-    // Follow the app theme.
-    new MutationObserver(() => {
-      term.options.theme = xtermTheme();
-    }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    return tab;
   }
 
+  // Follow the app theme.
+  new MutationObserver(() => {
+    for (const tab of tabs) tab.term.options.theme = xtermTheme();
+  }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+
   events.on('terminal_output', (data) => {
-    if (term && data?.id && data.id === sessionId) term.write(data.data);
+    if (!data?.id) return;
+    const tab = tabBySession(data.id);
+    if (!tab) {
+      // terminal_start has not answered yet: keep it for the tab it is for.
+      const kept = (early.get(data.id) || '') + data.data;
+      if (kept.length <= EARLY_LIMIT) early.set(data.id, kept);
+      return;
+    }
+    tab.term.write(data.data);
+    if (tab !== active && !tab.unread) {
+      tab.unread = true;
+      paintTabs();
+    }
   });
 
   events.on('terminal_exit', (data) => {
-    if (!data?.id || data.id !== sessionId) return;
-    sessionId = null;
+    early.delete(data?.id);
+    const tab = tabBySession(data?.id);
+    if (!tab) return;
+    tab.sessionId = null;
     if (!data.stopped) {
-      exited = true;
+      tab.exited = true;
       const code = data.code == null ? '' : ` (exit code ${data.code})`;
-      term?.write(`\r\n\x1b[2m[${shellName(sessionShell)} ended${code}. Press Enter to start it again.]\x1b[0m\r\n`);
-      setStatus('Ended');
+      tab.term.write(`\r\n\x1b[2m[${shellName(tab.shell)} ended${code}. Press Enter to start it again, or close the tab.]\x1b[0m\r\n`);
+      setStatus(tab, 'Ended');
     }
     paint();
   });
 
-  async function start(shellId = info.shell) {
+  /* Starts (or restarts) the shell in a tab; reset: false keeps the old screen. */
+  async function startIn(tab, shellId = tab.shell, { reset = true } = {}) {
     if (!info.enabled) return false;
-    if (starting) return starting;
-    starting = (async () => {
-      if (!term) buildTerminal();
-      try { fit.fit(); } catch { /* hidden */ }
-      exited = false;
-      sessionId = null;
-      outgoing = '';
-      setStatus('Starting…');
-      const res = await bridge.terminal_start(shellId, term.cols, term.rows);
+    if (tab.starting) return tab.starting;
+    tab.starting = (async () => {
+      if (tab === active) fitActive();
+      const old = tab.sessionId;
+      tab.sessionId = null;
+      tab.exited = false;
+      tab.outgoing = '';
+      if (old) await bridge.terminal_stop(old);
+      if (reset) tab.term.reset();
+      setStatus(tab, 'Starting…');
+      const res = await bridge.terminal_start(shellId, tab.term.cols, tab.term.rows);
+      if (!tabs.includes(tab)) {
+        // Closed while it was starting.
+        if (res?.id) bridge.terminal_stop(res.id);
+        return false;
+      }
       if (res?.error) {
-        setStatus('');
+        setStatus(tab, '');
         notify?.(res.message || 'The shell could not be started.');
         return false;
       }
-      sessionId = res.id;
-      sessionShell = res.shell;
+      tab.sessionId = res.id;
+      tab.shell = res.shell;
       info.shell = res.shell;
-      setStatus('');
+      setStatus(tab, '');
+      const kept = early.get(res.id);
+      early.delete(res.id);
+      if (kept) tab.term.write(kept);
       paint();
-      if (visible) term.focus();
+      if (visible && tab === active) tab.term.focus();
       return true;
     })();
     try {
-      return await starting;
+      return await tab.starting;
     } finally {
-      starting = null;
+      tab.starting = null;
     }
   }
 
+  function activate(tab) {
+    if (!tab) return;
+    active = tab;
+    tab.unread = false;
+    for (const t of tabs) t.host.classList.toggle('on', t === tab);
+    paint();
+    if (!visible) return;
+    requestAnimationFrame(() => {
+      fitActive();
+      if (active === tab) tab.term.focus();
+    });
+  }
+
+  function cycle(step) {
+    if (tabs.length < 2) return;
+    const i = tabs.indexOf(active);
+    activate(tabs[(i + step + tabs.length) % tabs.length]);
+  }
+
+  async function newTab(shellId = active?.shell || info.shell) {
+    if (!info.enabled) return false;
+    if (tabs.length >= MAX_TABS) {
+      notify?.(`Up to ${MAX_TABS} tabs can be open at once. Close one first.`);
+      return false;
+    }
+    const tab = buildTab(shellId);
+    tabs.push(tab);
+    activate(tab);
+    tab.term.open(tab.host); // once it shows, so xterm can measure the font
+    fitActive();
+    const ok = await startIn(tab, shellId);
+    // A tab whose shell never started is not kept.
+    if (!ok && tabs.includes(tab) && !tab.sessionId) closeTab(tab);
+    return ok;
+  }
+
+  function closeTab(tab) {
+    const i = tabs.indexOf(tab);
+    if (i < 0) return;
+    tabs.splice(i, 1);
+    const id = tab.sessionId;
+    tab.sessionId = null;
+    if (id) bridge.terminal_stop(id);
+    tab.term.dispose();
+    tab.host.remove();
+    if (active === tab) {
+      active = null;
+      activate(tabs[Math.min(i, tabs.length - 1)]);
+    }
+    paint();
+  }
+
+  function closeAll() {
+    for (const tab of tabs.splice(0)) {
+      tab.sessionId = null;
+      tab.term.dispose();
+      tab.host.remove();
+    }
+    active = null;
+    early.clear();
+  }
+
+  tabList.addEventListener('click', (e) => {
+    const tab = tabByKey(e.target.closest('.term-tab')?.dataset.key);
+    if (!tab) return;
+    if (e.target.closest('.term-tab-x')) closeTab(tab);
+    else activate(tab);
+  });
+
+  // Middle-click closes a tab, as in a browser.
+  tabList.addEventListener('mousedown', (e) => {
+    if (e.button === 1) e.preventDefault(); // no auto-scroll cursor
+  });
+  tabList.addEventListener('auxclick', (e) => {
+    if (e.button !== 1) return;
+    const tab = tabByKey(e.target.closest('.term-tab')?.dataset.key);
+    if (tab) closeTab(tab);
+  });
+
+  tabList.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+      e.preventDefault();
+      cycle(e.key === 'ArrowRight' ? 1 : -1);
+      tabList.querySelector('.term-tab.on .term-tab-pick')?.focus();
+    } else if (e.key === 'Delete') {
+      e.preventDefault();
+      closeTab(active);
+    }
+  });
+
+  newButton.onclick = () => newTab();
+  root.querySelector('#term-empty-new').onclick = () => newTab();
+
   shellSelect.addEventListener('change', async () => {
     const wanted = shellSelect.value;
-    if (wanted === sessionShell && sessionId) return;
-    term?.reset();
-    await start(wanted);
+    if (!active) {
+      await newTab(wanted);
+      return;
+    }
+    if (wanted === active.shell && active.sessionId) return;
+    await startIn(active, wanted);
   });
 
   root.querySelector('#term-restart').onclick = async () => {
-    term?.reset();
-    await start(sessionShell || info.shell);
+    if (active) await startIn(active);
+    else await newTab();
   };
 
   root.querySelector('#term-clear').onclick = () => {
-    term?.clear();
-    term?.focus();
+    active?.term.clear();
+    active?.term.focus();
   };
 
   root.querySelector('#term-enable').onclick = () => enable();
@@ -353,9 +577,9 @@ export function createTerminal({ onListsChanged, onStateChanged, notify }) {
     const res = await bridge.terminal_state();
     if (res?.error) return publicState();
     info = { ...info, ...res };
-    if (res.running && !sessionId) {
-      // The page was reloaded while a shell ran: start a fresh one instead of
-      // showing a screen we cannot draw.
+    if (res.running?.length && !tabs.length) {
+      // The page was reloaded while shells ran: start fresh ones instead of
+      // showing screens we cannot draw.
       await bridge.terminal_stop();
     }
     paint();
@@ -371,17 +595,14 @@ export function createTerminal({ onListsChanged, onStateChanged, notify }) {
     }
     info.enabled = true;
     paint();
-    if (visible) await start(info.shell);
+    if (visible && !tabs.length) await newTab(info.shell);
     return true;
   }
 
   async function disable() {
     await bridge.terminal_disable();
     info.enabled = false;
-    sessionId = null;
-    exited = false;
-    term?.reset();
-    setStatus('');
+    closeAll();
     paint();
   }
 
@@ -396,10 +617,13 @@ export function createTerminal({ onListsChanged, onStateChanged, notify }) {
       visible = true;
       paint();
       if (!info.enabled) return;
-      if (!sessionId && !exited) await start(info.shell);
+      if (!tabs.length) {
+        await newTab(info.shell);
+        return;
+      }
       requestAnimationFrame(() => {
-        try { fit?.fit(); } catch { /* hidden */ }
-        term?.focus();
+        fitActive();
+        active?.term.focus();
       });
     },
 
@@ -408,21 +632,30 @@ export function createTerminal({ onListsChanged, onStateChanged, notify }) {
     },
 
     focus() {
-      term?.focus();
+      active?.term.focus();
     },
 
+    /** Restarts the open tab's shell; with shellId, switches it to that shell. */
     async restart(shellId) {
-      term?.reset();
-      return start(shellId || sessionShell || info.shell);
+      if (!active) return newTab(shellId);
+      return startIn(active, shellId || active.shell);
     },
 
-    /** Types a command at the prompt; with run, presses Enter too. */
+    /** Opens a new tab (with shellId, that shell). */
+    newTab: (shellId) => newTab(shellId),
+
+    /** Closes the open tab and its shell. */
+    closeTab: () => closeTab(active),
+
+    /** Types a command at the open tab's prompt; with run, presses Enter too. */
     async insert(command, run = false) {
       if (!info.enabled) return false;
-      if (!sessionId && !(await start(sessionShell || info.shell))) return false;
-      send((CLEAR_LINE[sessionShell] || '') + command + (run ? '\r' : ''));
+      if (!active && !(await newTab(info.shell))) return false;
+      const tab = active;
+      if (!tab.sessionId && !(await startIn(tab))) return false;
+      send(tab, (CLEAR_LINE[tab.shell] || '') + command + (run ? '\r' : ''));
       if (run) setLists(await bridge.terminal_remember(command));
-      term?.focus();
+      tab.term.focus();
       return true;
     },
 

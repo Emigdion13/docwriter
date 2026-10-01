@@ -33,6 +33,8 @@ MAX_FAVORITES = 100
 MAX_COMMAND_LENGTH = 1000
 #: The most text one ``terminal_write`` may send (a large paste).
 MAX_WRITE_LENGTH = 65_536
+#: Shells open at once (one per tab in the CMD space).
+MAX_SESSIONS = 8
 #: Terminal size limits, in character cells.
 MIN_COLS, MAX_COLS = 20, 500
 MIN_ROWS, MAX_ROWS = 5, 200
@@ -179,11 +181,14 @@ def _clamp(value: Any, low: int, high: int, name: str) -> int:
 class _Session:
     """One shell in one pseudo-console, and the thread that reads it."""
 
-    def __init__(self, session_id: str, shell_id: str, process: Any, emit: Emit) -> None:
+    def __init__(
+        self, session_id: str, shell_id: str, process: Any, emit: Emit, on_end: Callable[["_Session"], None]
+    ) -> None:
         self.id = session_id
         self.shell_id = shell_id
         self.process = process
         self._emit = emit
+        self._on_end = on_end
         self._closing = False
         # The reader only reads; the sender gathers what arrived within a
         # frame and sends it as one event, so evaluate_js never slows reading.
@@ -229,6 +234,7 @@ class _Session:
             code = self.process.exitstatus
         except Exception:  # noqa: BLE001
             pass
+        self._on_end(self)
         self._emit("terminal_exit", {"id": self.id, "code": code, "stopped": self._closing})
 
     def write(self, data: str) -> None:
@@ -247,13 +253,13 @@ class _Session:
 
 
 class TerminalManager:
-    """At most one shell at a time: the CMD space has one terminal."""
+    """The CMD space's shells, one per tab, at most :data:`MAX_SESSIONS`."""
 
     def __init__(self, emit: Emit, spawn: Callable[..., Any] | None = None) -> None:
         self._emit = emit
         self._spawn = spawn
         self._lock = threading.Lock()
-        self._session: _Session | None = None
+        self._sessions: dict[str, _Session] = {}
 
     def _spawner(self) -> Callable[..., Any]:
         if self._spawn is not None:
@@ -267,7 +273,7 @@ class TerminalManager:
         return PtyProcess.spawn
 
     def start(self, shell_id: str, cols: Any = 80, rows: Any = 24) -> dict[str, Any]:
-        """Start ``shell_id`` in the user's home folder, replacing any running shell."""
+        """Start ``shell_id`` in the user's home folder, next to the shells already open."""
         argv = shell_command(shell_id)
         cols = _clamp(cols, MIN_COLS, MAX_COLS, "Columns")
         rows = _clamp(rows, MIN_ROWS, MAX_ROWS, "Rows")
@@ -275,22 +281,30 @@ class TerminalManager:
         env = dict(os.environ)
         env.setdefault("TERM", "xterm-256color")
         env["COLORTERM"] = "truecolor"
-        self.stop()
+        with self._lock:
+            if len(self._sessions) >= MAX_SESSIONS:
+                raise TerminalError("too_many", f"Up to {MAX_SESSIONS} shells can be open at once. Close a tab first.")
         try:
             process = spawn(argv, cwd=str(Path.home()), env=env, dimensions=(rows, cols))
         except Exception as exc:  # noqa: BLE001
             raise TerminalError(
                 "start_failed", f"{SHELL_NAMES[shell_id]} could not be started ({type(exc).__name__})."
             ) from exc
-        session = _Session(secrets.token_hex(16), shell_id, process, self._emit)
+        session = _Session(secrets.token_hex(16), shell_id, process, self._emit, self._forget)
         with self._lock:
-            self._session = session
+            self._sessions[session.id] = session
         return {"id": session.id, "shell": shell_id, "name": SHELL_NAMES[shell_id]}
+
+    def _forget(self, session: _Session) -> None:
+        """A shell ended: free its place."""
+        with self._lock:
+            if self._sessions.get(session.id) is session:
+                del self._sessions[session.id]
 
     def _current(self, session_id: Any) -> _Session:
         with self._lock:
-            session = self._session
-        if session is None or not isinstance(session_id, str) or session.id != session_id:
+            session = self._sessions.get(session_id) if isinstance(session_id, str) else None
+        if session is None:
             raise TerminalError("not_running", "That shell is not running any more.")
         return session
 
@@ -312,21 +326,27 @@ class TerminalManager:
         except Exception:  # noqa: BLE001 - resizing a shell that just exited
             pass
 
-    def running(self) -> dict[str, Any] | None:
+    def running(self) -> list[dict[str, Any]]:
+        """The shells still alive, oldest first."""
         with self._lock:
-            session = self._session
-        if session is None:
-            return None
-        try:
-            alive = session.process.isalive()
-        except Exception:  # noqa: BLE001
-            alive = False
-        if not alive:
-            return None
-        return {"id": session.id, "shell": session.shell_id, "name": SHELL_NAMES[session.shell_id]}
+            sessions = list(self._sessions.values())
+        out = []
+        for session in sessions:
+            try:
+                alive = session.process.isalive()
+            except Exception:  # noqa: BLE001
+                alive = False
+            if alive:
+                out.append({"id": session.id, "shell": session.shell_id, "name": SHELL_NAMES[session.shell_id]})
+        return out
 
-    def stop(self) -> None:
+    def stop(self, session_id: Any = None) -> None:
+        """End one shell by id, or every shell when no id is given."""
         with self._lock:
-            session, self._session = self._session, None
-        if session is not None:
+            if session_id is None:
+                ended, self._sessions = list(self._sessions.values()), {}
+            else:
+                one = self._sessions.pop(session_id, None) if isinstance(session_id, str) else None
+                ended = [one] if one is not None else []
+        for session in ended:
             session.stop()
