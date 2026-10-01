@@ -21,6 +21,7 @@ from vaultnotes.config import Config
 from vaultnotes.terminal import (
     MAX_COMMAND_LENGTH,
     MAX_RECENT,
+    MAX_SESSIONS,
     MAX_WRITE_LENGTH,
     TerminalError,
     TerminalManager,
@@ -281,7 +282,57 @@ def test_manager_sends_output_and_checks_the_session(monkeypatch: pytest.MonkeyP
         time.sleep(0.02)
     exits = [data for name, data in events if name == "terminal_exit"]
     assert exits and exits[0]["stopped"] is True
-    assert manager.running() is None
+    assert manager.running() == []
+
+
+def wait_for(check: Any, seconds: float = 2) -> None:
+    deadline = time.time() + seconds
+    while not check() and time.time() < deadline:
+        time.sleep(0.02)
+
+
+def test_manager_keeps_one_shell_per_tab(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("vaultnotes.terminal.shell_command", lambda shell_id: ["fake.exe"])
+    events: list[tuple[str, Any]] = []
+    ptys: list[FakePty] = []
+
+    def spawn(argv: list[str], **kwargs: Any) -> FakePty:
+        ptys.append(FakePty())
+        return ptys[-1]
+
+    manager = TerminalManager(lambda name, data: events.append((name, data)), spawn=spawn)
+    first = manager.start("cmd")
+    second = manager.start("powershell")
+    assert first["id"] != second["id"]
+    assert [row["id"] for row in manager.running()] == [first["id"], second["id"]]
+
+    # Keys reach only the tab they were typed in.
+    manager.write(first["id"], "a")
+    manager.write(second["id"], "b")
+    assert ptys[0].written == ["a"] and ptys[1].written == ["b"]
+
+    # Closing one tab leaves the other running.
+    manager.stop(first["id"])
+    assert [row["id"] for row in manager.running()] == [second["id"]]
+    with pytest.raises(TerminalError):
+        manager.write(first["id"], "a")
+    manager.write(second["id"], "c")
+
+    # A shell that ends by itself frees its place.
+    ptys[1].alive = False
+    wait_for(lambda: any(name == "terminal_exit" and data["id"] == second["id"] for name, data in events))
+    exit_event = next(data for name, data in events if name == "terminal_exit" and data["id"] == second["id"])
+    assert exit_event["stopped"] is False
+    assert manager.running() == []
+
+    # At most MAX_SESSIONS at once.
+    for _ in range(MAX_SESSIONS):
+        manager.start("cmd")
+    with pytest.raises(TerminalError) as exc:
+        manager.start("cmd")
+    assert exc.value.code == "too_many"
+    manager.stop()
+    assert manager.running() == []
 
 
 # ----------------------------------------------------------------------
@@ -304,7 +355,15 @@ def test_real_cmd_round_trip(tmp_path: Path) -> None:
         while "VN-MARKER-OK" not in window.output() and time.time() < deadline:
             time.sleep(0.1)
         assert "VN-MARKER-OK" in window.output()
-        assert api.terminal_state()["running"]["shell"] == "cmd"
+        assert [row["shell"] for row in api.terminal_state()["running"]] == ["cmd"]
+
+        # A second tab is a second CMD; closing it leaves the first one running.
+        second = api.terminal_start("cmd", 100, 30)
+        assert second["ok"] is True and second["id"] != started["id"]
+        assert len(api.terminal_state()["running"]) == 2
+        api.terminal_stop(second["id"])
+        assert [row["id"] for row in api.terminal_state()["running"]] == [started["id"]]
+        assert api.terminal_write(started["id"], "echo still here\r") == {"ok": True}
     finally:
         api.terminal_stop()
         api.close()

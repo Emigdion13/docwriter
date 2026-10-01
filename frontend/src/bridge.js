@@ -312,17 +312,17 @@ function simulateBackup(kind, stepMs = 420) {
   }, stepMs * (total + 1));
 }
 
-/* A pretend shell for the browser preview only: it echoes what is typed and
-   answers every command with one line, so the CMD space can be reviewed
-   without Python.  The desktop app runs a real shell instead. */
+/* Pretend shells for the browser preview only: each echoes what is typed and
+   answers every command with one line, so the CMD space and its tabs can be
+   reviewed without Python.  The desktop app runs real shells instead. */
 const mockTerminal = {
   enabled: false,
   shell: 'cmd',
   recent: ['git status', 'npm run build'],
   favorites: ['python run.py --dev'],
-  session: null,
-  line: ''
+  sessions: new Map() // id -> { shell, line }
 };
+let mockSessionSeq = 0;
 const MOCK_SHELLS = [
   { id: 'cmd', name: 'CMD' },
   { id: 'powershell', name: 'PowerShell' },
@@ -330,33 +330,43 @@ const MOCK_SHELLS = [
 ];
 const MOCK_PROMPTS = { cmd: 'C:\\Users\\you>', powershell: 'PS C:\\Users\\you> ', bash: '$ ' };
 
-function mockTermOut(data) {
-  const id = mockTerminal.session;
-  if (id) setTimeout(() => events.emit('terminal_output', { id, data }), 5);
+function mockTermOut(id, data) {
+  if (mockTerminal.sessions.has(id)) setTimeout(() => events.emit('terminal_output', { id, data }), 5);
+}
+
+function mockTermStop(id) {
+  if (!mockTerminal.sessions.delete(id)) return;
+  setTimeout(() => events.emit('terminal_exit', { id, code: null, stopped: true }), 5);
 }
 
 function mockTermLists() {
   return { recent: [...mockTerminal.recent], favorites: [...mockTerminal.favorites] };
 }
 
-function mockTermType(data) {
-  const prompt = MOCK_PROMPTS[mockTerminal.shell];
+function mockTermType(id, data) {
+  const session = mockTerminal.sessions.get(id);
+  const prompt = MOCK_PROMPTS[session.shell];
   for (const ch of data) {
     if (ch === '\r') {
-      const cmd = mockTerminal.line.trim();
-      mockTerminal.line = '';
-      mockTermOut(cmd ? `\r\n(preview) ${cmd}\r\n${prompt}` : `\r\n${prompt}`);
+      const cmd = session.line.trim();
+      session.line = '';
+      if (cmd === 'exit') {
+        mockTerminal.sessions.delete(id);
+        setTimeout(() => events.emit('terminal_exit', { id, code: 0, stopped: false }), 5);
+        return;
+      }
+      mockTermOut(id, cmd ? `\r\n(preview) ${cmd}\r\n${prompt}` : `\r\n${prompt}`);
     } else if (ch === '\x7f') {
-      if (mockTerminal.line) {
-        mockTerminal.line = mockTerminal.line.slice(0, -1);
-        mockTermOut('\b \b');
+      if (session.line) {
+        session.line = session.line.slice(0, -1);
+        mockTermOut(id, '\b \b');
       }
     } else if (ch === '\x1b' || ch === '\x15') {
-      mockTerminal.line = '';
-      mockTermOut(`\r\x1b[K${prompt}`);
+      session.line = '';
+      mockTermOut(id, `\r\x1b[K${prompt}`);
     } else if (ch >= ' ') {
-      mockTerminal.line += ch;
-      mockTermOut(ch);
+      session.line += ch;
+      mockTermOut(id, ch);
     }
   }
 }
@@ -809,7 +819,7 @@ export const bridge = {
       enabled: mockTerminal.enabled,
       shells: MOCK_SHELLS,
       shell: mockTerminal.shell,
-      running: null,
+      running: [...mockTerminal.sessions].map(([id, s]) => ({ id, shell: s.shell })),
       ...mockTermLists()
     };
   },
@@ -826,7 +836,7 @@ export const bridge = {
     const api = await waitForBridge();
     if (api?.terminal_disable) return await api.terminal_disable();
     mockTerminal.enabled = false;
-    mockTerminal.session = null;
+    for (const id of [...mockTerminal.sessions.keys()]) mockTermStop(id);
     return { ok: true, enabled: false };
   },
 
@@ -834,19 +844,20 @@ export const bridge = {
     const api = await waitForBridge();
     if (api?.terminal_start) return await api.terminal_start(shell_id, cols, rows);
     if (!mockTerminal.enabled) return { error: 'terminal_off', message: 'The CMD space is off. Turn it on first.' };
+    if (mockTerminal.sessions.size >= 8) return { error: 'too_many', message: 'Up to 8 shells can be open at once. Close a tab first.' };
     const shell = MOCK_SHELLS.find(s => s.id === shell_id) || MOCK_SHELLS[0];
+    const id = `mock-${++mockSessionSeq}`;
     mockTerminal.shell = shell.id;
-    mockTerminal.session = `mock-${Date.now()}`;
-    mockTerminal.line = '';
-    mockTermOut(`Browser preview: a pretend ${shell.name}. The app runs the real one.\r\n\r\n${MOCK_PROMPTS[shell.id]}`);
-    return { ok: true, id: mockTerminal.session, shell: shell.id, name: shell.name };
+    mockTerminal.sessions.set(id, { shell: shell.id, line: '' });
+    mockTermOut(id, `Browser preview: a pretend ${shell.name} (shell ${mockSessionSeq}). The app runs the real one.\r\n\r\n${MOCK_PROMPTS[shell.id]}`);
+    return { ok: true, id, shell: shell.id, name: shell.name };
   },
 
   async terminal_write(session_id, data) {
     const api = await waitForBridge();
     if (api?.terminal_write) return await api.terminal_write(session_id, data);
-    if (session_id !== mockTerminal.session) return { error: 'not_running', message: 'That shell is not running any more.' };
-    mockTermType(data);
+    if (!mockTerminal.sessions.has(session_id)) return { error: 'not_running', message: 'That shell is not running any more.' };
+    mockTermType(session_id, data);
     return { ok: true };
   },
 
@@ -856,10 +867,11 @@ export const bridge = {
     return { ok: true };
   },
 
-  async terminal_stop() {
+  /** Ends one tab's shell, or every shell when no id is given. */
+  async terminal_stop(session_id = null) {
     const api = await waitForBridge();
-    if (api?.terminal_stop) return await api.terminal_stop();
-    mockTerminal.session = null;
+    if (api?.terminal_stop) return await api.terminal_stop(session_id);
+    for (const id of session_id == null ? [...mockTerminal.sessions.keys()] : [session_id]) mockTermStop(id);
     return { ok: true };
   },
 

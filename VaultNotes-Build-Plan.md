@@ -309,7 +309,7 @@ The key that unlocks the vault key (KEK) is derived as `Scrypt(salt=salt, length
 
 - `key_path` only remembers *where* the key file is. The key itself is never saved here. If `key_path` is empty, the app asks for the file each time.
 - `theme` is `nebula`, `synthwave` or `arctic`. `effects` is `full`, `lite` or `off` (section 6.7).
-- `terminal` is the CMD space (extra): `shell` is `cmd`, `powershell` or `bash`; `recent` (at most 50, newest first) and `favorites` (at most 100) are one-line commands. Only Python writes this block, through the `terminal_*` Bridge calls; `update_settings` refuses it (security rule 13).
+- `terminal` is the CMD space (extra): `shell` is `cmd`, `powershell` or `bash` (the one a new tab opens with; up to 8 tabs, each its own shell, are open at once and never saved); `recent` (at most 50, newest first) and `favorites` (at most 100) are one-line commands. Only Python writes this block, through the `terminal_*` Bridge calls; `update_settings` refuses it (security rule 13).
 
 ### 4.7 Links between notes (Obsidian-style)
 

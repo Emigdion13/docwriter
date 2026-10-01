@@ -215,7 +215,7 @@ export function createSettingsOverlay({
     const t = getTerminal?.() || { enabled: false };
     overlay.querySelector('#set-term-state').classList.toggle('on', !!t.enabled);
     overlay.querySelector('#set-term-text').textContent = t.enabled
-      ? `On · ${t.shellName}${t.running ? ' running' : ''}`
+      ? `On · ${t.tabs > 1 ? `${t.tabs} shells open` : `${t.shellName}${t.running ? ' running' : ''}`}`
       : 'Off';
     overlay.querySelector('#set-term-toggle span').textContent = t.enabled ? 'Turn off' : 'Turn on…';
   };

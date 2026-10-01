@@ -2561,8 +2561,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 12px 18px 12px 28px;
-  border-bottom: 1px solid var(--glass-border);
+  padding: 12px 18px 4px 28px;
 }
 
 .term-actions {
@@ -2582,6 +2581,162 @@
   padding: 0 10px;
 }
 
+/* One tab per shell, between the header and the screen. */
+.term-tabs {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  padding: 8px 18px 0 22px;
+  border-bottom: 1px solid var(--glass-border);
+}
+
+.term-tablist {
+  display: flex;
+  gap: 2px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.term-tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  max-width: 200px;
+  height: 32px;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 10px 10px 0 0;
+  color: var(--muted);
+  transition: background .15s, color .15s;
+}
+
+.term-tab:hover {
+  background: var(--glass);
+  color: var(--text);
+}
+
+.term-tab.on {
+  color: var(--text);
+  background: color-mix(in srgb, var(--code-bg) 70%, transparent);
+  border-color: var(--glass-border);
+}
+
+/* The open tab's accent line, and it covers the strip's bottom border. */
+.term-tab.on::before {
+  content: "";
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  top: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent);
+}
+
+.term-tab.on::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  background: color-mix(in srgb, var(--code-bg) 70%, transparent);
+}
+
+.term-tab-pick {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  height: 100%;
+  padding: 0 4px 0 12px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: 500 12px/1 var(--font-mono);
+  cursor: pointer;
+  border-radius: 10px 0 0 0;
+}
+
+.term-tab-pick svg {
+  flex-shrink: 0;
+  opacity: .7;
+}
+
+.term-tab.on .term-tab-pick svg {
+  color: var(--accent);
+  opacity: 1;
+}
+
+.term-tab-pick .nm {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.term-tab.ended .term-tab-pick .nm {
+  text-decoration: line-through;
+  color: var(--faint);
+}
+
+/* New output in a tab that is not showing. */
+.term-tab-pick .dot {
+  display: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+}
+
+.term-tab.unread .term-tab-pick .dot {
+  display: block;
+}
+
+.term-tab-x {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin-right: 6px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--faint);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .15s, background .15s, color .15s;
+}
+
+.term-tab:hover .term-tab-x,
+.term-tab.on .term-tab-x,
+.term-tab-x:focus-visible {
+  opacity: 1;
+}
+
+.term-tab-x:hover {
+  color: var(--text);
+  background: var(--glass-strong);
+}
+
+.term-tabs .term-new {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  margin-bottom: 3px;
+  border-color: transparent;
+  background: none;
+  color: var(--muted);
+}
+
+.term-tabs .term-new:hover:not(:disabled) {
+  color: var(--accent);
+}
+
 .term-body {
   position: relative;
   flex: 1;
@@ -2591,9 +2746,35 @@
   border-radius: 0 0 var(--r-panel) var(--r-panel);
 }
 
+/* Every tab's screen is stacked here; only the open one shows. */
 .term-host {
   position: absolute;
   inset: 12px 6px 8px 22px;
+  display: none;
+}
+
+.term-host.on {
+  display: block;
+}
+
+.term-empty {
+  display: none;
+}
+
+.ws-terminal.no-tabs .term-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.term-empty p {
+  margin: 0;
 }
 
 .term-host .xterm {
@@ -2609,6 +2790,7 @@
 }
 
 .ws-terminal.is-off .term-body,
+.ws-terminal.is-off .term-tabs,
 .ws-terminal.is-off .term-actions {
   display: none;
 }
