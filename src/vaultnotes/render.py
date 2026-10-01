@@ -235,3 +235,45 @@ def render_markdown(
 
 # Alias matching the Bridge API name (section 4.8).
 render_preview = render_markdown
+
+
+#: The ``[ ]`` / ``[x]`` of a task line, after any ``>`` quote marks and the
+#: list marker.  Group 2 is the one character that is flipped.
+_TASK_MARK_RE = re.compile(r"^((?:\s*>)*\s*(?:[-*+]|\d+[.)])\s+\[)([ xX])(\])")
+
+_LINE_RE = re.compile(r"[^\n]*\n|[^\n]+")
+
+
+def toggle_task(body: str, index: int) -> str | None:
+    """Flip the ``index``-th checklist item of a note and return the new text.
+
+    Items are counted in the order the preview draws them, so the number of a
+    clicked checkbox is the number to pass here.  The count comes from the same
+    Markdown parse the preview uses, so a ``- [ ]`` inside a code block is not
+    an item, and nested and quoted items are.  Front matter is left untouched.
+    Returns ``None`` when the note has no such item.
+    """
+    if not isinstance(body, str) or isinstance(index, bool) or not isinstance(index, int) or index < 0:
+        return None
+
+    text = strip_front_matter(body)
+    head = body[: len(body) - len(text)]
+    lines = _LINE_RE.findall(text)
+
+    seen = -1
+    for token in get_renderer().parse(text):
+        if token.type != "list_item_open" or "task-list-item" not in (token.attrGet("class") or ""):
+            continue
+        seen += 1
+        if seen != index:
+            continue
+        if not token.map or token.map[0] >= len(lines):
+            return None
+        line = lines[token.map[0]]
+        match = _TASK_MARK_RE.match(line)
+        if match is None:
+            return None
+        flipped = " " if match.group(2) in "xX" else "x"
+        lines[token.map[0]] = line[: match.start(2)] + flipped + line[match.end(2) :]
+        return head + "".join(lines)
+    return None

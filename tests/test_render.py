@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from vaultnotes.render import render_markdown, render_preview
+from vaultnotes.render import render_markdown, render_preview, toggle_task
 
 
 def test_render_tables() -> None:
@@ -202,3 +202,41 @@ def test_a_vault_is_never_a_link_target_even_if_offered() -> None:
     assert "[[Encrypted:Bank]]" in html
     assert "[[Personal:Codes]]" in html
     assert "#vn-" not in html
+
+
+# ----------------------------------------------------------------------
+# Clickable checklists: toggle_task flips the n-th checkbox the preview draws
+# ----------------------------------------------------------------------
+def test_toggle_task_checks_and_unchecks() -> None:
+    body = "- [x] a\n- [ ] b\n"
+    assert toggle_task(body, 1) == "- [x] a\n- [x] b\n"
+    assert toggle_task(body, 0) == "- [ ] a\n- [ ] b\n"
+    assert toggle_task("- [X] a\n", 0) == "- [ ] a\n"
+
+
+def test_toggle_task_counts_in_preview_order_with_nested_quoted_and_numbered() -> None:
+    body = "- [ ] a\n  - [ ] nested\n\n> - [ ] quoted\n\n1. [ ] numbered\n"
+    html = render_markdown(body)
+    assert html.count("task-list-item-checkbox") == 4
+    assert toggle_task(body, 1) == "- [ ] a\n  - [x] nested\n\n> - [ ] quoted\n\n1. [ ] numbered\n"
+    assert toggle_task(body, 2) == "- [ ] a\n  - [ ] nested\n\n> - [x] quoted\n\n1. [ ] numbered\n"
+    assert toggle_task(body, 3) == "- [ ] a\n  - [ ] nested\n\n> - [ ] quoted\n\n1. [x] numbered\n"
+
+
+def test_toggle_task_skips_code_blocks_and_plain_brackets() -> None:
+    body = "```\n- [ ] in code\n```\n\nnot a task [ ] here\n\n- [ ] real\n"
+    assert toggle_task(body, 0) == "```\n- [ ] in code\n```\n\nnot a task [ ] here\n\n- [x] real\n"
+    assert toggle_task(body, 1) is None
+
+
+def test_toggle_task_leaves_front_matter_and_line_endings_alone() -> None:
+    body = "---\nimportant: true\ntags: [a]\n---\r\n- [ ] one\r\n- [ ] two\r\n"
+    assert toggle_task(body, 1) == "---\nimportant: true\ntags: [a]\n---\r\n- [ ] one\r\n- [x] two\r\n"
+
+
+def test_toggle_task_rejects_a_missing_item() -> None:
+    assert toggle_task("- [ ] only\n", 1) is None
+    assert toggle_task("- [ ] only\n", -1) is None
+    assert toggle_task("- [ ] only\n", True) is None  # type: ignore[arg-type]
+    assert toggle_task("no list at all", 0) is None
+    assert toggle_task("", 0) is None

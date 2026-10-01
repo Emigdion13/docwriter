@@ -15,8 +15,19 @@ let linkHandlers = {
   onOpenNoteByTitle: null,
   onCreateNotePrompt: null,
   onMissingNoteInOtherSpace: null,
-  onExternalLink: null
+  onExternalLink: null,
+  onToggleTask: null
 };
+
+/**
+ * The checkboxes a click can flip: the note's own, in the order the preview
+ * draws them.  The ones inside an embedded note belong to another note, so they
+ * are neither counted nor unlocked.
+ */
+function ownCheckboxes() {
+  return [...previewContainer.querySelectorAll('input.task-list-item-checkbox')]
+    .filter(box => !box.closest('.vn-embed'));
+}
 
 /**
  * Text of one `#vn-...` address part, tolerant of a malformed escape.
@@ -57,6 +68,20 @@ export function initPreview(container, handlers = {}) {
   linkHandlers = { ...linkHandlers, ...handlers };
 
   previewContainer.addEventListener('click', (e) => {
+    // A checklist box: tell the app which one, and it rewrites the note's text.
+    // The browser flips the box at once; the re-render that follows confirms it
+    // (or puts it back when the note could not be changed).
+    const box = e.target.closest?.('input.task-list-item-checkbox');
+    if (box) {
+      const index = ownCheckboxes().indexOf(box);
+      if (index === -1 || box.disabled) {
+        e.preventDefault();
+        return;
+      }
+      linkHandlers.onToggleTask?.(index);
+      return;
+    }
+
     // The title of an embedded note is a link to that note (M10).
     const cardTitle = e.target.closest('.vn-embed-title');
     if (cardTitle) {
@@ -113,6 +138,11 @@ export async function renderPreview(spaceId, body) {
   });
 
   previewContainer.innerHTML = cleanHtml;
+
+  // The renderer draws every box locked; the note's own can be clicked.
+  if (linkHandlers.onToggleTask) {
+    for (const box of ownCheckboxes()) box.disabled = false;
+  }
 }
 
 /**

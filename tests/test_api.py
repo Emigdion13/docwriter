@@ -107,6 +107,25 @@ def test_api_render_preview(api: Api) -> None:
     assert "<h1>Title</h1>" in html
 
 
+def test_api_toggle_task_returns_the_new_text_without_saving(api: Api) -> None:
+    api.create_note("plain", "Todo")
+    body = "- [ ] first\n- [x] second\n"
+    api.save_note("plain", "Todo", body)
+
+    result = api.toggle_task("plain", body, 0)
+    assert result == {"ok": True, "body": "- [x] first\n- [x] second\n"}
+    # The editor saves it, so the stored note is still the old text.
+    assert api.open_note("plain", "Todo")["body"] == body
+
+
+def test_api_toggle_task_errors(api: Api) -> None:
+    body = "- [ ] a\n"
+    assert api.toggle_task("plain", body, 5)["error"] == "not_found"
+    assert api.toggle_task("plain", body, -1)["error"] == "invalid_input"
+    assert api.toggle_task("plain", body, True)["error"] == "invalid_input"
+    assert api.toggle_task("nope", body, 0)["error"] == "invalid_space"
+
+
 def test_api_open_external_security(api: Api) -> None:
     # Safe schemes
     assert api.open_external("https://example.com") == {"ok": True}
@@ -522,6 +541,7 @@ BRIDGE_SURFACE = [
     "list_trash",
     "move_note",
     "render_preview",
+    "toggle_task",
     "list_titles",
     # M10 extras: opening a note from a clicked link, and the graph view data.
     "open_note_by_title",

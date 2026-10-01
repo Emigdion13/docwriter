@@ -59,7 +59,7 @@ from vaultnotes.events import emit_event
 from vaultnotes.frontmatter import is_important, set_important, set_tags
 from vaultnotes.links import LinkIndex, count_links, rename_links
 from vaultnotes.models import Note
-from vaultnotes.render import render_preview
+from vaultnotes.render import render_preview, toggle_task
 from vaultnotes.tags import (
     MAX_TAGS_PER_NOTE,
     clean_tag,
@@ -1492,6 +1492,24 @@ class Api:
             read_note=lambda title: self._note_body_by_title(space, title),
             spaces={"plain": self._titles_for("plain")},
         )
+
+    @bridge_method
+    def toggle_task(self, space_id: str, body: str, index: int) -> dict[str, Any]:
+        """Flip one checklist item of ``body`` (the note as the editor holds it).
+
+        ``index`` is the checkbox's place among the preview's checkboxes.  The
+        new text is returned, not saved: the editor puts it in place and its
+        normal auto-save writes it, so Plain, Personal and Encrypted notes all
+        go through their usual save path.
+        """
+        self._known_space(space_id)
+        text_body = self._body_text(body)
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+            raise BridgeError("invalid_input", "Checklist item must be a number")
+        changed = toggle_task(text_body, index)
+        if changed is None:
+            raise BridgeError("not_found", "That checklist item is no longer in the note.")
+        return {"ok": True, "body": changed}
 
     @bridge_method
     def list_titles(self, space_id: str) -> list[str]:

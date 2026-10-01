@@ -690,6 +690,24 @@ export const bridge = {
     return mockPreview(space_id, body);
   },
 
+  /* Flip the index-th checklist item of a note's text.  The engine counts items
+     the way the preview does; the browser stand-in only skips code fences. */
+  async toggle_task(space_id, body, index) {
+    const api = await waitForBridge();
+    if (api?.toggle_task) return await api.toggle_task(space_id, body, index);
+    const lines = String(body ?? '').split('\n');
+    let fenced = false;
+    let seen = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (/^\s*(```|~~~)/.test(lines[i])) { fenced = !fenced; continue; }
+      const m = !fenced && /^((?:\s*>)*\s*(?:[-*+]|\d+[.)])\s+\[)([ xX])(\]\s)/.exec(lines[i]);
+      if (!m || ++seen !== index) continue;
+      lines[i] = lines[i].slice(0, m[1].length) + (m[2] === ' ' ? 'x' : ' ') + lines[i].slice(m[1].length + 1);
+      return { ok: true, body: lines.join('\n') };
+    }
+    return { error: 'not_found', message: 'That checklist item is no longer in the note.' };
+  },
+
   /* Resolve a clicked [[link]] title into a note (M10).  The engine does the
      matching, so case, ".md" and a #heading behave exactly as in the preview. */
   async open_note_by_title(space_id, title, heading = '') {
