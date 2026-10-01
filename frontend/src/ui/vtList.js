@@ -14,7 +14,7 @@ function when(stamp) {
   return date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
-export function createVtList({ onOpen, onNewQuery, onRename, onDelete }) {
+export function createVtList({ onOpen, onNewQuery, onPush, onRename, onDelete }) {
   const section = document.createElement('section');
   section.className = 'cmdlist vtlist glass';
   section.setAttribute('aria-label', 'Virtual tables');
@@ -59,7 +59,8 @@ export function createVtList({ onOpen, onNewQuery, onRename, onDelete }) {
     const row = e.target.closest('.vt-row');
     if (!row) return;
     const name = row.dataset.name;
-    if (e.target.closest('.vt-rename')) onRename?.(name);
+    if (e.target.closest('.vt-push')) onPush?.(name);
+    else if (e.target.closest('.vt-rename')) onRename?.(name);
     else if (e.target.closest('.vt-x')) onDelete?.(name);
     else if (e.target.closest('.vt-open')) onOpen?.(name);
   });
@@ -95,7 +96,12 @@ export function createVtList({ onOpen, onNewQuery, onRename, onDelete }) {
       `Columns: ${table.columns.join(', ')}`
     ].filter(Boolean).join('\n');
 
-    el.append(open, iconButton('vt-rename', 'edit', `Rename ${table.name}`), iconButton('vt-x', 'x', `Delete ${table.name}`));
+    el.append(
+      open,
+      iconButton('vt-push', 'upload', `Use ${table.name} in the open SQL tab (as #${table.name})`),
+      iconButton('vt-rename', 'edit', `Rename ${table.name}`),
+      iconButton('vt-x', 'x', `Delete ${table.name}`)
+    );
     return el;
   }
 

@@ -123,6 +123,84 @@ export function promptText({ title, message = '', value = '', placeholder = '', 
 }
 
 /**
+ * Asks to pick one item from a list; a click picks it.  Resolves its id, or null.
+ * @param {object} opts - { title, message, items: [{ id, label, sub, icon }], iconName, colorVar, empty }
+ * @returns {Promise<string|null>}
+ */
+export function pickOne({ title, message = '', items = [], colorVar = '', empty = 'Nothing to pick.' }) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    if (colorVar) overlay.style.setProperty('--c', `var(${colorVar})`);
+
+    overlay.innerHTML = `
+      <div class="dialog move-dialog pick-dialog">
+        <h3></h3>
+        <p class="dlg-sub"></p>
+        <div class="move-targets pick-items" role="listbox"></div>
+        <div class="dlg-actions">
+          <button class="btn" type="button" data-x="cancel">Cancel</button>
+        </div>
+      </div>
+    `;
+    overlay.querySelector('h3').textContent = title;
+    overlay.querySelector('.dlg-sub').textContent = message;
+    const list = overlay.querySelector('.pick-items');
+    if (!items.length) {
+      const none = document.createElement('p');
+      none.className = 'pick-empty';
+      none.textContent = empty;
+      list.appendChild(none);
+    }
+    for (const item of items) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'move-target';
+      button.setAttribute('role', 'option');
+      button.dataset.id = item.id;
+      button.innerHTML = `<span class="ic">${icon(item.icon || 'table', 16)}</span><span class="txt"><span class="nm"></span><span class="sub"></span></span>`;
+      button.querySelector('.nm').textContent = item.label; // text, never HTML
+      button.querySelector('.sub').textContent = item.sub || '';
+      list.appendChild(button);
+    }
+
+    const done = (result) => {
+      overlay.classList.remove('open');
+      setTimeout(() => overlay.remove(), 260);
+      resolve(result);
+    };
+
+    list.addEventListener('click', (e) => {
+      const button = e.target.closest('.move-target');
+      if (button) done(button.dataset.id);
+    });
+    list.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+      e.preventDefault();
+      const buttons = [...list.querySelectorAll('.move-target')];
+      const i = buttons.indexOf(document.activeElement);
+      buttons[(i + (e.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+    });
+    overlay.querySelector('[data-x="cancel"]').onclick = () => done(null);
+    overlay.addEventListener('mousedown', (e) => {
+      if (e.target === overlay) done(null);
+    });
+    overlay.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        done(null);
+      }
+    });
+
+    document.getElementById('overlays-root')?.appendChild(overlay);
+    requestAnimationFrame(() => overlay.classList.add('open'));
+    setTimeout(() => (list.querySelector('.move-target') || overlay.querySelector('[data-x="cancel"]'))?.focus(), 60);
+  });
+}
+
+/**
  * Creates the Move-note dialog. open() resolves the chosen target space id
  * (or null when cancelled).
  */

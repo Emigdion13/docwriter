@@ -579,6 +579,7 @@ BRIDGE_SURFACE = [
     "sql_delete_query",
     "sql_vt_list",
     "sql_save_vt",
+    "sql_push_vt",
     "sql_rename_vt",
     "sql_delete_vt",
     "sql_test_connection",

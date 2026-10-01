@@ -80,7 +80,7 @@ from vaultnotes.sql import (
     public_connection,
 )
 from vaultnotes.storage.atomic import atomic_write
-from vaultnotes.vt import VT_CONNECTION_ID, VT_NAME, VtStore, clean_table_name
+from vaultnotes.vt import VT_CONNECTION_ID, VT_NAME, VtStore, clean_table_name, mssql_converter, push_plan
 from vaultnotes.terminal import (
     MAX_FAVORITES,
     MAX_RECENT,
@@ -2954,6 +2954,45 @@ class Api:
                 source=source, query=origin["query"], replace=replace is True,
             )
         return {"ok": True, "table": saved, "tables": self.vt_store.list()}
+
+    @bridge_method
+    def sql_push_vt(self, session_id: str, name: str) -> dict[str, Any]:
+        """Copy a virtual table into a tab's connection as a temporary table.
+
+        On SQL Server it becomes ``#name``, on SQLite ``temp.name``, so the
+        tab's queries can join it with that database's own tables for as long
+        as the tab stays connected.  Pushing again replaces it.  Progress comes
+        as ``sql_push_progress`` events; Stop (``sql_cancel``) ends it.
+        """
+        self._require_sql()
+        tab = self.sql.describe(session_id)
+        if tab["connection"] == VT_CONNECTION_ID:
+            raise BridgeError("invalid_input", "This tab is on the virtual tables already: use them by name.")
+        table = clean_table_name(name)
+        last = [0.0]
+
+        def progress(sent: int) -> None:
+            now = time.monotonic()
+            if now - last[0] >= 0.25:
+                last[0] = now
+                self._emit("sql_push_progress", {"session": session_id, "table": table, "rows": sent})
+
+        started = time.monotonic()
+        # Reading and sending a big table takes a while; notes keep saving meanwhile.
+        with self._calls.released():
+            plan = push_plan(self.vt_store, table, tab["engine"])
+            converters = [mssql_converter(t) for t in plan["types"]] if tab["engine"] == "mssql" else None
+            pushed = self.sql.push(
+                session_id, plan["table"], plan["columns"], plan["types"],
+                self.vt_store.rows(plan["table"]), converters, progress,
+            )
+        return {
+            "ok": True,
+            **pushed,
+            "table": plan["table"],
+            "columns": [{"name": c, "type": t} for c, t in zip(plan["columns"], plan["types"])],
+            "elapsedMs": int((time.monotonic() - started) * 1000),
+        }
 
     @bridge_method
     def sql_rename_vt(self, name: str, new_name: str) -> dict[str, Any]:

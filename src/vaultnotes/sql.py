@@ -25,7 +25,7 @@ import time
 import uuid
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 #: Engine ids in the order the page offers them.
 ENGINES = ("mssql", "sqlite")
@@ -779,6 +779,10 @@ class SqlManager:
             raise SqlError("not_open", "That query tab is not connected any more.")
         return session
 
+    def describe(self, session_id: Any) -> dict[str, Any]:
+        """One tab's connection: its id, name and engine."""
+        return self._session(session_id).describe()
+
     def sessions(self) -> list[dict[str, Any]]:
         with self._lock:
             return [session.describe() for session in self._sessions.values()]
@@ -941,6 +945,128 @@ class SqlManager:
             },
         )
 
+    # -- pushing a virtual table in ------------------------------------
+    def push(
+        self,
+        session_id: Any,
+        table: str,
+        columns: list[str],
+        types: list[str],
+        rows: Iterable[tuple[Any, ...]],
+        converters: list[Callable[[Any], Any]] | None = None,
+        on_progress: Callable[[int], None] | None = None,
+    ) -> dict[str, Any]:
+        """Copy ``rows`` into a temporary table on a tab's own connection.
+
+        On SQL Server it is ``#table``, on SQLite ``temp.table``: either way it
+        lasts as long as the tab stays connected, so the tab's queries can join
+        it with the server's tables.  A table of that name is replaced.  Slow
+        for a big table over a network, so call it outside the call lock; Stop
+        (:meth:`cancel`) ends it between batches.
+        """
+        session = self._session(session_id)
+        with session.lock:
+            if session.run_id is not None:
+                raise SqlError("busy", "This tab is still running a query. Wait for it, or cancel it.")
+            session.run_id = "push"
+            session.cancelled.clear()
+        convert = converters or [lambda v: v for _ in columns]
+        sent = 0
+        cursor = None
+        try:
+            cursor = session.conn.cursor()
+            session.cursor = cursor
+            if session.engine == "mssql":
+                target = f"#{table}"
+                quoted = _bracket(target)
+                cursor.execute(f"IF OBJECT_ID(N'tempdb..{target}') IS NOT NULL DROP TABLE {quoted}")
+                cursor.execute(
+                    f"CREATE TABLE {quoted} ({', '.join(f'{_bracket(c)} {t} NULL' for c, t in zip(columns, types))})"
+                )
+                # NULL sent for a binary column arrives as varchar, which SQL
+                # Server will not turn into varbinary by itself.
+                slot = "(" + ", ".join("CAST(? AS VARBINARY(MAX))" if t.startswith("VARBINARY") else "?" for t in types) + ")"
+                per = max(1, min(1000, 2000 // max(1, len(columns))))  # 2100 parameters at most
+                batch: list[Any] = []
+                count = 0
+
+                def flush() -> None:
+                    nonlocal batch, count, sent
+                    if count:
+                        cursor.execute(f"INSERT INTO {quoted} VALUES {', '.join([slot] * count)}", batch)
+                        sent += count
+                        batch, count = [], 0
+                        if on_progress:
+                            on_progress(sent)
+
+                for row in rows:
+                    batch.extend(fn(value) for fn, value in zip(convert, row))
+                    count += 1
+                    if count >= per:
+                        flush()
+                        if session.cancelled.is_set():
+                            raise SqlError("cancelled", "Stopped.")
+                flush()
+            else:
+                target = f"temp.{table}"
+                cursor.execute(f"DROP TABLE IF EXISTS temp.{_quote(table)}")
+                cursor.execute(
+                    f"CREATE TEMP TABLE {_quote(table)} ({', '.join(f'{_quote(c)} {t}'.rstrip() for c, t in zip(columns, types))})"
+                )
+                insert = f"INSERT INTO temp.{_quote(table)} VALUES ({', '.join('?' for _ in columns)})"
+                cursor.execute("BEGIN")
+                chunk: list[tuple[Any, ...]] = []
+                for row in rows:
+                    chunk.append(tuple(fn(value) for fn, value in zip(convert, row)))
+                    if len(chunk) >= FETCH_BATCH:
+                        cursor.executemany(insert, chunk)
+                        sent += len(chunk)
+                        chunk = []
+                        if on_progress:
+                            on_progress(sent)
+                        if session.cancelled.is_set():
+                            raise SqlError("cancelled", "Stopped.")
+                if chunk:
+                    cursor.executemany(insert, chunk)
+                    sent += len(chunk)
+                cursor.execute("COMMIT")
+        except Exception as exc:  # noqa: BLE001 - reported as one message
+            self._drop_quietly(session, cursor, table)
+            if isinstance(exc, SqlError):
+                raise
+            if session.cancelled.is_set():
+                raise SqlError("cancelled", "Stopped.") from exc
+            raise SqlError("push_failed", clean_driver_message(exc)) from exc
+        finally:
+            session.cursor = None
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            with session.lock:
+                session.run_id = None
+            if session.closed:
+                _close_quietly(session.conn)
+        return {"target": target, "rows": sent}
+
+    @staticmethod
+    def _drop_quietly(session: _Session, cursor: Any, table: str) -> None:
+        """A table half filled is worse than none: drop it."""
+        if cursor is None:
+            return
+        try:
+            if session.engine == "mssql":
+                cursor.execute(f"IF OBJECT_ID(N'tempdb..#{table}') IS NOT NULL DROP TABLE {_bracket('#' + table)}")
+            else:
+                try:
+                    cursor.execute("ROLLBACK")
+                except Exception:  # noqa: BLE001 - no transaction open
+                    pass
+                cursor.execute(f"DROP TABLE IF EXISTS temp.{_quote(table)}")
+        except Exception:  # noqa: BLE001
+            pass
+
     # -- reading results -----------------------------------------------
     def _result(self, session_id: Any, index: Any) -> _Result:
         session = self._session(session_id)
@@ -977,6 +1103,16 @@ class SqlManager:
         lines = ["\t".join(result.names)] if with_header else []
         lines.extend("\t".join(field(value) for value in row) for row in result.rows)
         return "\r\n".join(lines)
+
+
+def _bracket(identifier: str) -> str:
+    """A SQL Server identifier in brackets, ``]`` doubled."""
+    return "[" + identifier.replace("]", "]]") + "]"
+
+
+def _quote(identifier: str) -> str:
+    """A SQLite identifier in double quotes."""
+    return '"' + identifier.replace('"', '""') + '"'
 
 
 def _close_quietly(conn: Any) -> None:

@@ -742,6 +742,16 @@ async function newVtQuery() {
   await vtView.newTab('vt');
 }
 
+/* Copies a virtual table into the open SQL tab's connection (#name), and shows that tab. */
+async function pushVirtualTable(name) {
+  if (!sqlView.getState().active) {
+    toast('Open a query tab in SQL first: the table is copied into its connection.', { icon: 'table' });
+    return;
+  }
+  if (!state.sqlMode) await enterSqlMode();
+  await sqlView.pushVt(name);
+}
+
 async function renameVirtualTable(name) {
   const next = await promptText({
     title: `Rename ${name}`,
@@ -1911,6 +1921,13 @@ async function getPaletteCommands() {
         run: () => openVirtualTable(t.name)
       })),
       { label: 'SQL - VT: New query', icon: 'plus', colorVar: '--vt', run: () => newVtQuery() },
+      ...(sq.active ? vq.tables.map(t => ({
+        label: `Use ${t.name} in the SQL tab`,
+        sub: `as ${sq.active.engine === 'sqlite' ? `temp.${t.name}` : `#${t.name}`} on ${sq.active.connectionName}`,
+        icon: 'upload',
+        colorVar: '--vt',
+        run: () => pushVirtualTable(t.name)
+      })) : []),
       ...(state.vtMode && vq.active ? [
         vq.active.running
           ? { label: 'SQL - VT: Stop the query', sub: vq.active.name, icon: 'stop', colorVar: '--vt', run: () => vtView.cancel() }
@@ -2475,6 +2492,7 @@ async function init() {
   vtList = createVtList({
     onOpen: (name) => openVirtualTable(name),
     onNewQuery: () => newVtQuery(),
+    onPush: (name) => pushVirtualTable(name),
     onRename: (name) => renameVirtualTable(name),
     onDelete: (name) => deleteVirtualTable(name)
   });

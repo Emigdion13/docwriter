@@ -540,7 +540,7 @@ def test_no_sql_endpoint_raises_while_on(tmp_path: Path) -> None:
     api, _ = turned_on(tmp_path)
     api.window = None  # no native dialogs in a sweep
     names = [name for name in dir(Api) if name.startswith("sql_")]
-    assert len(names) == 21
+    assert len(names) == 22
     for name in names:
         method = getattr(api, name)
         arity = len(inspect.signature(method).parameters)
