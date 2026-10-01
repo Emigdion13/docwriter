@@ -406,6 +406,15 @@ databases, in tabs, with the results in a grid.
   ■ stops a running query. SQL Server scripts may use `GO` lines between batches
   (`GO 5` runs a batch five times). Statements run one by one in autocommit mode, like
   SSMS.
+- **Saved queries** sit under their connection in the list. **Ctrl+S** in a tab saves its
+  SQL on the tab's connection (it asks for a name the first time); **Ctrl+Shift+S**
+  saves a copy. **Click a saved query to open it on its connection and run it there**,
+  in one go; the pencil opens it without running, ✕ deletes it. A tab showing a saved
+  query is named after it, and a dot means its SQL (or connection) differs from what is
+  saved: Ctrl+S saves it back, and closing the tab asks first. Moving the tab to another
+  connection and saving moves the query too. The palette has *Run "…"* for each one.
+  Saved queries are kept in `sql.db` with the connections; deleting a connection
+  deletes its queries.
 - **Results:** each result set gets its own tab under the editor, and *Messages* shows
   rows affected, `PRINT` output and errors. The grid has no row limit: Python keeps the
   rows and the grid loads them as you scroll. Click a cell and press Ctrl+C to copy it;

@@ -74,6 +74,8 @@ from vaultnotes.sql import (
     SqlPasswords,
     SqlStore,
     clean_profile,
+    clean_query_name,
+    clean_query_text,
     mssql_driver,
     public_connection,
 )
@@ -2692,6 +2694,7 @@ class Api:
             "enabled": enabled,
             "driver": mssql_driver(),
             "connections": self._sql_connections() if enabled else [],
+            "queries": self.sql_store.list_queries() if enabled else [],
             "sessions": self.sql.sessions() if enabled else [],
         }
 
@@ -2787,12 +2790,45 @@ class Api:
 
     @bridge_method
     def sql_delete_connection(self, connection_id: str) -> dict[str, Any]:
-        """Forget a connection and its saved password, and close its tabs."""
+        """Forget a connection, its saved queries and its password, and close its tabs."""
         self._require_sql()
         self.sql.close_connection(connection_id)
         if self.sql_store.delete_connection(connection_id):
             self.sql_passwords.delete(connection_id)
-        return {"ok": True, "connections": self._sql_connections()}
+        return {"ok": True, "connections": self._sql_connections(), "queries": self.sql_store.list_queries()}
+
+    @bridge_method
+    def sql_save_query(self, query: dict[str, Any]) -> dict[str, Any]:
+        """Save SQL on a connection: a new query, or ``query["id"]`` changed.
+
+        Saving an existing query with another ``connection`` moves it there.
+        """
+        self._require_sql()
+        if not isinstance(query, dict):
+            raise BridgeError("invalid_input", "A saved query must be an object.")
+        connection_id = query.get("connection")
+        if not isinstance(connection_id, str):
+            raise BridgeError("invalid_input", "A saved query needs a connection.")
+        query_id = query.get("id")
+        if query_id is not None and not isinstance(query_id, str):
+            raise BridgeError("invalid_input", "That saved query does not exist any more.")
+        saved = self.sql_store.save_query(
+            connection_id, clean_query_name(query.get("name")), clean_query_text(query.get("text")), query_id
+        )
+        return {"ok": True, "query": saved, "queries": self.sql_store.list_queries()}
+
+    @bridge_method
+    def sql_get_query(self, query_id: str) -> dict[str, Any]:
+        """One saved query with its SQL, to open in a tab."""
+        self._require_sql()
+        return {"ok": True, "query": self.sql_store.get_query(query_id)}
+
+    @bridge_method
+    def sql_delete_query(self, query_id: str) -> dict[str, Any]:
+        """Forget a saved query; tabs showing it keep their text."""
+        self._require_sql()
+        self.sql_store.delete_query(query_id)
+        return {"ok": True, "queries": self.sql_store.list_queries()}
 
     @bridge_method
     def sql_test_connection(self, connection: dict[str, Any], password: str | None = None) -> dict[str, Any]:
@@ -2828,10 +2864,17 @@ class Api:
         return {"ok": True, **session, "connection": self._sql_public(profile)}
 
     @bridge_method
-    def sql_run(self, session_id: str, text: str) -> dict[str, Any]:
-        """Start running SQL in a tab; the result arrives as a ``sql_done`` event."""
+    def sql_run(self, session_id: str, text: str, query_id: str | None = None) -> dict[str, Any]:
+        """Start running SQL in a tab; the result arrives as a ``sql_done`` event.
+
+        ``query_id`` names the saved query the tab shows, so its "last run"
+        time moves forward.
+        """
         self._require_sql()
-        return {"ok": True, **self.sql.run(session_id, text)}
+        started = self.sql.run(session_id, text)
+        if isinstance(query_id, str):
+            self.sql_store.mark_run(query_id)
+        return {"ok": True, **started}
 
     @bridge_method
     def sql_cancel(self, session_id: str) -> dict[str, Any]:

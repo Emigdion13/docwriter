@@ -2889,10 +2889,6 @@
 }
 
 /* Connections */
-.sql-row {
-  grid-template-columns: minmax(0, 1fr) auto;
-}
-
 .sql-open {
   display: flex;
   align-items: center;
@@ -3362,4 +3358,132 @@
 
 .sqlc-dialog .dlg-actions .sqlc-delete {
   margin-right: auto;
+}
+
+/* Saved queries, under their connection in the list */
+.sql-row {
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+}
+
+.sql-fold {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--faint);
+  cursor: pointer;
+}
+
+.sql-fold:disabled {
+  cursor: default;
+}
+
+.sql-fold:not(:disabled):hover {
+  color: var(--text);
+}
+
+.sql-fold svg {
+  transition: transform .15s var(--ease);
+}
+
+.sql-fold.open svg {
+  transform: rotate(90deg);
+}
+
+.sql-q {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  margin-left: 26px;
+  border-left: 1px solid var(--glass-border);
+  border-radius: 0 10px 10px 0;
+}
+
+.sql-q-run {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.sql-q-run .ic {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  color: var(--sql);
+  background: color-mix(in srgb, var(--sql) 10%, transparent);
+}
+
+.sql-q-run .ic svg {
+  fill: currentColor;
+}
+
+.sql-q-run:hover .ic {
+  color: var(--on-accent);
+  background: var(--sql);
+}
+
+.sql-q-run .txt {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.sql-q-run .nm,
+.sql-q-run .sub {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.sql-q-run .nm {
+  font: 500 12.5px/1.2 var(--font-ui);
+}
+
+.sql-q-run .sub {
+  font: 400 10.5px/1.2 var(--font-mono);
+  color: var(--faint);
+}
+
+.sql-q-run .sub:empty {
+  display: none;
+}
+
+/* A saved query that is open in a tab. */
+.sql-q.open {
+  border-left-color: var(--sql);
+}
+
+.sql-q.open .sql-q-run .nm {
+  color: var(--sql);
+}
+
+/* A tab whose saved query has unsaved changes. */
+.term-tab.dirty .term-tab-pick .nm::after {
+  content: " •";
+  color: var(--warning);
+}
+
+/* The one-line name prompt, in its caller's colour */
+.prompt-dialog .field-row {
+  margin: 0 0 20px;
+}
+
+.prompt-dialog .confirm-mark {
+  color: var(--c, var(--accent));
+  background: color-mix(in srgb, var(--c, var(--accent)) 12%, transparent);
+  border-color: color-mix(in srgb, var(--c, var(--accent)) 32%, transparent);
 }

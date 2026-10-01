@@ -4,6 +4,8 @@
    connection, with a SQL editor on top and the results below.  Python
    owns the connections and runs the SQL; a run answers at once and the
    result comes back as a sql_done event tagged with the tab's session.
+   A tab can show a saved query: Ctrl+S saves it back, and a dot on the
+   tab means its SQL or connection differs from what is saved.
    ================================================================= */
 
 import { basicSetup } from 'codemirror';
@@ -17,6 +19,7 @@ import { tags as t } from '@lezer/highlight';
 import { bridge, events } from '../bridge.js';
 import { icon } from '../icons.js';
 import { createResultGrid } from './resultGrid.js';
+import { confirmAction, promptText } from './dialogs.js';
 
 // The most tabs open at once (Python's MAX_SESSIONS).
 export const MAX_TABS = 8;
@@ -78,6 +81,9 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
         <button class="btn icon" id="sql-stop" type="button" aria-label="Stop the query" title="Stop the query">
           ${icon('stop', 15)}
         </button>
+        <button class="btn icon" id="sql-save" type="button" aria-label="Save this query" title="Save this query on its connection (Ctrl+S; Ctrl+Shift+S saves a copy)">
+          ${icon('save', 15)}
+        </button>
       </div>
     </div>
     <div class="term-tabs">
@@ -115,16 +121,18 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
   const connSelect = root.querySelector('#sql-conn');
   const runButton = root.querySelector('#sql-run');
   const stopButton = root.querySelector('#sql-stop');
+  const saveButton = root.querySelector('#sql-save');
   const statusEl = root.querySelector('#sql-status');
   const whereEl = root.querySelector('#sql-where');
 
-  let info = { enabled: false, driver: null, connections: [] };
+  let info = { enabled: false, driver: null, connections: [], queries: [] };
   let visible = false;
   let editorShare = 0.42; // of the pane's height, shared by every tab
 
   /* Every tab: { key, connectionId, conn, sessionId, connecting, running, doneRun,
      status, unread, pane, editor, lang, grid, results, messages, error,
-     cancelled, elapsedMs, view }. */
+     cancelled, elapsedMs, view, saved, dirty }.  saved is the saved query the
+     tab shows, { id, name, text, connection } as last saved, or null. */
   const tabs = [];
   let active = null;
   let tabSeq = 0;
@@ -145,9 +153,23 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
     return connection(tab.connectionId)?.name || tab.conn?.name || 'Deleted connection';
   }
 
+  /* A saved query's name, else the connection's: "Dev", "Dev 2"... */
   function tabLabel(tab) {
-    const same = tabs.filter(other => other.connectionId === tab.connectionId);
+    if (tab.saved) return tab.saved.name;
+    const same = tabs.filter(other => !other.saved && other.connectionId === tab.connectionId);
     return same.length > 1 ? `${connName(tab)} ${same.indexOf(tab) + 1}` : connName(tab);
+  }
+
+  function isDirty(tab) {
+    return Boolean(tab.saved)
+      && (tab.editor.state.doc.toString() !== tab.saved.text || tab.connectionId !== tab.saved.connection);
+  }
+
+  function setDirty(tab) {
+    const dirty = isDirty(tab);
+    if (dirty === tab.dirty) return;
+    tab.dirty = dirty;
+    paint();
   }
 
   /* ---- painting ---- */
@@ -161,6 +183,7 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
       el.classList.toggle('unread', tab.unread);
       el.classList.toggle('busy', Boolean(tab.running || tab.connecting));
       el.classList.toggle('ended', !connection(tab.connectionId));
+      el.classList.toggle('dirty', tab.dirty);
       el.dataset.key = String(tab.key);
 
       const pick = document.createElement('button');
@@ -169,9 +192,11 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
       pick.setAttribute('role', 'tab');
       pick.setAttribute('aria-selected', String(tab === active));
       pick.tabIndex = tab === active ? 0 : -1;
-      pick.innerHTML = `${icon('database', 13)}<span class="nm"></span><span class="dot"></span>`; // fixed markup only
+      pick.innerHTML = `${icon(tab.saved ? 'save' : 'database', 13)}<span class="nm"></span><span class="dot"></span>`; // fixed markup only
       pick.querySelector('.nm').textContent = label;
-      pick.title = connection(tab.connectionId)?.where ? `${label} · ${connection(tab.connectionId).where}` : label;
+      const where = connection(tab.connectionId)?.where;
+      pick.title = [label, tab.saved ? connName(tab) : '', where || '', tab.dirty ? 'not saved' : '']
+        .filter(Boolean).join(' · ');
 
       const close = document.createElement('button');
       close.type = 'button';
@@ -206,11 +231,14 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
     connSelect.value = active?.connectionId || '';
     connSelect.disabled = !info.enabled || !active || Boolean(active.running);
     connSelect.hidden = !active;
-    whereEl.textContent = !info.enabled ? 'Off' : active ? tabLabel(active) : 'No query tab';
+    whereEl.textContent = !info.enabled ? 'Off'
+      : !active ? 'No query tab'
+        : active.saved ? `${connName(active)} / ${active.saved.name}${active.dirty ? ' •' : ''}` : tabLabel(active);
     statusEl.textContent = active?.status || '';
     runButton.disabled = !info.enabled || !active || Boolean(active.running);
     stopButton.disabled = !active?.running;
-    runButton.hidden = stopButton.hidden = !active;
+    saveButton.disabled = !info.enabled || !active || !connection(active.connectionId);
+    runButton.hidden = stopButton.hidden = saveButton.hidden = !active;
     paintTabs();
     onStateChanged?.(publicState());
   }
@@ -220,9 +248,17 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
       enabled: info.enabled,
       driver: info.driver,
       connections: info.connections,
+      queries: info.queries,
       tabs: tabs.length,
       running: tabs.filter(tab => tab.running).length,
-      active: active ? { connectionId: active.connectionId, name: connName(active), running: Boolean(active.running) } : null
+      openQueries: tabs.filter(tab => tab.saved).map(tab => tab.saved.id),
+      active: active ? {
+        connectionId: active.connectionId,
+        name: tabLabel(active),
+        running: Boolean(active.running),
+        savedId: active.saved?.id || null,
+        dirty: active.dirty
+      } : null
     };
   }
 
@@ -336,11 +372,12 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
     root.style.setProperty('--sql-editor-share', `${Math.round(editorShare * 1000) / 10}%`);
   }
 
-  function buildTab(connectionId, text = '') {
+  function buildTab(connectionId, text = '', saved = null) {
     const tab = {
       key: ++tabSeq, connectionId, conn: connection(connectionId) || null, sessionId: null,
       connecting: null, running: null, doneRun: null, status: '', unread: false,
-      results: [], messages: [], error: null, cancelled: false, elapsedMs: null, view: null
+      results: [], messages: [], error: null, cancelled: false, elapsedMs: null, view: null,
+      saved, dirty: false
     };
     tab.pane = document.createElement('div');
     tab.pane.className = 'sql-pane';
@@ -388,8 +425,12 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
             { key: 'F5', run: () => { run(tab); return true; } },
             { key: 'Mod-Shift-t', run: () => { newTab(); return true; } },
             { key: 'Mod-Shift-w', run: () => { closeTab(tab); return true; } },
-            { key: 'Mod-s', run: () => true } // saved queries come later; no browser "Save page"
+            { key: 'Mod-s', run: () => { save(tab); return true; } },
+            { key: 'Mod-Shift-s', run: () => { saveAs(tab); return true; } }
           ])),
+          EditorView.updateListener.of((update) => {
+            if (update.docChanged) setDirty(tab);
+          }),
           basicSetup,
           tab.lang.of(dialect(tab.conn?.engine)),
           syntaxHighlighting(sqlHighlight),
@@ -474,23 +515,39 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
     activate(tabs[(i + step + tabs.length) % tabs.length]);
   }
 
-  async function newTab(connectionId = active?.connectionId || info.connections[0]?.id, text = '') {
-    if (!info.enabled) return false;
+  /* Opens a tab and connects it; resolves the tab (null when none opened). */
+  async function openTab(connectionId, text = '', saved = null) {
+    if (!info.enabled) return null;
     if (!connection(connectionId)) {
       notify?.('Add a connection first.');
-      return false;
+      return null;
     }
     if (tabs.length >= MAX_TABS) {
       notify?.(`Up to ${MAX_TABS} query tabs can be open at once. Close one first.`);
-      return false;
+      return null;
     }
-    const tab = buildTab(connectionId, text);
+    const tab = buildTab(connectionId, text, saved);
     tabs.push(tab);
     activate(tab);
-    return connect(tab);
+    tab.ready = await connect(tab);
+    return tab;
   }
 
-  function closeTab(tab) {
+  async function newTab(connectionId = active?.connectionId || info.connections[0]?.id, text = '') {
+    return Boolean((await openTab(connectionId, text))?.ready);
+  }
+
+  async function closeTab(tab) {
+    if (!tabs.includes(tab)) return;
+    if (tab.dirty) {
+      const ok = await confirmAction({
+        title: `Close “${tab.saved.name}” without saving?`,
+        message: 'Your changes to this saved query are lost. The saved version stays as it was.',
+        confirmLabel: 'Close without saving',
+        iconName: 'save'
+      });
+      if (!ok) return;
+    }
     const i = tabs.indexOf(tab);
     if (i < 0) return;
     tabs.splice(i, 1);
@@ -514,7 +571,108 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
     active = null;
   }
 
+  /* ---- saved queries ---- */
+
+  function link(tab, query) {
+    tab.saved = { id: query.id, name: query.name, text: query.text, connection: query.connection };
+    tab.dirty = isDirty(tab);
+  }
+
+  /* Ctrl+S: saves a saved query's tab in place; any other tab asks for a name. */
+  async function save(tab = active) {
+    if (!tab || !info.enabled) return false;
+    if (!tab.saved) return saveAs(tab);
+    const res = await bridge.sql_save_query({
+      id: tab.saved.id, connection: tab.connectionId, name: tab.saved.name, text: tab.editor.state.doc.toString()
+    });
+    if (res?.error === 'not_found' && connection(tab.connectionId)) {
+      // Deleted meanwhile: save it as a new one instead.
+      tab.saved = null;
+      return saveAs(tab);
+    }
+    if (res?.error) {
+      notify?.(res.message || 'The query was not saved.');
+      return false;
+    }
+    link(tab, res.query);
+    setQueries(res.queries);
+    notify?.(`Saved “${res.query.name}” on ${connName(tab)}.`);
+    return true;
+  }
+
+  /* Ctrl+Shift+S: saves the tab's SQL as a new query on its connection. */
+  async function saveAs(tab = active) {
+    if (!tab || !info.enabled) return false;
+    if (!connection(tab.connectionId)) {
+      notify?.('Pick a connection for this tab first.');
+      return false;
+    }
+    const text = tab.editor.state.doc.toString();
+    if (!text.trim()) {
+      notify?.('Write some SQL first.');
+      return false;
+    }
+    const name = await promptText({
+      title: tab.saved ? 'Save a copy' : 'Save query',
+      message: `It is saved on ${connName(tab)}: clicking it in the list opens it and runs it there.`,
+      value: tab.saved ? `${tab.saved.name} (copy)` : '',
+      placeholder: 'e.g. Failed batches today',
+      iconName: 'save',
+      colorVar: '--sql'
+    });
+    if (!name || !tabs.includes(tab)) return false;
+    const res = await bridge.sql_save_query({ connection: tab.connectionId, name, text: tab.editor.state.doc.toString() });
+    if (res?.error) {
+      notify?.(res.message || 'The query was not saved.');
+      return false;
+    }
+    link(tab, res.query);
+    setQueries(res.queries);
+    notify?.(`Saved “${res.query.name}” on ${connName(tab)}.`);
+    return true;
+  }
+
+  /* Opens a saved query in a tab on its own connection; with run, runs it.
+     A tab that already shows it is reused, edits and all. */
+  async function openSaved(queryId, { run: andRun = false } = {}) {
+    if (!info.enabled) return false;
+    let tab = tabs.find(t => t.saved?.id === queryId);
+    if (tab) {
+      activate(tab);
+    } else {
+      const res = await bridge.sql_get_query(queryId);
+      if (res?.error) {
+        notify?.(res.message || 'That saved query could not be opened.');
+        return false;
+      }
+      const { id, name, text, connection: on } = res.query;
+      tab = await openTab(on, text, { id, name, text, connection: on });
+      if (!tab?.ready) return false;
+    }
+    return andRun ? run(tab) : true;
+  }
+
+  /* The saved queries changed (saved, renamed, moved or deleted). */
+  function setQueries(list) {
+    info.queries = Array.isArray(list) ? list : [];
+    for (const tab of tabs) {
+      if (!tab.saved) continue;
+      const now = info.queries.find(q => q.id === tab.saved.id);
+      if (!now) {
+        tab.saved = null; // deleted: the tab keeps its SQL as an unsaved query
+        tab.dirty = false;
+      } else {
+        tab.saved.name = now.name;
+      }
+    }
+    paint();
+  }
+
   /* ---- running ---- */
+
+  function hasSelection(tab) {
+    return tab.editor.state.selection.ranges.some(r => !r.empty);
+  }
 
   function queryText(tab) {
     const { state } = tab.editor;
@@ -538,11 +696,13 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
       return false;
     }
     setStatus(tab, 'Running…');
-    let res = await bridge.sql_run(tab.sessionId, text);
+    // Only the saved SQL itself counts as a run of the saved query.
+    const savedId = tab.saved && !tab.dirty && !hasSelection(tab) ? tab.saved.id : null;
+    let res = await bridge.sql_run(tab.sessionId, text, savedId);
     if (res?.error === 'not_open') {
       // The connection dropped (or the app restarted it): connect again once.
       tab.sessionId = null;
-      if (await connect(tab)) res = await bridge.sql_run(tab.sessionId, text);
+      if (await connect(tab)) res = await bridge.sql_run(tab.sessionId, text, savedId);
     }
     if (!tabs.includes(tab)) return false;
     if (res?.error) {
@@ -639,6 +799,7 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
   newButton.onclick = () => newTab();
   runButton.onclick = () => run();
   stopButton.onclick = () => cancel();
+  saveButton.onclick = (e) => (e.shiftKey ? saveAs() : save());
   root.querySelector('#sql-enable').onclick = () => enable();
   root.querySelector('#sql-empty-new').onclick = () => onNewConnection?.();
 
@@ -652,6 +813,7 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
     tab.connectionId = wanted;
     tab.conn = connection(wanted);
     tab.editor.dispatch({ effects: tab.lang.reconfigure(dialect(tab.conn.engine)) });
+    tab.dirty = isDirty(tab); // a saved query moves only when it is saved again
     paint();
     await connect(tab);
     tab.editor.focus();
@@ -683,6 +845,7 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
       await bridge.sql_close();
     }
     setConnections(res.connections);
+    setQueries(res.queries);
     return publicState();
   }
 
@@ -712,6 +875,7 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
     enable,
     disable,
     setConnections,
+    setQueries,
     getState: publicState,
 
     show() {
@@ -733,6 +897,10 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
     closeTab: () => closeTab(active),
     cycle,
     run: () => run(),
-    cancel: () => cancel()
+    cancel: () => cancel(),
+    save: () => save(),
+    saveAs: () => saveAs(),
+    /** Opens a saved query on its connection; { run: true } runs it too. */
+    openSaved
   };
 }

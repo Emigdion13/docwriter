@@ -665,11 +665,38 @@ async function disableSql() {
 
 /* Opens the connection dialog; afterwards the list and the tabs follow. */
 async function editSqlConnection(connection = null) {
-  const res = await sqlConnDialog.open(connection);
+  const queryCount = connection ? sqlView.getState().queries.filter(q => q.connection === connection.id).length : 0;
+  const res = await sqlConnDialog.open(connection, { queryCount });
   if (!res) return;
   sqlView.setConnections(res.connections);
+  if (res.queries) sqlView.setQueries(res.queries);
   if (res.deleted) toast('Connection deleted.', { icon: 'trash' });
   else if (!connection) await sqlView.newTab(res.connection.id);
+}
+
+/* A saved query opens on its own connection; run: true runs it there too. */
+async function openSavedQuery(queryId, run) {
+  if (!state.sqlMode) await enterSqlMode();
+  await sqlView.openSaved(queryId, { run });
+}
+
+async function deleteSavedQuery(queryId) {
+  const query = sqlView.getState().queries.find(q => q.id === queryId);
+  const ok = await confirmAction({
+    title: `Delete “${query?.name || 'this query'}”?`,
+    message: 'The saved query is removed from its connection. A tab that shows it keeps the SQL, unsaved.',
+    confirmLabel: 'Delete',
+    danger: true,
+    iconName: 'trash'
+  });
+  if (!ok) return;
+  const res = await bridge.sql_delete_query(queryId);
+  if (res?.error) {
+    toast(res.message || 'The query could not be deleted.', { icon: 'alert' });
+    return;
+  }
+  sqlView.setQueries(res.queries);
+  toast('Saved query deleted.', { icon: 'trash' });
 }
 
 async function addSqliteConnection() {
@@ -1766,6 +1793,16 @@ async function getPaletteCommands() {
       { label: 'Open SQL', sub: sq.enabled ? sqlEntrySub(sq) : 'off until you turn it on', icon: 'database', colorVar: '--sql', run: () => enterSqlMode() }
     ] : []),
     ...(sq.enabled ? [
+      ...sq.queries.map(q => {
+        const on = sq.connections.find(c => c.id === q.connection);
+        return {
+          label: `Run “${q.name}”`,
+          sub: `${on?.name || 'SQL'} · saved query`,
+          icon: 'play',
+          colorVar: '--sql',
+          run: () => openSavedQuery(q.id, true)
+        };
+      }),
       ...sq.connections.map(c => ({
         label: `SQL: New query on ${c.name}`,
         sub: `${c.engineName} · ${c.where}`,
@@ -1777,6 +1814,12 @@ async function getPaletteCommands() {
         sq.active.running
           ? { label: 'SQL: Stop the query', sub: sq.active.name, icon: 'stop', colorVar: '--sql', run: () => sqlView.cancel() }
           : { label: 'SQL: Run the query', sub: sq.active.name, hint: 'Ctrl Enter', icon: 'play', colorVar: '--sql', run: () => sqlView.run() },
+        sq.active.savedId
+          ? { label: `SQL: Save “${sq.active.name}”`, sub: sq.active.dirty ? 'has unsaved changes' : 'saved', hint: 'Ctrl S', icon: 'save', colorVar: '--sql', run: () => sqlView.save() }
+          : { label: 'SQL: Save this query…', sub: 'on its connection', hint: 'Ctrl S', icon: 'save', colorVar: '--sql', run: () => sqlView.save() },
+        ...(sq.active.savedId ? [
+          { label: 'SQL: Save a copy…', sub: sq.active.name, hint: 'Ctrl Shift S', icon: 'save', colorVar: '--sql', run: () => sqlView.saveAs() }
+        ] : []),
         { label: 'SQL: Close this tab', sub: sq.active.name, hint: 'Ctrl Shift W', icon: 'x', colorVar: '--sql', run: () => sqlView.closeTab() }
       ] : []),
       { label: 'SQL: New SQL Server connection…', icon: 'plus', colorVar: '--sql', run: async () => { await enterSqlMode(); await editSqlConnection(); } },
@@ -1975,6 +2018,13 @@ function setupShortcuts() {
     // Ctrl+F, Esc...), except the palette, Lock all and the panels toggle.
     if (e.target?.closest?.('.ws-terminal .term-host')) {
       if (!mod || !(key === 'k' || key === 'l' || e.key === '\\')) return;
+    }
+    // In the SQL space Ctrl+S saves the open query (the editor handles its own).
+    if (state.sqlMode && mod && key === 's' && !e.target?.closest?.('.ws-sql .cm-editor')) {
+      e.preventDefault();
+      if (e.shiftKey) sqlView.saveAs();
+      else sqlView.save();
+      return;
     }
     // Keys about the open note do nothing while the CMD or SQL space shows.
     if ((state.terminalMode || state.sqlMode) && mod && ['n', 'd', 's', 'e'].includes(key)) {
@@ -2269,7 +2319,10 @@ async function init() {
     onOpen: (id) => openSqlConnection(id),
     onEdit: (id) => editSqlConnection(sqlView.getState().connections.find(c => c.id === id) || null),
     onNewServer: () => editSqlConnection(),
-    onNewSqlite: () => addSqliteConnection()
+    onNewSqlite: () => addSqliteConnection(),
+    onRunQuery: (id) => openSavedQuery(id, true),
+    onOpenQuery: (id) => openSavedQuery(id, false),
+    onDeleteQuery: (id) => deleteSavedQuery(id)
   });
   commandList.element.after(sqlList.element);
 
