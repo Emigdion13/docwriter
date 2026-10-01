@@ -45,7 +45,7 @@ from vaultnotes.backup.gdrive_backup import (
     BackupRunner,
     GoogleDriveClient,
 )
-from vaultnotes.config import Config, get_app_dir, get_config
+from vaultnotes.config import Config, get_app_dir, get_config, get_local_app_dir
 from vaultnotes.crypto.keyfile import (
     KeyFileError,
     PassphraseRequired,
@@ -67,6 +67,15 @@ from vaultnotes.tags import (
     has_tags,
     split_query,
     unique_tags,
+)
+from vaultnotes.sql import (
+    SqlError,
+    SqlManager,
+    SqlPasswords,
+    SqlStore,
+    clean_profile,
+    mssql_driver,
+    public_connection,
 )
 from vaultnotes.storage.atomic import atomic_write
 from vaultnotes.terminal import (
@@ -136,6 +145,7 @@ def _now_stamp() -> str:
 KEY_FILE_TYPES = ("VaultNotes key (*.vnkey)",)
 MARKDOWN_FILE_TYPES = ("Markdown (*.md)",)
 CLIENT_SECRET_FILE_TYPES = ("Google OAuth client (*.json)",)
+SQLITE_FILE_TYPES = ("SQLite database (*.db;*.sqlite;*.sqlite3;*.db3)", "All files (*.*)")
 
 
 class BridgeError(Exception):
@@ -171,7 +181,7 @@ def bridge_method(method: Callable[..., Any]) -> Callable[..., Any]:
     def guarded(self: "Api", *args: Any, **kwargs: Any) -> Any:
         try:
             return method(self, *args, **kwargs)
-        except (BridgeError, TerminalError) as exc:
+        except (BridgeError, TerminalError, SqlError) as exc:
             return _error(exc.code, exc.message)
         except VaultLockedError as exc:
             return _error("locked", str(exc) or "Vault is locked")
@@ -219,6 +229,8 @@ class Api:
         *,
         drive_store: TokenStore | None = None,
         app_dir: Path | str | None = None,
+        sql_dir: Path | str | None = None,
+        sql_passwords: SqlPasswords | None = None,
     ) -> None:
         self._calls = CallLock()
         #: Set by :meth:`ready_to_close` once the page saved its last edit.
@@ -274,6 +286,14 @@ class Api:
         #: terminal's own threads, never through the call lock.
         self.terminal = TerminalManager(emit=lambda name, data: self._emit(name, data))
 
+        #: The SQL space.  ``sql.db`` (saved connections) sits in
+        #: ``%LOCALAPPDATA%\\VaultNotes``, never in the notes folder; passwords
+        #: sit in the Credential Manager.  Tests point both somewhere harmless.
+        self.sql_dir = Path(sql_dir).resolve() if sql_dir is not None else get_local_app_dir()
+        self.sql_store = SqlStore(self.sql_dir / "sql.db")
+        self.sql_passwords = sql_passwords if sql_passwords is not None else SqlPasswords()
+        self.sql = SqlManager(emit=lambda name, data: self._emit(name, data))
+
     def set_window(self, window: Any) -> None:
         """Store the pywebview window used for native file dialogs/events."""
         self.window = window
@@ -283,6 +303,7 @@ class Api:
         # Outside the call lock: the backup's own callbacks need it.
         self.backup.finish_on_close()
         self.terminal.stop()
+        self.sql.close()
         with self._calls:
             self.autolock.stop()
             for store in self.vault_stores.values():
@@ -2594,6 +2615,247 @@ class Api:
         """Empty Recent; favorites stay."""
         self._save_terminal(recent=[])
         return {"ok": True, **self._terminal_lists()}
+
+    # ------------------------------------------------------------------
+    # The SQL space: saved connections and query tabs
+    # ------------------------------------------------------------------
+    def _sql_settings(self) -> dict[str, Any]:
+        block = self.config.data.get("sql")
+        if not isinstance(block, dict):
+            block = {"enabled": False}
+            self.config.data["sql"] = block
+        return block
+
+    def _sql_enabled(self) -> bool:
+        return self._sql_settings().get("enabled") is True
+
+    def _require_sql(self) -> None:
+        if not self._sql_enabled():
+            raise BridgeError("sql_off", "The SQL space is off. Turn it on first.")
+
+    def _sql_public(self, profile: dict[str, Any]) -> dict[str, Any]:
+        has_password = False
+        if profile.get("auth") == "sql":
+            try:
+                has_password = self.sql_passwords.get(profile["id"]) is not None
+            except SqlError:
+                has_password = False
+        return public_connection(profile, has_password)
+
+    def _sql_connections(self) -> list[dict[str, Any]]:
+        return [self._sql_public(profile) for profile in self.sql_store.list_connections()]
+
+    def _sql_password_for(self, profile: dict[str, Any], typed: Any = None) -> str | None:
+        """The password to sign in with: one just typed, else the saved one."""
+        if profile.get("auth") != "sql":
+            return None
+        if isinstance(typed, str) and typed:
+            return typed
+        return self.sql_passwords.get(profile["id"]) if profile.get("id") else None
+
+    def _choose_sqlite_file(self) -> Path | None:
+        """Open a native picker for a SQLite database file."""
+        if self.window is None:
+            return None
+        selected = self._file_dialog("OPEN", allow_multiple=False, file_types=SQLITE_FILE_TYPES)
+        if isinstance(selected, (list, tuple)):
+            selected = selected[0] if selected else None
+        if not selected:
+            return None
+        return Path(str(selected)).expanduser().resolve()
+
+    def _sqlite_file(self, file_path: Path | str | None) -> Path | None:
+        """A SQLite file from the native dialog (or a test's path); None when cancelled."""
+        if self.window is None and file_path:
+            path: Path | None = Path(file_path).expanduser().resolve()
+        else:
+            path = self._choose_sqlite_file()
+        if path is None:
+            return None
+        if not path.is_file():
+            raise BridgeError("not_found", "That file was not found.")
+        try:
+            with path.open("rb") as handle:
+                header = handle.read(16)
+        except OSError as exc:
+            detail = exc.strerror or type(exc).__name__
+            raise BridgeError("io_error", f"That file could not be read ({detail}).") from exc
+        if header and header != b"SQLite format 3\x00":
+            raise BridgeError("invalid_input", f"{path.name} is not a SQLite database.")
+        return path
+
+    @bridge_method
+    def sql_state(self) -> dict[str, Any]:
+        """Whether the SQL space is on, the saved connections and the open tabs."""
+        enabled = self._sql_enabled()
+        return {
+            "enabled": enabled,
+            "driver": mssql_driver(),
+            "connections": self._sql_connections() if enabled else [],
+            "sessions": self.sql.sessions() if enabled else [],
+        }
+
+    @bridge_method
+    def sql_enable(self) -> dict[str, Any]:
+        """Turn the SQL space on, but only after the user says yes in a native dialog.
+
+        Python asks in a Windows dialog, not the page, so nothing running in
+        the page can switch it on by itself.
+        """
+        if self._sql_enabled():
+            return {"ok": True, "enabled": True}
+        if self.window is None:
+            raise BridgeError("no_window", "The SQL space can only be turned on in the app window.")
+        try:
+            with self._calls.released():
+                allowed = self.window.create_confirmation_dialog(
+                    "Turn on the SQL space?",
+                    "The SQL space connects to SQL Server and SQLite databases and runs the SQL you "
+                    "write there with your sign-in, including statements that change data.\n\n"
+                    "Saved connections are kept on this PC, not in your notes folder, and SQL "
+                    "login passwords go in the Windows Credential Manager.\n\nTurn it on?",
+                )
+        except Exception as exc:  # noqa: BLE001
+            raise BridgeError("dialog_failed", f"The question could not be shown ({type(exc).__name__}).") from exc
+        if allowed is not True:
+            return _error("cancelled", "The SQL space stays off.")
+        self._sql_settings()["enabled"] = True
+        self.config.save()
+        return {"ok": True, "enabled": True}
+
+    @bridge_method
+    def sql_disable(self) -> dict[str, Any]:
+        """Close every query tab and turn the SQL space off; connections stay saved."""
+        self.sql.close()
+        self._sql_settings()["enabled"] = False
+        self.config.save()
+        return {"ok": True, "enabled": False}
+
+    @bridge_method
+    def sql_save_connection(self, connection: dict[str, Any], password: str | None = None) -> dict[str, Any]:
+        """Add a connection, or change the one named by ``connection["id"]``.
+
+        A password is saved only when one is typed; leaving the box empty keeps
+        the saved one.  Switching to Windows sign-in forgets it.
+        """
+        self._require_sql()
+        if password is not None and (not isinstance(password, str) or len(password) > 1024):
+            raise BridgeError("invalid_input", "That password was not accepted.")
+        profile = clean_profile(connection)
+        connection_id = connection.get("id")
+        if connection_id is not None:
+            old = self.sql_store.get_connection(connection_id)
+            if old["engine"] != profile["engine"]:
+                raise BridgeError("invalid_input", "A connection cannot change its database type. Make a new one.")
+            profile["file"] = old["file"]
+        elif profile["engine"] == "sqlite":
+            raise BridgeError("invalid_input", "Add a SQLite connection with SQLite file… instead.")
+        saved = self.sql_store.save_connection(profile, connection_id)
+        if saved["auth"] == "sql" and password:
+            self.sql_passwords.set(saved["id"], password)
+        elif saved["auth"] != "sql":
+            self.sql_passwords.delete(saved["id"])
+        return {"ok": True, "connection": self._sql_public(saved), "connections": self._sql_connections()}
+
+    @bridge_method
+    def sql_add_sqlite(self, file_path: Path | str | None = None) -> dict[str, Any]:
+        """Add a SQLite connection to a file chosen in the native dialog."""
+        self._require_sql()
+        path = self._sqlite_file(file_path)
+        if path is None:
+            return _error("cancelled", "No file was chosen.")
+        self._require_sql()  # again: the dialog let other calls run
+        profile = clean_profile({"engine": "sqlite", "name": path.stem[:100] or "SQLite"})
+        profile["file"] = str(path)
+        saved = self.sql_store.save_connection(profile)
+        return {"ok": True, "connection": self._sql_public(saved), "connections": self._sql_connections()}
+
+    @bridge_method
+    def sql_choose_sqlite_file(self, connection_id: str, file_path: Path | str | None = None) -> dict[str, Any]:
+        """Point a SQLite connection at another file, chosen in the native dialog."""
+        self._require_sql()
+        if self.sql_store.get_connection(connection_id)["engine"] != "sqlite":
+            raise BridgeError("invalid_input", "Only a SQLite connection has a file.")
+        path = self._sqlite_file(file_path)
+        if path is None:
+            return _error("cancelled", "No file was chosen.")
+        self._require_sql()
+        profile = self.sql_store.get_connection(connection_id)
+        profile["file"] = str(path)
+        saved = self.sql_store.save_connection(profile, connection_id)
+        return {"ok": True, "connection": self._sql_public(saved), "connections": self._sql_connections()}
+
+    @bridge_method
+    def sql_delete_connection(self, connection_id: str) -> dict[str, Any]:
+        """Forget a connection and its saved password, and close its tabs."""
+        self._require_sql()
+        self.sql.close_connection(connection_id)
+        if self.sql_store.delete_connection(connection_id):
+            self.sql_passwords.delete(connection_id)
+        return {"ok": True, "connections": self._sql_connections()}
+
+    @bridge_method
+    def sql_test_connection(self, connection: dict[str, Any], password: str | None = None) -> dict[str, Any]:
+        """Sign in with the dialog's fields and hang up, without saving anything."""
+        self._require_sql()
+        profile = clean_profile(connection)
+        connection_id = connection.get("id")
+        if connection_id is not None:
+            old = self.sql_store.get_connection(connection_id)
+            profile["id"] = old["id"]
+            profile["file"] = old["file"]
+        elif profile["engine"] == "sqlite":
+            raise BridgeError("invalid_input", "Add a SQLite connection with SQLite file… instead.")
+        secret = self._sql_password_for(profile, password)
+        started = time.monotonic()
+        # Signing in to a far server takes a while; notes keep saving meanwhile.
+        with self._calls.released():
+            self.sql.test(profile, secret)
+        return {"ok": True, "elapsedMs": int((time.monotonic() - started) * 1000)}
+
+    @bridge_method
+    def sql_open(self, connection_id: str) -> dict[str, Any]:
+        """Connect a new query tab to a saved connection."""
+        self._require_sql()
+        profile = self.sql_store.get_connection(connection_id)
+        secret = self._sql_password_for(profile)
+        self.sql.check_room()
+        with self._calls.released():
+            session = self.sql.open(profile, secret)
+        if not self._sql_enabled():
+            self.sql.close(session["id"])
+            raise BridgeError("sql_off", "The SQL space was turned off.")
+        return {"ok": True, **session, "connection": self._sql_public(profile)}
+
+    @bridge_method
+    def sql_run(self, session_id: str, text: str) -> dict[str, Any]:
+        """Start running SQL in a tab; the result arrives as a ``sql_done`` event."""
+        self._require_sql()
+        return {"ok": True, **self.sql.run(session_id, text)}
+
+    @bridge_method
+    def sql_cancel(self, session_id: str) -> dict[str, Any]:
+        """Ask the server to stop the query running in a tab."""
+        self._require_sql()
+        return {"ok": True, "cancelled": self.sql.cancel(session_id)}
+
+    @bridge_method
+    def sql_rows(self, session_id: str, result_index: int, offset: int = 0, limit: int = 200) -> dict[str, Any]:
+        """A page of rows of one result of a tab's last run."""
+        self._require_sql()
+        return {"ok": True, **self.sql.rows(session_id, result_index, offset, limit)}
+
+    @bridge_method
+    def sql_copy(self, session_id: str, result_index: int) -> dict[str, Any]:
+        """A whole result as tab-separated text with a header row, for the clipboard."""
+        self._require_sql()
+        return {"ok": True, "text": self.sql.copy_text(session_id, result_index)}
+
+    @bridge_method
+    def sql_close(self, session_id: str | None = None) -> dict[str, bool]:
+        """Close one tab's connection, or every one when no id is given."""
+        self.sql.close(session_id)
+        return {"ok": True}
 
 
 def bridge_function_names() -> tuple[str, ...]:

@@ -330,6 +330,68 @@ const MOCK_SHELLS = [
 ];
 const MOCK_PROMPTS = { cmd: 'C:\\Users\\you>', powershell: 'PS C:\\Users\\you> ', bash: '$ ' };
 
+/* The SQL space in a plain browser: two pretend connections and made-up
+   rows, so the layout can be worked on without Python or a database. */
+const mockSql = {
+  enabled: false,
+  connections: [
+    {
+      id: 'mock-dev', name: 'Dev ingest', engine: 'mssql', engineName: 'SQL Server',
+      server: 'dev-sql01', database: 'Ingest', auth: 'windows', username: '',
+      encrypt: true, trust_cert: true, file: '', where: 'dev-sql01 / Ingest', hasPassword: false
+    },
+    {
+      id: 'mock-lite', name: 'scratch', engine: 'sqlite', engineName: 'SQLite',
+      server: '', database: '', auth: 'windows', username: '', encrypt: true, trust_cert: false,
+      file: 'C:\\Users\\you\\scratch.db', where: 'scratch.db', hasPassword: false
+    }
+  ],
+  sessions: new Map() // id -> { connection, running, results }
+};
+let mockSqlSeq = 0;
+
+const MOCK_SQL_COLUMNS = [
+  { name: 'batch_id', kind: 'number' },
+  { name: 'source', kind: 'text' },
+  { name: 'status', kind: 'text' },
+  { name: 'rows_loaded', kind: 'number' },
+  { name: 'started_at', kind: 'date' },
+  { name: 'notes', kind: 'text' }
+];
+
+function mockSqlRow(i) {
+  const statuses = ['Loaded', 'Pending', 'Failed', 'Loaded', 'Loaded'];
+  return [
+    1000 + i,
+    ['hl7-feed', 'csv-drop', 'fhir-pull'][i % 3],
+    statuses[i % statuses.length],
+    (i * 7919) % 50000,
+    `2026-09-${String(1 + (i % 28)).padStart(2, '0')} 0${i % 10}:15:00`,
+    i % 4 === 0 ? null : `run ${i}`
+  ];
+}
+
+function mockSqlPublic() {
+  return mockSql.connections.map(c => ({ ...c }));
+}
+
+function mockSqlResults(text) {
+  const lower = text.toLowerCase();
+  if (lower.includes('nope')) return { error: "Invalid object name 'nope'.", results: [], messages: [] };
+  if (!lower.includes('select')) return { error: null, results: [], messages: ['(3 rows affected)'] };
+  const total = lower.includes('top 10') ? 10 : 12345;
+  const results = [{ columns: MOCK_SQL_COLUMNS, total }];
+  if (lower.includes('count')) results.push({ columns: [{ name: 'n', kind: 'number' }], total: 1, single: [[total]] });
+  return { error: null, results, messages: results.map(r => `(${r.total} rows)`) };
+}
+
+function mockSqlPage(result, offset, limit) {
+  if (result.single) return result.single.slice(offset, offset + limit);
+  const rows = [];
+  for (let i = offset; i < Math.min(result.total, offset + limit); i++) rows.push(mockSqlRow(i));
+  return rows;
+}
+
 function mockTermOut(id, data) {
   if (mockTerminal.sessions.has(id)) setTimeout(() => events.emit('terminal_output', { id, data }), 5);
 }
@@ -905,5 +967,159 @@ export const bridge = {
     if (api?.terminal_clear_recent) return await api.terminal_clear_recent();
     mockTerminal.recent = [];
     return { ok: true, ...mockTermLists() };
+  },
+  /* ---- The SQL space.  Python opens the connections and runs the SQL; a
+     run answers at once and its result arrives as a sql_done event.  The
+     page never sends a file path: SQLite files are picked in a native dialog.
+     ---- */
+  async sql_state() {
+    const api = await waitForBridge();
+    if (api?.sql_state) return await api.sql_state();
+    return {
+      enabled: mockSql.enabled,
+      driver: 'ODBC Driver 18 for SQL Server',
+      connections: mockSql.enabled ? mockSqlPublic() : [],
+      sessions: []
+    };
+  },
+
+  /** Python asks in a native Windows dialog before the SQL space is allowed. */
+  async sql_enable() {
+    const api = await waitForBridge();
+    if (api?.sql_enable) return await api.sql_enable();
+    mockSql.enabled = true;
+    return { ok: true, enabled: true };
+  },
+
+  async sql_disable() {
+    const api = await waitForBridge();
+    if (api?.sql_disable) return await api.sql_disable();
+    mockSql.enabled = false;
+    mockSql.sessions.clear();
+    return { ok: true, enabled: false };
+  },
+
+  /** Adds a connection, or changes the one named by connection.id.  An empty password keeps the saved one. */
+  async sql_save_connection(connection, password = null) {
+    const api = await waitForBridge();
+    if (api?.sql_save_connection) return await api.sql_save_connection(connection, password);
+    const where = connection.server + (connection.database ? ` / ${connection.database}` : '');
+    const old = mockSql.connections.find(c => c.id === connection.id);
+    const saved = {
+      ...(old || {}), ...connection, id: old?.id || `mock-${++mockSqlSeq}`, engineName: 'SQL Server', where,
+      hasPassword: connection.auth === 'sql' && Boolean(password || old?.hasPassword)
+    };
+    mockSql.connections = [...mockSql.connections.filter(c => c.id !== saved.id), saved];
+    return { ok: true, connection: { ...saved }, connections: mockSqlPublic() };
+  },
+
+  /** Picks a SQLite file in the native dialog and saves a connection to it. */
+  async sql_add_sqlite() {
+    const api = await waitForBridge();
+    if (api?.sql_add_sqlite) return await api.sql_add_sqlite();
+    const saved = {
+      id: `mock-${++mockSqlSeq}`, name: 'picked', engine: 'sqlite', engineName: 'SQLite', server: '', database: '',
+      auth: 'windows', username: '', encrypt: true, trust_cert: false, file: 'C:\\data\\picked.db', where: 'picked.db', hasPassword: false
+    };
+    mockSql.connections.push(saved);
+    return { ok: true, connection: { ...saved }, connections: mockSqlPublic() };
+  },
+
+  async sql_choose_sqlite_file(connection_id) {
+    const api = await waitForBridge();
+    if (api?.sql_choose_sqlite_file) return await api.sql_choose_sqlite_file(connection_id);
+    return { error: 'cancelled', message: 'No file was chosen.' };
+  },
+
+  async sql_delete_connection(connection_id) {
+    const api = await waitForBridge();
+    if (api?.sql_delete_connection) return await api.sql_delete_connection(connection_id);
+    mockSql.connections = mockSql.connections.filter(c => c.id !== connection_id);
+    return { ok: true, connections: mockSqlPublic() };
+  },
+
+  async sql_test_connection(connection, password = null) {
+    const api = await waitForBridge();
+    if (api?.sql_test_connection) return await api.sql_test_connection(connection, password);
+    await new Promise(r => setTimeout(r, 400));
+    return { ok: true, elapsedMs: 400 };
+  },
+
+  /** Connects a new query tab; slow servers make this take a few seconds. */
+  async sql_open(connection_id) {
+    const api = await waitForBridge();
+    if (api?.sql_open) return await api.sql_open(connection_id);
+    const connection = mockSql.connections.find(c => c.id === connection_id);
+    if (!connection) return { error: 'not_found', message: 'That connection does not exist any more.' };
+    await new Promise(r => setTimeout(r, 250));
+    const id = `mock-session-${++mockSqlSeq}`;
+    mockSql.sessions.set(id, { connection, running: null, results: [] });
+    return { ok: true, id, connection: { ...connection }, name: connection.name, engine: connection.engine, running: false };
+  },
+
+  async sql_run(session_id, text) {
+    const api = await waitForBridge();
+    if (api?.sql_run) return await api.sql_run(session_id, text);
+    const session = mockSql.sessions.get(session_id);
+    if (!session) return { error: 'not_open', message: 'That query tab is not connected any more.' };
+    if (!String(text).trim()) return { error: 'empty', message: 'There is no SQL to run.' };
+    const run = `mock-run-${++mockSqlSeq}`;
+    session.running = run;
+    const outcome = mockSqlResults(String(text));
+    setTimeout(() => events.emit('sql_progress', { session: session_id, run, rows: 4000 }), 300);
+    session.timer = setTimeout(() => {
+      session.running = null;
+      session.results = outcome.results;
+      events.emit('sql_done', {
+        session: session_id, run, ok: !outcome.error, cancelled: false, error: outcome.error,
+        messages: outcome.messages, elapsedMs: 640,
+        results: outcome.results.map(r => ({ columns: r.columns, total: r.total, rows: mockSqlPage(r, 0, 200) }))
+      });
+    }, 700);
+    return { ok: true, run, batches: 1 };
+  },
+
+  async sql_cancel(session_id) {
+    const api = await waitForBridge();
+    if (api?.sql_cancel) return await api.sql_cancel(session_id);
+    const session = mockSql.sessions.get(session_id);
+    if (!session?.running) return { ok: true, cancelled: false };
+    clearTimeout(session.timer);
+    const run = session.running;
+    session.running = null;
+    session.results = [];
+    setTimeout(() => events.emit('sql_done', {
+      session: session_id, run, ok: false, cancelled: true, error: null, messages: [], elapsedMs: 120, results: []
+    }), 50);
+    return { ok: true, cancelled: true };
+  },
+
+  async sql_rows(session_id, result_index, offset = 0, limit = 200) {
+    const api = await waitForBridge();
+    if (api?.sql_rows) return await api.sql_rows(session_id, result_index, offset, limit);
+    const result = mockSql.sessions.get(session_id)?.results[result_index];
+    if (!result) return { error: 'not_found', message: 'That result is gone. Run the query again.' };
+    await new Promise(r => setTimeout(r, 60));
+    return { ok: true, offset, total: result.total, rows: mockSqlPage(result, offset, limit) };
+  },
+
+  /** A whole result as tab-separated text, header first. */
+  async sql_copy(session_id, result_index) {
+    const api = await waitForBridge();
+    if (api?.sql_copy) return await api.sql_copy(session_id, result_index);
+    const result = mockSql.sessions.get(session_id)?.results[result_index];
+    if (!result) return { error: 'not_found', message: 'That result is gone. Run the query again.' };
+    const lines = [result.columns.map(c => c.name).join('\t')];
+    for (const row of mockSqlPage(result, 0, result.total)) lines.push(row.map(v => (v == null ? 'NULL' : v)).join('\t'));
+    return { ok: true, text: lines.join('\r\n') };
+  },
+
+  /** Closes one tab's connection, or every one when no id is given. */
+  async sql_close(session_id = null) {
+    const api = await waitForBridge();
+    if (api?.sql_close) return await api.sql_close(session_id);
+    if (session_id == null) mockSql.sessions.clear();
+    else mockSql.sessions.delete(session_id);
+    return { ok: true };
   },
 };

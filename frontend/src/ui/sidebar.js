@@ -37,8 +37,9 @@ export function createSidebar({ onSelectSpace, onNewVault, onSyncDrive, onOpenDr
   aside.querySelector('#drive-details').onclick = () => onOpenDriveSettings?.();
 
   aside.querySelector('#spaces').addEventListener('click', (e) => {
-    if (e.target.closest('.space-cmd')) {
-      onSelectSpace?.('cmd');
+    const tool = e.target.closest('.space-tool');
+    if (tool) {
+      onSelectSpace?.(tool.dataset.tool);
       return;
     }
     const spaceBtn = e.target.closest('.space');
@@ -51,41 +52,47 @@ export function createSidebar({ onSelectSpace, onNewVault, onSyncDrive, onOpenDr
   return aside;
 }
 
-/* The CMD entry under the note spaces.  It is not a space of notes, so it
-   keeps its own state; while it is open no note space is highlighted. */
-let cmdEntry = { active: false, sub: 'Off' };
+/* The tool entries under the note spaces: CMD and SQL.  They are not spaces
+   of notes, so each keeps its own state; while one is open no note space is
+   highlighted. */
+const tools = {
+  cmd: { name: 'CMD', icon: 'terminal', colorVar: '--cmd', active: false, sub: 'Off' },
+  sql: { name: 'SQL', icon: 'database', colorVar: '--sql', active: false, sub: 'Off' }
+};
 let lastSpaces = [];
 let lastActiveId = null;
 
-export function setCmdEntry(changes) {
-  cmdEntry = { ...cmdEntry, ...changes };
+export function setToolEntry(id, changes) {
+  tools[id] = { ...tools[id], ...changes };
   renderSpaces(lastSpaces, lastActiveId);
 }
 
-function cmdButton() {
+function toolButton(id) {
+  const tool = tools[id];
   const button = document.createElement('button');
-  button.className = `space space-cmd ${cmdEntry.active ? 'active' : ''}`;
-  button.dataset.space = 'cmd';
-  button.style.setProperty('--c', 'var(--cmd)');
+  button.className = `space space-tool ${tool.active ? 'active' : ''}`;
+  button.dataset.tool = id;
+  button.style.setProperty('--c', `var(${tool.colorVar})`);
   button.innerHTML = `
-    <span class="ic">${icon('terminal', 17)}</span>
-    <span class="txt"><span class="nm">CMD</span><span class="sub"></span></span>
+    <span class="ic">${icon(tool.icon, 17)}</span>
+    <span class="txt"><span class="nm"></span><span class="sub"></span></span>
     <span class="badge">${icon('right', 12)}</span>
   `;
-  button.querySelector('.sub').textContent = cmdEntry.sub;
-  button.setAttribute('aria-label', `CMD, ${cmdEntry.sub}`);
+  button.querySelector('.nm').textContent = tool.name;
+  button.querySelector('.sub').textContent = tool.sub;
+  button.setAttribute('aria-label', `${tool.name}, ${tool.sub}`);
   return button;
 }
 
 /**
- * Renders the list of spaces into #spaces, then the CMD entry.
+ * Renders the list of spaces into #spaces, then the tool entries.
  */
 export function renderSpaces(spaces, activeSpaceId) {
   lastSpaces = spaces || [];
   lastActiveId = activeSpaceId;
   const container = document.getElementById('spaces');
   if (!container) return;
-  if (cmdEntry.active) activeSpaceId = null;
+  if (Object.values(tools).some(t => t.active)) activeSpaceId = null;
 
   container.innerHTML = lastSpaces.map(s => {
     const isPlain = s.kind === 'plain';
@@ -110,7 +117,7 @@ export function renderSpaces(spaces, activeSpaceId) {
       </button>
     `;
   }).join('') + '<div class="space-sep" role="separator"></div>';
-  container.appendChild(cmdButton());
+  container.append(...Object.keys(tools).map(toolButton));
 }
 
 export function updateDriveCard(statusText, opts = {}) {

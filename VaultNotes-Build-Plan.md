@@ -303,13 +303,15 @@ The key that unlocks the vault key (KEK) is derived as `Scrypt(salt=salt, length
   "autolock_minutes": 10,
   "look": {"theme": "nebula", "effects": "full", "view_mode": "split", "editor_font_size": 13.5},
   "backup": {"enabled": false, "interval_minutes": 60, "drive_folder_id": null, "last_backup": null},
-  "terminal": {"enabled": false, "shell": "cmd", "recent": [], "favorites": []}
+  "terminal": {"enabled": false, "shell": "cmd", "recent": [], "favorites": []},
+  "sql": {"enabled": false}
 }
 ```
 
 - `key_path` only remembers *where* the key file is. The key itself is never saved here. If `key_path` is empty, the app asks for the file each time.
 - `theme` is `nebula`, `synthwave` or `arctic`. `effects` is `full`, `lite` or `off` (section 6.7).
 - `terminal` is the CMD space (extra): `shell` is `cmd`, `powershell` or `bash` (the one a new tab opens with; up to 8 tabs, each its own shell, are open at once and never saved); `recent` (at most 50, newest first) and `favorites` (at most 100) are one-line commands. Only Python writes this block, through the `terminal_*` Bridge calls; `update_settings` refuses it (security rule 13).
+- `sql` is the SQL space (extra): only whether it is on. Its saved connections are in `sql.db` in `%LOCALAPPDATA%\VaultNotes`, and SQL login passwords in the Windows Credential Manager (`keyring` service `VaultNotes SQL`). Only Python writes this block, through `sql_enable` / `sql_disable`; `update_settings` refuses it (security rule 14).
 
 ### 4.7 Links between notes (Obsidian-style)
 
@@ -430,6 +432,11 @@ The frontend calls Python with `await window.pywebview.api.<name>(...)`, after t
     - The page names a shell by id (`cmd`, `powershell`, `bash`). Python finds the program itself; the page never sends a path, a program name or arguments.
     - Keys and output travel only through the Bridge API and `terminal_output` events, in memory. Nothing the shell prints is written to disk.
     - Recent and favorite commands are one line each, go to `settings.json` only (never the notes folder, so never to Drive), and a command typed with a leading space is never recorded.
+14. **The SQL space (extra) runs SQL on real databases, so it is opt-in too:**
+    - Off by default. Only `sql_enable` turns it on, after a **native** confirmation dialog. Every call that reads or changes connections or runs SQL is refused while it is off.
+    - Saved connections live in `%LOCALAPPDATA%\VaultNotes\sql.db`, never in the notes folder, so never in the Drive backup. A SQL login password goes only to the Windows Credential Manager and never back to the page.
+    - The page never sends a file path: a SQLite connection's file is picked in a native dialog, must already exist and must be a SQLite file. Connection-string values are braced, so a server or user name cannot add options.
+    - Result rows stay in Python's memory, per tab, and reach the page a page at a time. Nothing a query returns is written to disk.
 
 ### Limits you should know about
 
