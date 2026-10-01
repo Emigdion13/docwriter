@@ -567,6 +567,20 @@ BRIDGE_SURFACE = [
     "terminal_set_favorite",
     "terminal_forget",
     "terminal_clear_recent",
+    "sql_state",
+    "sql_enable",
+    "sql_disable",
+    "sql_save_connection",
+    "sql_add_sqlite",
+    "sql_choose_sqlite_file",
+    "sql_delete_connection",
+    "sql_test_connection",
+    "sql_open",
+    "sql_run",
+    "sql_cancel",
+    "sql_rows",
+    "sql_copy",
+    "sql_close",
 ]
 
 

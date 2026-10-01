@@ -22,7 +22,10 @@ export function createSettingsOverlay({
   onPruneDrive,
   getTerminal,
   onEnableTerminal,
-  onDisableTerminal
+  onDisableTerminal,
+  getSql,
+  onEnableSql,
+  onDisableSql
 }) {
   const overlay = document.createElement('div');
   overlay.className = 'overlay';
@@ -151,6 +154,21 @@ export function createSettingsOverlay({
         </p>
       </div>
 
+      <div class="settings-group">
+        <label>SQL space</label>
+        <div class="drive-state" id="set-sql-state">
+          <span class="dot"></span>
+          <span class="grow" id="set-sql-text">Off</span>
+          <button class="btn" id="set-sql-toggle" type="button">${icon('database', 15)}<span>Turn on…</span></button>
+        </div>
+        <p class="settings-hint">
+          Query SQL Server and SQLite databases in tabs. Queries can change data, so
+          Windows asks before it is turned on. Connections are kept on this PC (not in
+          the notes folder or the Drive backup); SQL login passwords go in the Windows
+          Credential Manager.
+        </p>
+      </div>
+
       <div class="dlg-actions">
         <button class="btn" id="set-cancel" type="button">Close</button>
         <button class="btn primary" id="set-save" type="button">
@@ -226,6 +244,22 @@ export function createSettingsOverlay({
     paintTerminal();
   };
 
+  const paintSql = () => {
+    const q = getSql?.() || { enabled: false, connections: [] };
+    overlay.querySelector('#set-sql-state').classList.toggle('on', !!q.enabled);
+    const n = q.connections?.length || 0;
+    overlay.querySelector('#set-sql-text').textContent = q.enabled
+      ? `On · ${n} connection${n === 1 ? '' : 's'}${q.tabs ? ` · ${q.tabs} tab${q.tabs === 1 ? '' : 's'} open` : ''}`
+      : 'Off';
+    overlay.querySelector('#set-sql-toggle span').textContent = q.enabled ? 'Turn off' : 'Turn on…';
+  };
+
+  overlay.querySelector('#set-sql-toggle').onclick = async () => {
+    const q = getSql?.() || { enabled: false };
+    await (q.enabled ? onDisableSql?.() : onEnableSql?.());
+    paintSql();
+  };
+
   overlay.querySelector('#set-browse').onclick = async () => {
     const result = await onChooseFolder?.();
     if (result?.ok) {
@@ -267,6 +301,7 @@ export function createSettingsOverlay({
       paintDrive(getBackup ? getBackup() : null);
 
       paintTerminal();
+      paintSql();
       overlay.classList.add('open');
     },
     close: closeSettings,

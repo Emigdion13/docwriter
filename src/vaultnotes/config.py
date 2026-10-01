@@ -27,6 +27,22 @@ def get_app_dir() -> Path:
     return app_dir
 
 
+def get_local_app_dir() -> Path:
+    """Return the per-PC data folder (%LOCALAPPDATA%\\VaultNotes on Windows).
+
+    Unlike :func:`get_app_dir` it does not roam with the Windows profile, and
+    it is never inside the notes folder, so the Drive backup never sees it.
+    The SQL space keeps ``sql.db`` here.
+    """
+    if sys.platform == "win32" and "LOCALAPPDATA" in os.environ:
+        base = Path(os.environ["LOCALAPPDATA"])
+    elif "XDG_DATA_HOME" in os.environ:
+        base = Path(os.environ["XDG_DATA_HOME"])
+    else:
+        base = Path.home() / ".local" / "share"
+    return base / "VaultNotes"
+
+
 def get_default_notes_root() -> Path:
     """Return default notes root (%USERPROFILE%\\Documents\\VaultNotes on Windows)."""
     if sys.platform == "win32" and "USERPROFILE" in os.environ:
@@ -64,6 +80,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "shell": "cmd",
         "recent": [],
         "favorites": [],
+    },
+    # The SQL space.  Off until the user allows it in a native Windows dialog
+    # (api.sql_enable).  Its connections live in sql.db, not here.
+    "sql": {
+        "enabled": False,
     },
 }
 
@@ -244,11 +265,12 @@ class Config:
             self.data["autolock_minutes"] = defaults["autolock_minutes"]
             reset.append("autolock_minutes")
 
-        for block in ("look", "backup", "terminal"):
+        for block in ("look", "backup", "terminal", "sql"):
             if not isinstance(self.data.get(block), dict):
                 self.data[block] = defaults[block]
                 reset.append(block)
         look, backup, terminal = self.data["look"], self.data["backup"], self.data["terminal"]
+        sql = self.data["sql"]
         checks = {
             ("look", "theme"): look.get("theme") in ("nebula", "synthwave", "arctic"),
             ("look", "effects"): look.get("effects") in ("full", "lite", "off"),
@@ -265,6 +287,7 @@ class Config:
             ("terminal", "shell"): terminal.get("shell") in SHELL_IDS,
             ("terminal", "recent"): isinstance(terminal.get("recent"), list),
             ("terminal", "favorites"): isinstance(terminal.get("favorites"), list),
+            ("sql", "enabled"): isinstance(sql.get("enabled"), bool),
         }
         for (block, key), ok in checks.items():
             if not ok:

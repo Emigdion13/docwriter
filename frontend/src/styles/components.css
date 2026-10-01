@@ -2375,7 +2375,7 @@
   background: var(--glass-border);
 }
 
-.space-cmd .badge {
+.space-tool .badge {
   display: grid;
   place-items: center;
   padding: 4px 6px;
@@ -2391,7 +2391,7 @@
   display: none;
 }
 
-.app.terminal-mode > .cmdlist {
+.app.terminal-mode > .cmdlist:not(.sqllist) {
   display: flex;
 }
 
@@ -2850,4 +2850,516 @@
   flex-shrink: 0;
   margin-top: 1px;
   color: var(--warning);
+}
+
+/* =================================================================
+   The SQL space: connections in the list's column, query tabs in the
+   workspace.  The header and the tab strip are the CMD space's.
+   ================================================================= */
+.sqllist,
+.ws-sql {
+  display: none;
+}
+
+.app.sql-mode > .notelist {
+  display: none;
+}
+
+.app.sql-mode > .sqllist {
+  display: flex;
+}
+
+.app.sql-mode .workspace > :not(.ws-sql) {
+  display: none;
+}
+
+.app.sql-mode .ws-sql {
+  display: flex;
+}
+
+.app.panels-collapsed > .sqllist {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.ws-sql [hidden],
+.sqlc-dialog [hidden] {
+  display: none !important;
+}
+
+/* Connections */
+.sql-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.sql-open {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.sql-open .ic {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  color: var(--sql);
+  background: color-mix(in srgb, var(--sql) 12%, transparent);
+}
+
+.sql-open .txt {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.sql-open .nm,
+.sql-open .sub {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.sql-open .nm {
+  font: 500 13px/1.2 var(--font-ui);
+}
+
+.sql-open .sub {
+  font: 400 11px/1.2 var(--font-mono);
+  color: var(--faint);
+}
+
+.sql-driver {
+  margin: 8px 8px 0;
+  font: 400 10.5px/1.4 var(--font-mono);
+  color: var(--faint);
+}
+
+.sql-driver:empty {
+  display: none;
+}
+
+.sqllist.is-off .cmd-scroll {
+  opacity: .5;
+}
+
+/* The workspace */
+.ws-sql {
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.sql-conn {
+  width: auto;
+  max-width: 280px;
+  height: 34px;
+  padding: 0 10px;
+}
+
+.sql-run {
+  color: var(--sql);
+}
+
+.sql-run svg {
+  fill: currentColor;
+}
+
+#sql-stop:not(:disabled) {
+  color: var(--danger);
+}
+
+.term-tab.busy .term-tab-pick .dot {
+  display: block;
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.sql-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  background: color-mix(in srgb, var(--code-bg) 70%, transparent);
+  border-radius: 0 0 var(--r-panel) var(--r-panel);
+  overflow: hidden;
+}
+
+.ws-sql.no-tabs .term-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* One pane per tab, stacked; only the open one shows. */
+.sql-pane {
+  position: absolute;
+  inset: 0;
+  display: none;
+  grid-template-rows: var(--sql-editor-share, 42%) 7px minmax(0, 1fr);
+}
+
+.sql-pane.on {
+  display: grid;
+}
+
+.sql-editor {
+  min-height: 0;
+  overflow: hidden;
+  padding-left: 8px;
+}
+
+.sql-split {
+  position: relative;
+  cursor: row-resize;
+}
+
+.sql-split::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 3px;
+  height: 1px;
+  background: var(--glass-border);
+  transition: background .15s, box-shadow .15s;
+}
+
+.sql-split:hover::before {
+  background: var(--sql);
+  box-shadow: 0 0 8px var(--sql);
+}
+
+.sql-results {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.sql-rbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px 6px 18px;
+}
+
+.sql-rtabs {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.sql-rtab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  color: var(--muted);
+  font: 500 11.5px/1 var(--font-mono);
+  cursor: pointer;
+}
+
+.sql-rtab:hover {
+  color: var(--text);
+  background: var(--glass);
+}
+
+.sql-rtab.on {
+  color: var(--text);
+  background: var(--glass-strong);
+  border-color: var(--glass-border);
+}
+
+.sql-rtab .c {
+  color: var(--faint);
+}
+
+.sql-rtab.on .c {
+  color: var(--sql);
+}
+
+.sql-rtab.is-error {
+  color: var(--danger);
+}
+
+.sql-rmeta {
+  margin-left: auto;
+  font: 500 11px/1 var(--font-mono);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.sql-rbar .sql-copy {
+  width: 28px;
+  height: 28px;
+  border-color: transparent;
+  background: none;
+  color: var(--muted);
+}
+
+.sql-rbar .sql-copy:hover {
+  color: var(--sql);
+}
+
+.sql-rbody {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.sql-msgs {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  padding: 6px 18px 12px;
+  font: 400 12.5px/1.6 var(--font-mono);
+  color: var(--muted);
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.sql-msg.is-error {
+  color: var(--danger);
+}
+
+.sql-msg.is-warn {
+  color: var(--warning);
+}
+
+.sql-msg.is-faint {
+  margin-top: 6px;
+  color: var(--faint);
+}
+
+.sql-rempty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--faint);
+}
+
+.sql-rempty .kbd {
+  margin: 0 2px;
+}
+
+/* The result grid */
+.rg {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  outline: none;
+  font: 400 12px/1 var(--font-mono);
+  color: var(--text);
+  border-top: 1px solid var(--glass-border);
+}
+
+.rg.resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.rg-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: grid;
+  height: 30px;
+  min-width: 100%;
+  background: var(--surface);
+  border-bottom: 1px solid var(--glass-border);
+}
+
+.rg-hc {
+  position: relative;
+  min-width: 0;
+  padding: 0 10px;
+  font-weight: 600;
+  line-height: 30px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-right: 1px solid var(--glass-border);
+}
+
+.rg-hc.k-number {
+  text-align: right;
+}
+
+.rg-grip {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+}
+
+.rg-grip:hover {
+  background: color-mix(in srgb, var(--sql) 40%, transparent);
+}
+
+.rg-canvas {
+  position: relative;
+  overflow: clip;
+}
+
+.rg-window {
+  position: absolute;
+  left: 0;
+  overflow: clip;
+}
+
+.rg-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: grid;
+  width: 100%;
+  height: 26px;
+}
+
+.rg-row:hover .rg-c {
+  background: color-mix(in srgb, var(--sql) 6%, transparent);
+}
+
+.rg-c {
+  min-width: 0;
+  padding: 0 10px;
+  line-height: 26px;
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-right: 1px solid color-mix(in srgb, var(--glass-border) 60%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--glass-border) 60%, transparent);
+  user-select: none;
+}
+
+.rg-c.k-number {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.rg-num {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  text-align: right;
+  color: var(--faint);
+  background: var(--surface);
+}
+
+.rg-head .rg-num {
+  z-index: 3;
+}
+
+.rg-c.rg-null {
+  font-style: italic;
+  color: var(--faint);
+}
+
+.rg-c.rg-wait::after {
+  content: "…";
+  color: var(--faint);
+}
+
+.rg-c.sel {
+  background: color-mix(in srgb, var(--sql) 18%, transparent) !important;
+  box-shadow: inset 0 0 0 1px var(--sql);
+}
+
+/* Off: the same hero as the CMD space */
+.ws-sql.is-off .sql-body,
+.ws-sql.is-off .term-tabs,
+.ws-sql.is-off .term-actions {
+  display: none;
+}
+
+.ws-sql.is-off .term-off {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 40px;
+  text-align: center;
+  animation: rise .5s var(--ease) both;
+}
+
+/* The connection dialog */
+.sqlc-dialog {
+  width: min(540px, 94vw);
+  max-height: 92vh;
+  overflow-y: auto;
+  text-align: left;
+}
+
+.sqlc-dialog h3,
+.sqlc-dialog .dlg-sub {
+  text-align: center;
+}
+
+.sqlc-dialog .settings-select {
+  height: 38px;
+}
+
+.sqlc-login {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 10px;
+}
+
+.sqlc-dialog .check-row.sqlc-check {
+  margin-bottom: 8px;
+}
+
+.sqlc-dialog #sqlc-path {
+  color: var(--muted);
+}
+
+.sqlc-result {
+  min-height: 1.4em;
+  margin: 12px 0 16px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.sqlc-result.is-error {
+  color: var(--danger);
+}
+
+.sqlc-result.is-ok {
+  color: var(--success);
+}
+
+.sqlc-dialog .dlg-actions .sqlc-delete {
+  margin-right: auto;
 }

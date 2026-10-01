@@ -16,7 +16,7 @@ import { spaceIcon } from './icons.js';
 
 // UI Modules
 import { createToolbar, updateToolbarView, updateToolbarTheme, updateToolbarPanels } from './ui/toolbar.js';
-import { createSidebar, renderSpaces, updateDriveCard, setCmdEntry } from './ui/sidebar.js';
+import { createSidebar, renderSpaces, updateDriveCard, setToolEntry } from './ui/sidebar.js';
 import {
   createNoteList,
   renderNotes,
@@ -49,6 +49,9 @@ import { createSettingsOverlay } from './ui/settings.js';
 import { createGraphOverlay } from './ui/graphView.js';
 import { createTerminal } from './ui/terminal.js';
 import { createCommandList } from './ui/commandList.js';
+import { createSqlView } from './ui/sqlView.js';
+import { createSqlList } from './ui/sqlList.js';
+import { createSqlConnectionDialog } from './ui/sqlConnectionDialog.js';
 import { toast, initToasts } from './ui/toasts.js';
 import {
   createStatusBar,
@@ -84,6 +87,7 @@ const state = {
   viewMode: 'split', // 'edit' | 'split' | 'preview'
   panelsCollapsed: false, // Spaces and the note list hidden, the note gets the width
   terminalMode: false,  // the CMD space is showing instead of a note space
+  sqlMode: false,       // the SQL space is showing instead of a note space
   theme: 'nebula',
   effects: 'full',
   editorFontSize: 13.5,
@@ -128,6 +132,9 @@ let moveDialog = null;
 let tagBox = null;
 let terminalView = null;
 let commandList = null;
+let sqlView = null;
+let sqlList = null;
+let sqlConnDialog = null;
 
 // Timers
 let saveTimer = null;
@@ -554,11 +561,12 @@ function cmdEntrySub(t = terminalView?.getState()) {
 
 async function enterTerminalMode() {
   if (!(await flushSave())) return;
+  leaveSqlMode();
   if (!state.terminalMode) {
     state.terminalMode = true;
     document.getElementById('app')?.classList.add('terminal-mode');
     setAccentColor('--cmd');
-    setCmdEntry({ active: true });
+    setToolEntry('cmd', { active: true });
     const ws = document.getElementById('workspace');
     if (ws) replay(ws, 'swap');
   }
@@ -570,7 +578,7 @@ function leaveTerminalMode() {
   state.terminalMode = false;
   terminalView.hide();
   document.getElementById('app')?.classList.remove('terminal-mode');
-  setCmdEntry({ active: false });
+  setToolEntry('cmd', { active: false });
   setAccentColor(getActiveSpace()?.colorVar || '--accent');
 }
 
@@ -601,9 +609,88 @@ async function disableTerminal() {
   toast('The CMD space is off.', { icon: 'terminal' });
 }
 
+/* =================================================================
+   The SQL space: query tabs on saved connections instead of notes.  Like
+   CMD it is not one of state.spaces, so nothing built for notes sees it.
+   ================================================================= */
+
+function sqlEntrySub(q = sqlView?.getState()) {
+  if (!q?.enabled) return 'Off';
+  if (q.running) return `${q.running} running`;
+  if (q.tabs) return `${q.tabs} tab${q.tabs === 1 ? '' : 's'}`;
+  const n = q.connections.length;
+  return n ? `${n} connection${n === 1 ? '' : 's'}` : 'No connections';
+}
+
+async function enterSqlMode() {
+  if (!(await flushSave())) return;
+  leaveTerminalMode();
+  if (!state.sqlMode) {
+    state.sqlMode = true;
+    document.getElementById('app')?.classList.add('sql-mode');
+    setAccentColor('--sql');
+    setToolEntry('sql', { active: true });
+    const ws = document.getElementById('workspace');
+    if (ws) replay(ws, 'swap');
+  }
+  sqlView.show();
+}
+
+function leaveSqlMode() {
+  if (!state.sqlMode) return;
+  state.sqlMode = false;
+  sqlView.hide();
+  document.getElementById('app')?.classList.remove('sql-mode');
+  setToolEntry('sql', { active: false });
+  setAccentColor(getActiveSpace()?.colorVar || '--accent');
+}
+
+async function enableSql() {
+  const ok = await sqlView.enable();
+  if (ok) toast('The SQL space is on.', { icon: 'database' });
+  return ok;
+}
+
+async function disableSql() {
+  const ok = await confirmAction({
+    title: 'Turn off the SQL space?',
+    message: 'Every query tab is closed and disconnected. Your saved connections and passwords are kept.',
+    confirmLabel: 'Turn off',
+    iconName: 'database'
+  });
+  if (!ok) return;
+  await sqlView.disable();
+  toast('The SQL space is off.', { icon: 'database' });
+}
+
+/* Opens the connection dialog; afterwards the list and the tabs follow. */
+async function editSqlConnection(connection = null) {
+  const res = await sqlConnDialog.open(connection);
+  if (!res) return;
+  sqlView.setConnections(res.connections);
+  if (res.deleted) toast('Connection deleted.', { icon: 'trash' });
+  else if (!connection) await sqlView.newTab(res.connection.id);
+}
+
+async function addSqliteConnection() {
+  const res = await bridge.sql_add_sqlite();
+  if (res?.error) {
+    if (res.error !== 'cancelled') toast(res.message || 'That file could not be added.', { icon: 'alert' });
+    return;
+  }
+  sqlView.setConnections(res.connections);
+  await sqlView.newTab(res.connection.id);
+}
+
+async function openSqlConnection(connectionId) {
+  if (!state.sqlMode) await enterSqlMode();
+  await sqlView.newTab(connectionId);
+}
+
 async function selectSpace(spaceId, targetNoteId = null, animate = true) {
   if (!(await flushSave())) return;
   leaveTerminalMode();
+  leaveSqlMode();
   const prevSpaceId = state.currentSpaceId;
   state.currentSpaceId = spaceId;
   state.trashMode = false;
@@ -648,6 +735,7 @@ async function selectSpace(spaceId, targetNoteId = null, animate = true) {
 async function openNote(noteId) {
   if (!(await flushSave())) return;
   leaveTerminalMode();
+  leaveSqlMode();
   state.trashMode = false;
   state.currentNoteId = noteId;
   const space = getActiveSpace();
@@ -1636,11 +1724,12 @@ async function saveBackupSettings(changes) {
 
 async function getPaletteCommands() {
   const space = getActiveSpace();
-  const hasOpenNote = !!state.currentNote && !space?.locked && !state.trashMode && !state.terminalMode;
+  const hasOpenNote = !!state.currentNote && !space?.locked && !state.trashMode && !state.terminalMode && !state.sqlMode;
   const term = terminalView?.getState() || { enabled: false, shells: [], favorites: [] };
+  const sq = sqlView?.getState() || { enabled: false, connections: [], tabs: 0, active: null };
   const commands = [
     { label: 'New note', hint: 'Ctrl N', icon: 'plus', run: () => createNote() },
-    state.terminalMode
+    (state.terminalMode || state.sqlMode)
       ? { label: `Back to ${space?.name || 'notes'}`, icon: spaceIcon(space), colorVar: space?.colorVar, run: () => selectSpace(state.currentSpaceId) }
       : { label: 'Open CMD', sub: term.enabled ? term.shellName : 'off until you turn it on', icon: 'terminal', colorVar: '--cmd', run: () => enterTerminalMode() },
     ...(term.enabled ? [
@@ -1672,6 +1761,29 @@ async function getPaletteCommands() {
       { label: 'Turn off the CMD space', icon: 'terminal', colorVar: '--cmd', run: () => disableTerminal() }
     ] : [
       { label: 'Turn on the CMD space…', sub: 'Windows asks you to confirm', icon: 'terminal', colorVar: '--cmd', run: async () => { await enterTerminalMode(); await enableTerminal(); } }
+    ]),
+    ...(!state.sqlMode ? [
+      { label: 'Open SQL', sub: sq.enabled ? sqlEntrySub(sq) : 'off until you turn it on', icon: 'database', colorVar: '--sql', run: () => enterSqlMode() }
+    ] : []),
+    ...(sq.enabled ? [
+      ...sq.connections.map(c => ({
+        label: `SQL: New query on ${c.name}`,
+        sub: `${c.engineName} · ${c.where}`,
+        icon: 'database',
+        colorVar: '--sql',
+        run: () => openSqlConnection(c.id)
+      })),
+      ...(state.sqlMode && sq.active ? [
+        sq.active.running
+          ? { label: 'SQL: Stop the query', sub: sq.active.name, icon: 'stop', colorVar: '--sql', run: () => sqlView.cancel() }
+          : { label: 'SQL: Run the query', sub: sq.active.name, hint: 'Ctrl Enter', icon: 'play', colorVar: '--sql', run: () => sqlView.run() },
+        { label: 'SQL: Close this tab', sub: sq.active.name, hint: 'Ctrl Shift W', icon: 'x', colorVar: '--sql', run: () => sqlView.closeTab() }
+      ] : []),
+      { label: 'SQL: New SQL Server connection…', icon: 'plus', colorVar: '--sql', run: async () => { await enterSqlMode(); await editSqlConnection(); } },
+      { label: 'SQL: Add a SQLite file…', icon: 'file', colorVar: '--sql', run: async () => { await enterSqlMode(); await addSqliteConnection(); } },
+      { label: 'Turn off the SQL space', icon: 'database', colorVar: '--sql', run: () => disableSql() }
+    ] : [
+      { label: 'Turn on the SQL space…', sub: 'Windows asks you to confirm', icon: 'database', colorVar: '--sql', run: async () => { await enterSqlMode(); await enableSql(); } }
     ]),
     ...(hasOpenNote ? [
       state.currentNote.important
@@ -1864,8 +1976,8 @@ function setupShortcuts() {
     if (e.target?.closest?.('.ws-terminal .term-host')) {
       if (!mod || !(key === 'k' || key === 'l' || e.key === '\\')) return;
     }
-    // Keys about the open note do nothing while the CMD space shows.
-    if (state.terminalMode && mod && ['n', 'd', 's', 'e'].includes(key)) {
+    // Keys about the open note do nothing while the CMD or SQL space shows.
+    if ((state.terminalMode || state.sqlMode) && mod && ['n', 'd', 's', 'e'].includes(key)) {
       e.preventDefault();
       return;
     }
@@ -1873,6 +1985,28 @@ function setupShortcuts() {
       e.preventDefault();
       commandList?.focusFilter();
       return;
+    }
+    if (state.sqlMode) {
+      // The SQL editor has its own Ctrl+F (find), Ctrl+Enter and F5.
+      if (e.target?.closest?.('.ws-sql .cm-editor')) {
+        if (!mod || !(key === 'k' || key === 'l' || e.key === '\\')) return;
+      } else if (e.key === 'F5' || (mod && e.key === 'Enter')) {
+        e.preventDefault(); // F5 would reload the page and drop every tab
+        sqlView.run();
+        return;
+      } else if (mod && e.shiftKey && key === 't') {
+        e.preventDefault();
+        sqlView.newTab();
+        return;
+      } else if (mod && e.shiftKey && key === 'w') {
+        e.preventDefault();
+        sqlView.closeTab();
+        return;
+      } else if (mod && key === 'f') {
+        e.preventDefault();
+        sqlList?.focusFilter();
+        return;
+      }
     }
 
     if (mod && key === 'k') {
@@ -2058,7 +2192,7 @@ async function init() {
   // Mount Sidebar
   const sidebarContainer = document.getElementById('sidebar');
   const sidebarEl = createSidebar({
-    onSelectSpace: (id) => (id === 'cmd' ? enterTerminalMode() : selectSpace(id)),
+    onSelectSpace: (id) => (id === 'cmd' ? enterTerminalMode() : id === 'sql' ? enterSqlMode() : selectSpace(id)),
     onNewVault: async () => {
       // The setup dialog creates any missing built-in vaults. When both
       // vaults already exist there is nothing to set up in v1.
@@ -2122,12 +2256,33 @@ async function init() {
     onListsChanged: (t) => commandList.render(t),
     onStateChanged: (t) => {
       commandList.render(t);
-      setCmdEntry({ sub: cmdEntrySub(t) });
+      setToolEntry('cmd', { sub: cmdEntrySub(t) });
     },
     notify: (message) => toast(message, { icon: 'terminal' })
   });
   document.getElementById('workspace')?.appendChild(terminalView.element);
   await terminalView.refresh();
+
+  // The SQL space: its connections share the note list's column too, and
+  // the query tabs sit in the workspace; CSS shows them only in SQL mode.
+  sqlList = createSqlList({
+    onOpen: (id) => openSqlConnection(id),
+    onEdit: (id) => editSqlConnection(sqlView.getState().connections.find(c => c.id === id) || null),
+    onNewServer: () => editSqlConnection(),
+    onNewSqlite: () => addSqliteConnection()
+  });
+  commandList.element.after(sqlList.element);
+
+  sqlView = createSqlView({
+    onStateChanged: (q) => {
+      sqlList.render(q);
+      setToolEntry('sql', { sub: sqlEntrySub(q) });
+    },
+    notify: (message) => toast(message, { icon: 'database' }),
+    onNewConnection: () => editSqlConnection()
+  });
+  document.getElementById('workspace')?.appendChild(sqlView.element);
+  await sqlView.refresh();
 
   // Mount Status Bar
   const statusBarContainer = document.getElementById('statusbar');
@@ -2252,6 +2407,11 @@ async function init() {
   moveDialog = createMoveDialog();
   overlaysRoot.appendChild(moveDialog.element);
 
+  sqlConnDialog = createSqlConnectionDialog();
+  overlaysRoot.appendChild(sqlConnDialog.element);
+  // Choosing another SQLite file saves at once, before the dialog closes.
+  sqlConnDialog.element.addEventListener('sql-connections', (e) => sqlView.setConnections(e.detail));
+
   settingsOverlay = createSettingsOverlay({
     getSettings: () => ({
       look: { theme: state.theme, effects: state.effects, editor_font_size: state.editorFontSize },
@@ -2282,7 +2442,10 @@ async function init() {
     onChooseFolder: () => chooseNotesFolder(),
     getTerminal: () => terminalView.getState(),
     onEnableTerminal: () => enableTerminal(),
-    onDisableTerminal: () => disableTerminal()
+    onDisableTerminal: () => disableTerminal(),
+    getSql: () => sqlView.getState(),
+    onEnableSql: () => enableSql(),
+    onDisableSql: () => disableSql()
   });
   overlaysRoot.appendChild(settingsOverlay.element);
 
