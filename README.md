@@ -442,6 +442,19 @@ SQL space is.
   works: join tables that came from different servers, filter, group, or make a new
   virtual table with `CREATE TABLE late AS SELECT …` (and change or drop them with SQL).
   Run, stop, copy and the grid work as in SQL.
+- **Use one on another server:** in a SQL tab, the table button in the header (or ↑ on
+  a virtual table in the list, or *Use … in the SQL tab* in the palette) copies a
+  virtual table into **that tab's connection** as a temporary table: `#pending_batches`
+  on SQL Server, `temp.pending_batches` on SQLite. The tab's queries can then join it
+  with the server's own tables:
+  `SELECT p.*, o.owner FROM #pending_batches p JOIN dbo.Owners o ON o.batch_id = p.batch_id`.
+  It lasts as long as the tab stays connected (other tabs do not see it, and the app
+  says so if the tab had to connect again); using it again replaces it. An empty tab
+  gets `SELECT * FROM #pending_batches` to start from. ■ stops a copy partway, and
+  nothing half-copied is kept. On SQL Server each column gets a type from its values:
+  `BIGINT`, `FLOAT`, `DATE` or `DATETIME2` for dates kept as text, `NVARCHAR(n)` sized to
+  the longest text, `VARBINARY(MAX)` for binary. Rows go in as multi-row `INSERT`s, which
+  every SQL Server driver accepts, including the one built into Windows.
 - The pencil renames a table and ✕ deletes it (the database it came from is not
   touched).
 - **Where they live:** `%LOCALAPPDATA%\VaultNotes\vt.db`, a plain SQLite file on this

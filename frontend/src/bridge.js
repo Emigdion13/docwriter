@@ -1200,6 +1200,20 @@ export const bridge = {
     return { ok: true, table: { name, rows: table.rows, columns: table.columns }, tables: mockSql.vtables.map(t => ({ ...t })) };
   },
 
+  /** Copies a virtual table into a tab's connection: #name (SQL Server) or temp.name (SQLite). */
+  async sql_push_vt(session_id, name) {
+    const api = await waitForBridge();
+    if (api?.sql_push_vt) return await api.sql_push_vt(session_id, name);
+    const session = mockSql.sessions.get(session_id);
+    if (!session) return { error: 'not_open', message: 'That query tab is not connected any more.' };
+    const table = mockSql.vtables.find(t => t.name.toLowerCase() === String(name).toLowerCase());
+    if (!table) return { error: 'not_found', message: 'That virtual table does not exist any more.' };
+    setTimeout(() => events.emit('sql_push_progress', { session: session_id, table: table.name, rows: Math.ceil(table.rows / 2) }), 150);
+    await new Promise(r => setTimeout(r, 500));
+    const target = session.connection.engine === 'sqlite' ? `temp.${table.name}` : `#${table.name}`;
+    return { ok: true, target, rows: table.rows, table: table.name, columns: table.columns.map(c => ({ name: c, type: 'NVARCHAR(50)' })), elapsedMs: 500 };
+  },
+
   async sql_rename_vt(name, new_name) {
     const api = await waitForBridge();
     if (api?.sql_rename_vt) return await api.sql_rename_vt(name, new_name);

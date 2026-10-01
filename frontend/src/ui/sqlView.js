@@ -9,7 +9,9 @@
 
    With kind: 'vt' the same view is the SQL - VT space: every tab is on
    the virtual tables' own database (connection id "vt"), and a result
-   can be kept as a virtual table from either space.
+   can be kept as a virtual table from either space.  A SQL tab can take a
+   virtual table in as a temporary table (#name on SQL Server), to join it
+   with the server's own tables.
    ================================================================= */
 
 import { basicSetup } from 'codemirror';
@@ -23,7 +25,7 @@ import { tags as t } from '@lezer/highlight';
 import { bridge, events } from '../bridge.js';
 import { icon } from '../icons.js';
 import { createResultGrid } from './resultGrid.js';
-import { confirmAction, promptText } from './dialogs.js';
+import { confirmAction, pickOne, promptText } from './dialogs.js';
 
 // The most tabs open at once (Python's MAX_SESSIONS).
 export const MAX_TABS = 8;
@@ -106,6 +108,9 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
         <button class="btn icon" id="sql-stop" type="button" aria-label="Stop the query" title="Stop the query">
           ${icon('stop', 15)}
         </button>
+        <button class="btn icon" id="sql-use" type="button" aria-label="Use a virtual table in this tab" title="Use a virtual table in this tab: copies it into this connection as a temporary table (#name)">
+          ${icon('table', 15)}
+        </button>
         <button class="btn icon" id="sql-save" type="button" aria-label="Save this query" title="Save this query on its connection (Ctrl+S; Ctrl+Shift+S saves a copy)">
           ${icon('save', 15)}
         </button>
@@ -151,6 +156,7 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
   const runButton = root.querySelector('#sql-run');
   const stopButton = root.querySelector('#sql-stop');
   const saveButton = root.querySelector('#sql-save');
+  const useButton = root.querySelector('#sql-use');
   const statusEl = root.querySelector('#sql-status');
   const whereEl = root.querySelector('#sql-where');
 
@@ -271,6 +277,8 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
     saveButton.disabled = !info.enabled || !active || !connection(active.connectionId);
     runButton.hidden = stopButton.hidden = !active;
     saveButton.hidden = !active || vt;
+    useButton.hidden = !active || vt;
+    useButton.disabled = !info.enabled || !active || Boolean(active.running) || !connection(active.connectionId);
     paintTabs();
     onStateChanged?.(publicState());
   }
@@ -287,6 +295,8 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
       openQueries: tabs.filter(tab => tab.saved).map(tab => tab.saved.id),
       active: active ? {
         connectionId: active.connectionId,
+        connectionName: connName(active),
+        engine: connection(active.connectionId)?.engine || null,
         name: tabLabel(active),
         running: Boolean(active.running),
         savedId: active.saved?.id || null,
@@ -526,6 +536,11 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
       tab.sessionId = res.id;
       tab.conn = res.connection;
       setStatus(tab, '');
+      if (tab.pushed?.length) {
+        // A new connection starts with no temporary tables.
+        notify?.(`Connected again, so ${tab.pushed.map(p => p.target).join(', ')} ${tab.pushed.length === 1 ? 'is' : 'are'} gone. Use ${tab.pushed.length === 1 ? 'it' : 'them'} again if you need ${tab.pushed.length === 1 ? 'it' : 'them'}.`);
+        tab.pushed = [];
+      }
       return true;
     })();
     try {
@@ -780,6 +795,66 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
     }
   }
 
+  events.on('sql_push_progress', (data) => {
+    const tab = tabBySession(data?.session);
+    if (!tab || tab.running !== 'push') return;
+    setStatus(tab, `Copying ${data.table}… ${plural(data.rows, 'row')}`);
+  });
+
+  /* Copies a virtual table into the tab's own connection as a temporary
+     table, so its queries can join it with the server's tables. */
+  async function pushVt(tab = active, name = null) {
+    if (vt || !tab || !info.enabled) return false;
+    if (tab.running) {
+      notify?.('Wait for the query to finish first.');
+      return false;
+    }
+    if (!name) {
+      const engine = connection(tab.connectionId)?.engine;
+      name = await pickOne({
+        title: 'Use a virtual table',
+        message: `It is copied into ${connName(tab)} as ${engine === 'sqlite' ? 'a temporary table' : '#name'}, for this tab's queries. It lasts while the tab stays connected.`,
+        items: info.tables.map(t => ({
+          id: t.name,
+          label: t.name,
+          sub: `${plural(t.rows, 'row')} · ${t.columns.length} col${t.columns.length === 1 ? '' : 's'}${t.source ? ` · from ${t.source.name}` : ''}`,
+          icon: 'table'
+        })),
+        colorVar: '--vt',
+        empty: 'No virtual tables yet. Keep a result with the table button above it first.'
+      });
+      if (!name || !tabs.includes(tab)) return false;
+    }
+    tab.running = 'push';
+    paint();
+    if (!tab.sessionId && !(await connect(tab))) {
+      tab.running = null;
+      paint();
+      return false;
+    }
+    setStatus(tab, `Copying ${name}…`);
+    const res = await bridge.sql_push_vt(tab.sessionId, name);
+    tab.running = null;
+    if (!tabs.includes(tab)) return false;
+    if (res?.error) {
+      setStatus(tab, res.error === 'cancelled' ? 'Stopped' : '');
+      paint();
+      if (res.error !== 'cancelled') notify?.(res.message || 'The virtual table could not be copied.');
+      else notify?.(`Stopped copying ${name}; nothing was kept.`);
+      return false;
+    }
+    tab.pushed = [...(tab.pushed || []).filter(p => p.target !== res.target), { table: res.table, target: res.target }];
+    setStatus(tab, `${res.target} ready · ${plural(res.rows, 'row')}`);
+    // An empty tab gets a query to start from.
+    if (!tab.editor.state.doc.length) {
+      tab.editor.dispatch({ changes: { from: 0, insert: `SELECT *\nFROM ${res.target}` } });
+    }
+    paint();
+    notify?.(`Copied ${plural(res.rows, 'row')} into ${res.target} on ${connName(tab)}. Use ${res.target} in this tab's SQL.`);
+    if (tab === active && visible) tab.editor.focus();
+    return true;
+  }
+
   events.on('sql_progress', (data) => {
     const tab = tabBySession(data?.session);
     if (!tab || !tab.running) return;
@@ -842,6 +917,7 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
   runButton.onclick = () => run();
   stopButton.onclick = () => cancel();
   saveButton.onclick = (e) => (e.shiftKey ? saveAs() : save());
+  useButton.onclick = () => pushVt();
   root.querySelector('#sql-enable').onclick = () => (onEnable ? onEnable() : enable());
   root.querySelector('#sql-empty-new').onclick = () => (vt ? newTab('vt') : onNewConnection?.());
 
@@ -1010,6 +1086,9 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
     saveAs: () => saveAs(),
     /** Opens a saved query on its connection; { run: true } runs it too. */
     openSaved,
+
+    /** Copies virtual table `name` (or one picked) into the open tab's connection. */
+    pushVt: (name) => pushVt(active, name),
 
     /** A virtual table was renamed: tabs titled after it follow (their SQL does not). */
     retitle(oldName, newName) {

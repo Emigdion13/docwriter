@@ -438,6 +438,7 @@ The frontend calls Python with `await window.pywebview.api.<name>(...)`, after t
     - The page never sends a file path: a SQLite connection's file is picked in a native dialog, must already exist and must be a SQLite file. Connection-string values are braced, so a server or user name cannot add options.
     - Result rows stay in Python's memory, per tab, and reach the page a page at a time. A query's result is written to disk only when the user keeps it as a virtual table.
     - Virtual tables (the SQL - VT space) live in `%LOCALAPPDATA%\VaultNotes\vt.db`, an unencrypted SQLite file next to `sql.db`: never in the notes folder, so never in the Drive backup. Their names are plain identifiers (`[A-Za-z_][A-Za-z0-9_]{0,62}`, not `sqlite_*` or `_vt_*`), and every identifier the app writes into SQL is quoted. The space's tabs can only open `vt.db` itself (connection id `vt`), never a path from the page.
+    - Using a virtual table in a SQL tab (`sql_push_vt`) copies it into that tab's own connection as a temporary table (`#name` on SQL Server, `temp.name` on SQLite): nothing is created in the server's databases, and it is gone when the tab disconnects. The rows travel as query parameters, never spliced into SQL text.
 
 ### Limits you should know about
 

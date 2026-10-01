@@ -3496,6 +3496,31 @@
   border-color: color-mix(in srgb, var(--c, var(--accent)) 32%, transparent);
 }
 
+/* Picking a virtual table to use in a SQL tab */
+.pick-dialog {
+  width: min(480px, 94vw);
+}
+
+.pick-items {
+  max-height: min(52vh, 420px);
+  overflow-y: auto;
+}
+
+.pick-items .move-target .nm {
+  font: 500 13px/1.2 var(--font-mono);
+}
+
+.pick-empty {
+  margin: 0;
+  padding: 10px 4px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.vt-row {
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+}
+
 /* The SQL - VT space: the SQL space's look, in its own colour */
 .ws-vt,
 .vtlist {
@@ -3505,10 +3530,6 @@
 .vtlist .vt-open .nm {
   font-family: var(--font-mono);
   font-size: 12.5px;
-}
-
-.vt-row {
-  grid-template-columns: minmax(0, 1fr) auto auto;
 }
 
 .sql-rbar .sql-keep {

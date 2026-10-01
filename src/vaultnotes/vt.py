@@ -23,7 +23,7 @@ import threading
 import uuid
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 from vaultnotes.sql import SqlError, query_preview
 
@@ -267,6 +267,33 @@ class VtStore:
             db.execute(f"DROP TABLE {quote(current)}")
             return True
 
+    def describe(self, name: str) -> tuple[str, list[str], list[str]]:
+        """A table's real name, its columns and their declared types."""
+        with closing(self._open()) as db:
+            current = next((t for t in self._tables(db) if t.lower() == name.lower()), None)
+            if current is None:
+                raise SqlError("not_found", "That virtual table does not exist any more.")
+            info = db.execute(f"PRAGMA table_info({quote(current)})").fetchall()
+        return current, [row["name"] for row in info], [row["type"] for row in info]
+
+    def count(self, name: str) -> int:
+        with closing(self._open()) as db:
+            return db.execute(f"SELECT COUNT(*) FROM {quote(name)}").fetchone()[0]
+
+    def rows(self, name: str) -> Iterator[tuple[Any, ...]]:
+        """Every row of a table, read as it is used (a big table is not held in memory)."""
+        db = self._open()
+        try:
+            cursor = db.execute(f"SELECT * FROM {quote(name)}")
+            while True:
+                chunk = cursor.fetchmany(INSERT_BATCH)
+                if not chunk:
+                    break
+                for row in chunk:
+                    yield tuple(row)
+        finally:
+            db.close()
+
     def forget_stale_meta(self) -> None:
         """Drop source notes of tables dropped with SQL in the space itself."""
         with self._lock, closing(self._open()) as db:
@@ -274,3 +301,107 @@ class VtStore:
             for row in db.execute(f"SELECT name FROM {_META}").fetchall():
                 if row["name"].lower() not in tables:
                     db.execute(f"DELETE FROM {_META} WHERE name = ?", (row["name"],))
+
+
+# ----------------------------------------------------------------------
+# Pushing a virtual table into a query tab's connection (#temp tables)
+# ----------------------------------------------------------------------
+#: SQL Server's longest sized NVARCHAR; longer text becomes NVARCHAR(MAX).
+NVARCHAR_LIMIT = 4000
+
+
+class _ColumnScan:
+    """What one column's values look like, to choose its SQL Server type."""
+
+    def __init__(self) -> None:
+        self.ints = self.floats = self.texts = self.blobs = 0
+        self.longest = 0          # characters of the longest text (numbers as text included)
+        self.dates = 0            # texts that are a date: 2026-10-01
+        self.datetimes = 0        # texts that are a date and time: 2026-10-01 08:30:00
+
+    def add(self, value: Any) -> None:
+        if value is None:
+            return
+        if isinstance(value, bytes):
+            self.blobs += 1
+            return
+        if isinstance(value, int):
+            self.ints += 1
+            self.longest = max(self.longest, len(str(value)))
+            return
+        if isinstance(value, float):
+            self.floats += 1
+            self.longest = max(self.longest, len(repr(value)))
+            return
+        text = str(value)
+        self.texts += 1
+        self.longest = max(self.longest, len(text))
+        if _DATE.fullmatch(text):
+            try:
+                dt.date.fromisoformat(text)
+                self.dates += 1
+            except ValueError:
+                pass
+        elif _DATETIME.fullmatch(text):
+            try:
+                dt.datetime.fromisoformat(text)
+                self.datetimes += 1
+            except ValueError:
+                pass
+
+    def mssql_type(self) -> str:
+        """The SQL Server type for these values, and so how each is sent."""
+        kinds = sum(1 for n in (self.ints, self.floats, self.texts, self.blobs) if n)
+        if kinds == 0:
+            return "NVARCHAR(50)"
+        if self.blobs and kinds == 1:
+            return "VARBINARY(MAX)"
+        if not self.texts and not self.blobs:
+            if self.floats:
+                return "FLOAT"
+            return "BIGINT"
+        if kinds == 1 and self.dates == self.texts:
+            return "DATE"
+        if kinds == 1 and self.datetimes == self.texts:
+            return "DATETIME2(7)"
+        if self.blobs:
+            return "NVARCHAR(MAX)"
+        return f"NVARCHAR({max(1, self.longest)})" if self.longest <= NVARCHAR_LIMIT else "NVARCHAR(MAX)"
+
+
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_DATETIME = re.compile(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?")
+
+
+def mssql_converter(sql_type: str) -> Callable[[Any], Any]:
+    """How a value from vt.db is sent for a column of ``sql_type``."""
+    if sql_type == "DATE":
+        return lambda v: None if v is None else dt.date.fromisoformat(v)
+    if sql_type.startswith("DATETIME2"):
+        return lambda v: None if v is None else dt.datetime.fromisoformat(v)
+    if sql_type == "VARBINARY(MAX)":
+        return lambda v: v
+    if sql_type in ("BIGINT", "FLOAT"):
+        return lambda v: v
+    return lambda v: None if v is None else (v.hex().upper() if isinstance(v, bytes) else str(v))
+
+
+def push_plan(store: "VtStore", name: Any, engine: str) -> dict[str, Any]:
+    """How to copy virtual table ``name`` into a connection of ``engine``.
+
+    For SQL Server every row is read once first, to choose each column's
+    type from its values; the rows are then read again while they are sent.
+    """
+    table, columns, declared = store.describe(clean_table_name(name))
+    if engine == "mssql":
+        scans = [_ColumnScan() for _ in columns]
+        count = 0
+        for row in store.rows(table):
+            count += 1
+            for scan, value in zip(scans, row):
+                scan.add(value)
+        types = [scan.mssql_type() for scan in scans]
+    else:
+        count = store.count(table)
+        types = [t or "" for t in declared]
+    return {"table": table, "columns": columns, "types": types, "rows": count}
