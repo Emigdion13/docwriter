@@ -346,8 +346,22 @@ const mockSql = {
       file: 'C:\\Users\\you\\scratch.db', where: 'scratch.db', hasPassword: false
     }
   ],
-  sessions: new Map() // id -> { connection, running, results }
+  sessions: new Map(), // id -> { connection, running, results }
+  queries: [
+    { id: 'mock-q1', connection: 'mock-dev', name: 'Failed batches today', text: "-- the ones to look at first\nSELECT TOP 10 *\nFROM dbo.Batches\nWHERE status = 'Failed'" },
+    { id: 'mock-q2', connection: 'mock-dev', name: 'Rows loaded by source', text: 'SELECT source, SUM(rows_loaded) AS rows_loaded\nFROM dbo.Batches\nGROUP BY source' },
+    { id: 'mock-q3', connection: 'mock-lite', name: 'Everything', text: 'SELECT * FROM batches' }
+  ]
 };
+
+function mockSqlQueries() {
+  return mockSql.queries
+    .map(q => ({
+      id: q.id, connection: q.connection, name: q.name, modified: '2026-10-01T09:00:00Z', lastRun: q.lastRun || null,
+      preview: q.text.split('\n').map(l => l.trim()).find(l => l && !l.startsWith('--')) || ''
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
 let mockSqlSeq = 0;
 
 const MOCK_SQL_COLUMNS = [
@@ -979,6 +993,7 @@ export const bridge = {
       enabled: mockSql.enabled,
       driver: 'ODBC Driver 18 for SQL Server',
       connections: mockSql.enabled ? mockSqlPublic() : [],
+      queries: mockSql.enabled ? mockSqlQueries() : [],
       sessions: []
     };
   },
@@ -1035,7 +1050,35 @@ export const bridge = {
     const api = await waitForBridge();
     if (api?.sql_delete_connection) return await api.sql_delete_connection(connection_id);
     mockSql.connections = mockSql.connections.filter(c => c.id !== connection_id);
-    return { ok: true, connections: mockSqlPublic() };
+    mockSql.queries = mockSql.queries.filter(q => q.connection !== connection_id);
+    return { ok: true, connections: mockSqlPublic(), queries: mockSqlQueries() };
+  },
+
+  /** Saves SQL on a connection: new, or query.id changed (another connection moves it). */
+  async sql_save_query(query) {
+    const api = await waitForBridge();
+    if (api?.sql_save_query) return await api.sql_save_query(query);
+    if (!String(query?.name || '').trim()) return { error: 'invalid_input', message: 'Name is required.' };
+    if (!String(query?.text || '').trim()) return { error: 'empty', message: 'There is no SQL to save.' };
+    const old = mockSql.queries.find(q => q.id === query.id);
+    const saved = { ...(old || {}), id: old?.id || `mock-q${++mockSqlSeq}`, connection: query.connection, name: query.name.trim(), text: query.text };
+    mockSql.queries = [...mockSql.queries.filter(q => q.id !== saved.id), saved];
+    return { ok: true, query: { ...mockSqlQueries().find(q => q.id === saved.id), text: saved.text }, queries: mockSqlQueries() };
+  },
+
+  async sql_get_query(query_id) {
+    const api = await waitForBridge();
+    if (api?.sql_get_query) return await api.sql_get_query(query_id);
+    const found = mockSql.queries.find(q => q.id === query_id);
+    if (!found) return { error: 'not_found', message: 'That saved query does not exist any more.' };
+    return { ok: true, query: { ...mockSqlQueries().find(q => q.id === query_id), text: found.text } };
+  },
+
+  async sql_delete_query(query_id) {
+    const api = await waitForBridge();
+    if (api?.sql_delete_query) return await api.sql_delete_query(query_id);
+    mockSql.queries = mockSql.queries.filter(q => q.id !== query_id);
+    return { ok: true, queries: mockSqlQueries() };
   },
 
   async sql_test_connection(connection, password = null) {
@@ -1057,9 +1100,12 @@ export const bridge = {
     return { ok: true, id, connection: { ...connection }, name: connection.name, engine: connection.engine, running: false };
   },
 
-  async sql_run(session_id, text) {
+  /** query_id: the saved query the tab shows, so its "last run" moves forward. */
+  async sql_run(session_id, text, query_id = null) {
     const api = await waitForBridge();
-    if (api?.sql_run) return await api.sql_run(session_id, text);
+    if (api?.sql_run) return await api.sql_run(session_id, text, query_id);
+    const savedQuery = mockSql.queries.find(q => q.id === query_id);
+    if (savedQuery) savedQuery.lastRun = new Date().toISOString();
     const session = mockSql.sessions.get(session_id);
     if (!session) return { error: 'not_open', message: 'That query tab is not connected any more.' };
     if (!String(text).trim()) return { error: 'empty', message: 'There is no SQL to run.' };

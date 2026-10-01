@@ -77,6 +77,7 @@ export function createSqlConnectionDialog() {
   const $ = (id) => overlay.querySelector(id);
   const result = $('#sqlc-result');
   let editing = null;   // the connection being edited, or null for a new one
+  let queryCount = 0;   // saved queries on it, which deleting it removes too
   let resolver = null;
   let busy = false;
 
@@ -168,7 +169,7 @@ export function createSqlConnectionDialog() {
     if (!editing) return;
     const ok = await confirmAction({
       title: `Delete “${editing.name}”?`,
-      message: 'The connection and its saved password are removed, and its query tabs are disconnected. Your databases are not touched.',
+      message: `The connection${queryCount ? `, its ${queryCount} saved quer${queryCount === 1 ? 'y' : 'ies'}` : ''} and its saved password are removed, and its query tabs are disconnected. Your databases are not touched.`,
       confirmLabel: 'Delete',
       danger: true,
       iconName: 'trash'
@@ -179,7 +180,7 @@ export function createSqlConnectionDialog() {
       setResult(res.message || 'The connection could not be deleted.', 'error');
       return;
     }
-    close({ deleted: editing.id, connections: res.connections });
+    close({ deleted: editing.id, connections: res.connections, queries: res.queries });
   };
 
   form.addEventListener('submit', async (e) => {
@@ -211,10 +212,11 @@ export function createSqlConnectionDialog() {
     /**
      * Opens the dialog for a new SQL Server connection (no argument) or to
      * edit `connection`.  Resolves { connection, connections },
-     * { deleted, connections } or null.
+     * { deleted, connections, queries } or null.
      */
-    open(connection = null) {
+    open(connection = null, { queryCount: count = 0 } = {}) {
       editing = connection;
+      queryCount = count;
       const isSqlite = engine() === 'sqlite';
       $('#sqlc-title').textContent = connection
         ? `Edit ${isSqlite ? 'SQLite' : 'SQL Server'} connection`

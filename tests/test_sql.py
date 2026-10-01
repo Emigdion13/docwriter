@@ -526,7 +526,7 @@ def test_no_sql_endpoint_raises_while_on(tmp_path: Path) -> None:
     api, _ = turned_on(tmp_path)
     api.window = None  # no native dialogs in a sweep
     names = [name for name in dir(Api) if name.startswith("sql_")]
-    assert len(names) == 14
+    assert len(names) == 17
     for name in names:
         method = getattr(api, name)
         arity = len(inspect.signature(method).parameters)
@@ -536,3 +536,92 @@ def test_no_sql_endpoint_raises_while_on(tmp_path: Path) -> None:
             assert isinstance(result, dict), name
             assert {"ok", "error", "enabled"} & set(result), (name, result)
             assert result.get("error") != "internal_error", (name, hostile)
+
+
+# ----------------------------------------------------------------------
+# Saved queries
+# ----------------------------------------------------------------------
+def test_saved_queries_live_on_their_connection(tmp_path: Path) -> None:
+    api, _ = turned_on(tmp_path)
+    dev = api.sql_save_connection({"engine": "mssql", "name": "Dev", "server": "dev"})["connection"]
+    qa = api.sql_save_connection({"engine": "mssql", "name": "QA", "server": "qa"})["connection"]
+
+    res = api.sql_save_query({"connection": dev["id"], "name": "Pending batches", "text": "-- oldest first\nSELECT * FROM batches"})
+    query = res["query"]
+    assert query["connection"] == dev["id"] and query["text"].endswith("FROM batches")
+    assert query["preview"] == "SELECT * FROM batches" and query["lastRun"] is None
+    # The list carries no SQL; the tab asks for it when it opens.
+    assert res["queries"] == [{k: v for k, v in query.items() if k != "text"}]
+    assert api.sql_get_query(query["id"])["query"]["text"] == query["text"]
+
+    # Saving again changes it in place; another connection moves it.
+    moved = api.sql_save_query({**query, "connection": qa["id"], "name": "Pending", "text": "SELECT 1"})["query"]
+    assert moved["id"] == query["id"] and moved["connection"] == qa["id"] and moved["name"] == "Pending"
+    assert len(api.sql_state()["queries"]) == 1
+
+    # They survive a restart: sql.db is on disk.
+    again = make_api(tmp_path)
+    again.config.data["sql"]["enabled"] = True
+    assert [q["name"] for q in again.sql_state()["queries"]] == ["Pending"]
+
+    assert api.sql_delete_query(query["id"])["queries"] == []
+    assert api.sql_get_query(query["id"])["error"] == "not_found"
+
+
+def test_deleting_a_connection_deletes_its_queries(tmp_path: Path) -> None:
+    api, _ = turned_on(tmp_path)
+    dev = api.sql_save_connection({"engine": "mssql", "name": "Dev", "server": "dev"})["connection"]
+    qa = api.sql_save_connection({"engine": "mssql", "name": "QA", "server": "qa"})["connection"]
+    api.sql_save_query({"connection": dev["id"], "name": "a", "text": "SELECT 1"})
+    api.sql_save_query({"connection": qa["id"], "name": "b", "text": "SELECT 2"})
+    res = api.sql_delete_connection(dev["id"])
+    assert [q["name"] for q in res["queries"]] == ["b"]
+
+
+@pytest.mark.parametrize(
+    "query, code",
+    [
+        ({"connection": "nope", "name": "a", "text": "SELECT 1"}, "not_found"),
+        ({"name": "a", "text": "SELECT 1"}, "invalid_input"),
+        ({"connection": None, "name": "", "text": "SELECT 1"}, "invalid_input"),
+        ({"connection": "CONN", "name": "", "text": "SELECT 1"}, "invalid_input"),
+        ({"connection": "CONN", "name": "a\nb", "text": "SELECT 1"}, "invalid_input"),
+        ({"connection": "CONN", "name": "a", "text": "   "}, "empty"),
+        ({"connection": "CONN", "name": "a", "text": "x" * 1_000_001}, "invalid_input"),
+        ({"connection": "CONN", "name": "a", "text": "SELECT 1", "id": "missing"}, "not_found"),
+    ],
+)
+def test_bad_saved_queries_are_refused(tmp_path: Path, query: dict[str, Any], code: str) -> None:
+    api, _ = turned_on(tmp_path)
+    conn = api.sql_save_connection({"engine": "mssql", "name": "Dev", "server": "dev"})["connection"]
+    query = {k: (conn["id"] if v == "CONN" else v) for k, v in query.items()}
+    assert api.sql_save_query(query)["error"] == code
+
+
+def test_running_a_saved_query_marks_when(tmp_path: Path) -> None:
+    api, window, sid = sqlite_tab(tmp_path)
+    conn_id = api.sql_state()["connections"][0]["id"]
+    query = api.sql_save_query({"connection": conn_id, "name": "Count", "text": "SELECT COUNT(*) FROM batches"})["query"]
+    assert api.sql_run(sid, query["text"], query["id"])["ok"] is True
+    assert window.wait_for("sql_done")[0]["results"][0]["rows"] == [[500]]
+    assert api.sql_get_query(query["id"])["query"]["lastRun"] is not None
+
+
+def test_a_step_one_sql_db_is_upgraded_in_place(tmp_path: Path) -> None:
+    path = tmp_path / "local" / "sql.db"
+    path.parent.mkdir(parents=True)
+    old = sqlite3.connect(path)
+    old.execute(
+        "CREATE TABLE connections (id TEXT PRIMARY KEY, name TEXT NOT NULL, engine TEXT NOT NULL, "
+        "server TEXT NOT NULL DEFAULT '', database TEXT NOT NULL DEFAULT '', auth TEXT NOT NULL DEFAULT 'windows', "
+        "username TEXT NOT NULL DEFAULT '', encrypt INTEGER NOT NULL DEFAULT 1, trust_cert INTEGER NOT NULL DEFAULT 0, "
+        "file TEXT NOT NULL DEFAULT '', created TEXT NOT NULL, modified TEXT NOT NULL)"
+    )
+    old.execute("INSERT INTO connections (id, name, engine, server, created, modified) VALUES ('c1', 'Old', 'mssql', 's', 'x', 'x')")
+    old.execute("PRAGMA user_version = 1")
+    old.commit()
+    old.close()
+
+    api, _ = turned_on(tmp_path)
+    assert [c["name"] for c in api.sql_state()["connections"]] == ["Old"]
+    assert api.sql_save_query({"connection": "c1", "name": "q", "text": "SELECT 1"})["ok"] is True

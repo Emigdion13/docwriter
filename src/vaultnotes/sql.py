@@ -47,6 +47,8 @@ LEGACY_DRIVER = "SQL Server"
 MAX_SESSIONS = 8
 #: Saved connections.
 MAX_CONNECTIONS = 200
+#: Saved queries, over every connection.
+MAX_SAVED_QUERIES = 2000
 MAX_NAME_LENGTH = 100
 MAX_FIELD_LENGTH = 256
 #: The most SQL one run may send (a long script).
@@ -184,9 +186,9 @@ def clean_profile(data: Any) -> dict[str, Any]:
 
 
 class SqlStore:
-    """``sql.db``: saved connections (and, later, saved queries)."""
+    """``sql.db``: saved connections and the queries saved on them."""
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
@@ -195,28 +197,50 @@ class SqlStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         db = sqlite3.connect(self.path, timeout=5)
         db.row_factory = sqlite3.Row
-        if db.execute("PRAGMA user_version").fetchone()[0] < self.SCHEMA_VERSION:
+        version = db.execute("PRAGMA user_version").fetchone()[0]
+        if version < self.SCHEMA_VERSION:
             with db:
-                db.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS connections (
-                        id TEXT PRIMARY KEY,
-                        name TEXT NOT NULL,
-                        engine TEXT NOT NULL,
-                        server TEXT NOT NULL DEFAULT '',
-                        database TEXT NOT NULL DEFAULT '',
-                        auth TEXT NOT NULL DEFAULT 'windows',
-                        username TEXT NOT NULL DEFAULT '',
-                        encrypt INTEGER NOT NULL DEFAULT 1,
-                        trust_cert INTEGER NOT NULL DEFAULT 0,
-                        file TEXT NOT NULL DEFAULT '',
-                        created TEXT NOT NULL,
-                        modified TEXT NOT NULL
-                    )
-                    """
-                )
+                self._upgrade(db, version)
                 db.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
         return db
+
+    @staticmethod
+    def _upgrade(db: sqlite3.Connection, version: int) -> None:
+        """Bring an older ``sql.db`` up to :attr:`SCHEMA_VERSION`, one step at a time."""
+        if version < 1:
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS connections (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    engine TEXT NOT NULL,
+                    server TEXT NOT NULL DEFAULT '',
+                    database TEXT NOT NULL DEFAULT '',
+                    auth TEXT NOT NULL DEFAULT 'windows',
+                    username TEXT NOT NULL DEFAULT '',
+                    encrypt INTEGER NOT NULL DEFAULT 1,
+                    trust_cert INTEGER NOT NULL DEFAULT 0,
+                    file TEXT NOT NULL DEFAULT '',
+                    created TEXT NOT NULL,
+                    modified TEXT NOT NULL
+                )
+                """
+            )
+        if version < 2:
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS queries (
+                    id TEXT PRIMARY KEY,
+                    connection_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    created TEXT NOT NULL,
+                    modified TEXT NOT NULL,
+                    last_run TEXT
+                )
+                """
+            )
+            db.execute("CREATE INDEX IF NOT EXISTS queries_by_connection ON queries (connection_id)")
 
     @staticmethod
     def _row(row: sqlite3.Row) -> dict[str, Any]:
@@ -270,7 +294,99 @@ class SqlStore:
         if not isinstance(connection_id, str):
             return False
         with closing(self._open()) as db, db:
+            db.execute("DELETE FROM queries WHERE connection_id = ?", (connection_id,))
             return db.execute("DELETE FROM connections WHERE id = ?", (connection_id,)).rowcount > 0
+
+    # -- saved queries -------------------------------------------------
+    @staticmethod
+    def _query_row(row: sqlite3.Row, with_text: bool) -> dict[str, Any]:
+        out = {
+            "id": row["id"],
+            "connection": row["connection_id"],
+            "name": row["name"],
+            "modified": row["modified"],
+            "lastRun": row["last_run"],
+            "preview": query_preview(row["text"]),
+        }
+        if with_text:
+            out["text"] = row["text"]
+        return out
+
+    def list_queries(self) -> list[dict[str, Any]]:
+        """Every saved query without its text, by name."""
+        with closing(self._open()) as db:
+            rows = db.execute("SELECT * FROM queries ORDER BY name COLLATE NOCASE, created").fetchall()
+        return [self._query_row(row, with_text=False) for row in rows]
+
+    def count_queries(self, connection_id: str) -> int:
+        with closing(self._open()) as db:
+            return db.execute("SELECT COUNT(*) FROM queries WHERE connection_id = ?", (connection_id,)).fetchone()[0]
+
+    def get_query(self, query_id: Any) -> dict[str, Any]:
+        if not isinstance(query_id, str):
+            raise SqlError("not_found", "That saved query does not exist any more.")
+        with closing(self._open()) as db:
+            row = db.execute("SELECT * FROM queries WHERE id = ?", (query_id,)).fetchone()
+        if row is None:
+            raise SqlError("not_found", "That saved query does not exist any more.")
+        return self._query_row(row, with_text=True)
+
+    def save_query(self, connection_id: str, name: str, text: str, query_id: str | None = None) -> dict[str, Any]:
+        """Add a query to a connection, or replace the one named ``query_id``."""
+        now = _now_stamp()
+        with closing(self._open()) as db, db:
+            if not db.execute("SELECT 1 FROM connections WHERE id = ?", (connection_id,)).fetchone():
+                raise SqlError("not_found", "That connection does not exist any more.")
+            if query_id is None:
+                count = db.execute("SELECT COUNT(*) FROM queries").fetchone()[0]
+                if count >= MAX_SAVED_QUERIES:
+                    raise SqlError("too_many", f"You can keep up to {MAX_SAVED_QUERIES} saved queries.")
+                query_id = uuid.uuid4().hex
+                db.execute(
+                    "INSERT INTO queries (id, connection_id, name, text, created, modified) VALUES (?, ?, ?, ?, ?, ?)",
+                    (query_id, connection_id, name, text, now, now),
+                )
+            else:
+                updated = db.execute(
+                    "UPDATE queries SET connection_id = ?, name = ?, text = ?, modified = ? WHERE id = ?",
+                    (connection_id, name, text, now, query_id),
+                ).rowcount
+                if not updated:
+                    raise SqlError("not_found", "That saved query does not exist any more.")
+        return self.get_query(query_id)
+
+    def mark_run(self, query_id: str) -> None:
+        with closing(self._open()) as db, db:
+            db.execute("UPDATE queries SET last_run = ? WHERE id = ?", (_now_stamp(), query_id))
+
+    def delete_query(self, query_id: Any) -> bool:
+        if not isinstance(query_id, str):
+            return False
+        with closing(self._open()) as db, db:
+            return db.execute("DELETE FROM queries WHERE id = ?", (query_id,)).rowcount > 0
+
+
+def clean_query_name(value: Any) -> str:
+    return _clean_text(value, "Name", required=True, max_length=MAX_NAME_LENGTH)
+
+
+def clean_query_text(value: Any) -> str:
+    if not isinstance(value, str):
+        raise SqlError("invalid_input", "The query must be text.")
+    if not value.strip():
+        raise SqlError("empty", "There is no SQL to save.")
+    if len(value) > MAX_QUERY_LENGTH:
+        raise SqlError("invalid_input", "That query is too long to save.")
+    return value
+
+
+def query_preview(text: str) -> str:
+    """The first line of SQL that is not a comment, for the list's second line."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("--"):
+            return stripped[:120]
+    return ""
 
 
 def public_connection(profile: dict[str, Any], has_password: bool = False) -> dict[str, Any]:

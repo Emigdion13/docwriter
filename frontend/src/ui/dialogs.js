@@ -57,6 +57,72 @@ export function confirmAction({ title, message, confirmLabel = 'Confirm', cancel
 }
 
 /**
+ * Asks for one line of text; resolves the trimmed text, or null when cancelled.
+ * @param {object} opts - { title, message, value, placeholder, confirmLabel, iconName, maxLength, colorVar }
+ * @returns {Promise<string|null>}
+ */
+export function promptText({ title, message = '', value = '', placeholder = '', confirmLabel = 'Save', iconName = 'edit', maxLength = 100, colorVar = '' }) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    if (colorVar) overlay.style.setProperty('--c', `var(${colorVar})`);
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+
+    overlay.innerHTML = `
+      <form class="dialog confirm-dialog prompt-dialog" novalidate>
+        <div class="confirm-mark">${icon(iconName, 26)}</div>
+        <h3></h3>
+        <p class="dlg-sub"></p>
+        <div class="field-row"><input type="text" autocomplete="off" spellcheck="false"></div>
+        <div class="dlg-actions">
+          <button class="btn" type="button" data-x="cancel">Cancel</button>
+          <button class="btn primary" type="submit" data-x="ok"></button>
+        </div>
+      </form>
+    `;
+    overlay.querySelector('h3').textContent = title;
+    overlay.querySelector('.dlg-sub').textContent = message;
+    overlay.querySelector('[data-x="ok"]').textContent = confirmLabel;
+    const input = overlay.querySelector('input');
+    input.value = value;
+    input.placeholder = placeholder;
+    input.maxLength = maxLength;
+    input.setAttribute('aria-label', title);
+
+    const done = (result) => {
+      overlay.classList.remove('open');
+      setTimeout(() => overlay.remove(), 260);
+      resolve(result);
+    };
+
+    overlay.querySelector('[data-x="cancel"]').onclick = () => done(null);
+    overlay.querySelector('form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (text) done(text);
+      else input.focus();
+    });
+    overlay.addEventListener('mousedown', (e) => {
+      if (e.target === overlay) done(null);
+    });
+    overlay.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        done(null);
+      }
+    });
+
+    document.getElementById('overlays-root')?.appendChild(overlay);
+    requestAnimationFrame(() => overlay.classList.add('open'));
+    setTimeout(() => {
+      input.focus();
+      input.select();
+    }, 60);
+  });
+}
+
+/**
  * Creates the Move-note dialog. open() resolves the chosen target space id
  * (or null when cancelled).
  */
