@@ -218,6 +218,11 @@ rewrites the links that point at it; "Linked from" sits under the preview. Typin
 Ctrl+click (Cmd+click) a `[[link]]` in the **editor** opens it, or offers to create it
 if the note does not exist yet.
 
+Checklists (`- [ ]` / `- [x]`) can be ticked in the **preview** with a click: the app flips
+that item in the note's text and auto-saves it like any other edit, in any space. It is not
+an undo step: click the box again to reverse it. Boxes inside an embedded `![[note]]` stay
+locked, and nothing changes in a locked vault or the trash.
+
 ### Important notes
 
 Press **Ctrl+D**, the star beside the note's title, or *Mark … as important* in the

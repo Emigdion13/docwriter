@@ -153,6 +153,16 @@
   vertical-align: middle;
 }
 
+/* The note's own boxes can be clicked; the ones in an embedded note stay locked. */
+.preview input.task-list-item-checkbox:not(:disabled) {
+  cursor: pointer;
+}
+
+.preview input.task-list-item-checkbox:not(:disabled):hover,
+.preview input.task-list-item-checkbox:not(:disabled):focus-visible {
+  border-color: var(--accent);
+}
+
 .preview input.task-list-item-checkbox:checked {
   background: var(--accent);
   border-color: var(--accent);

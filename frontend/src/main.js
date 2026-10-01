@@ -1512,6 +1512,39 @@ function handleEditorChange(newBody) {
   queueEdit(newBody);
 }
 
+/**
+ * A checklist box was clicked in the preview: flip that item in the note's text
+ * and save it the way a typed edit is saved.  The text never changes under the
+ * user: if they typed or switched notes while the engine answered, the click is
+ * dropped and the preview is redrawn from what the note really says.
+ */
+async function toggleTaskInNote(index) {
+  if (!state.currentNote || state.trashMode || getActiveSpace().locked) {
+    if (state.currentNote) renderPreview(state.currentSpaceId, state.currentNote.body);
+    return;
+  }
+  const { currentSpaceId: spaceId } = state;
+  const { id: noteId, body } = state.currentNote;
+
+  const res = await bridge.toggle_task(spaceId, body, index);
+
+  const stillThere = state.currentNote
+    && state.currentSpaceId === spaceId
+    && state.currentNote.id === noteId
+    && state.currentNote.body === body;
+  if (!stillThere) {
+    if (state.currentNote) renderPreview(state.currentSpaceId, state.currentNote.body);
+    return;
+  }
+  if (res?.error) {
+    toast(res.message, { icon: 'alert' });
+    renderPreview(spaceId, body);
+    return;
+  }
+  replaceEditorContent(res.body);
+  handleEditorChange(res.body);
+}
+
 /* =================================================================
    Lock / Unlock Flow
    ================================================================= */
@@ -2558,6 +2591,7 @@ async function init() {
   // Initialize Markdown Preview
   const previewContainer = document.getElementById('preview');
   initPreview(previewContainer, {
+    onToggleTask: (index) => toggleTaskInNote(index),
     onOpenNoteByTitle: (targetTitle, options = {}) => openLinkTarget(targetTitle, options),
     onCreateNotePrompt: (title) => createNoteFromLink(title),
     // A link to a note that is missing in ANOTHER space: report it, never create
