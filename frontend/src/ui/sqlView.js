@@ -6,6 +6,10 @@
    result comes back as a sql_done event tagged with the tab's session.
    A tab can show a saved query: Ctrl+S saves it back, and a dot on the
    tab means its SQL or connection differs from what is saved.
+
+   With kind: 'vt' the same view is the SQL - VT space: every tab is on
+   the virtual tables' own database (connection id "vt"), and a result
+   can be kept as a virtual table from either space.
    ================================================================= */
 
 import { basicSetup } from 'codemirror';
@@ -54,8 +58,28 @@ const sqlTheme = EditorView.theme({
   '.cm-searchMatch': { background: 'color-mix(in srgb, var(--warning) 30%, transparent)' }
 });
 
-function dialect(engine) {
-  return sql({ dialect: engine === 'sqlite' ? SQLite : MSSQL, upperCaseKeywords: true });
+/* schema: { table: [columns] }, so the editor completes virtual tables' names. */
+function dialect(engine, schema) {
+  return sql({ dialect: engine === 'sqlite' ? SQLite : MSSQL, upperCaseKeywords: true, ...(schema ? { schema } : {}) });
+}
+
+/* The virtual tables' own database, as the tabs of the SQL - VT space see it. */
+const VT_CONNECTION = {
+  id: 'vt', name: 'Virtual tables', engine: 'sqlite', engineName: 'SQLite', where: 'vt.db',
+  server: '', database: '', auth: 'windows', username: '', file: '', hasPassword: false
+};
+
+const VT_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/;
+
+/* A name to offer for a result kept as a virtual table: the saved query's,
+   else the table it reads from, else "result". */
+function suggestVtName(text, savedName, index, count) {
+  const from = /\bfrom\s+([\w.\[\]"`]+)/i.exec(text || '')?.[1]?.split('.').pop();
+  let name = (savedName || from || 'result').replace(/[\[\]"`]/g, '').toLowerCase()
+    .replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'result';
+  if (/^[0-9]/.test(name)) name = `t_${name}`;
+  if (count > 1) name += `_${index + 1}`;
+  return name.slice(0, 63);
 }
 
 function plural(n, word) {
@@ -66,12 +90,13 @@ function seconds(ms) {
   return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(ms < 10_000 ? 2 : 1)} s`;
 }
 
-export function createSqlView({ onStateChanged, notify, onNewConnection }) {
+export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConnection, onEnable, onTablesChanged }) {
+  const vt = kind === 'vt';
   const root = document.createElement('div');
-  root.className = 'ws-sql';
+  root.className = `ws-sql ${vt ? 'ws-vt' : 'ws-query'}`;
   root.innerHTML = `
     <div class="term-head">
-      <div class="crumb"><span class="crumb-dot"></span><span>SQL</span><span class="sep">/</span><span id="sql-where">Query</span></div>
+      <div class="crumb"><span class="crumb-dot"></span><span>${vt ? 'SQL - VT' : 'SQL'}</span><span class="sep">/</span><span id="sql-where">Query</span></div>
       <div class="term-actions">
         <span class="meta" id="sql-status"></span>
         <select class="settings-select sql-conn" id="sql-conn" aria-label="Connection for this tab" title="Connection for this tab"></select>
@@ -94,18 +119,22 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
     </div>
     <div class="sql-body" id="sql-body">
       <div class="term-empty sql-empty">
-        <p>Pick a connection on the left to open a query tab.</p>
-        <button class="btn" id="sql-empty-new" type="button">${icon('plus', 15)}<span>New SQL Server connection…</span></button>
+        <p>${vt ? 'Open a virtual table on the left, or write a query across them.' : 'Pick a connection on the left to open a query tab.'}</p>
+        <button class="btn" id="sql-empty-new" type="button">${icon('plus', 15)}<span>${vt ? 'New query' : 'New SQL Server connection…'}</span></button>
       </div>
     </div>
     <div class="term-off">
       <div class="term-off-ic">${icon('database', 40)}</div>
       <span class="hud-tag">SQL</span>
-      <h2>Query your databases inside VaultNotes</h2>
+      ${vt ? `<h2>Virtual tables</h2>
+      <p>
+        Keep a query's result as a table here, then query it after you
+        disconnect, and join it with results from other servers.
+      </p>` : `<h2>Query your databases inside VaultNotes</h2>
       <p>
         Save SQL Server and SQLite connections, then write and run queries in
         tabs, one connection per tab, with the results in a grid below.
-      </p>
+      </p>`}
       <p class="term-warn">
         ${icon('shield', 15)}
         <span>Queries run with your sign-in and can change data, so the SQL
@@ -125,7 +154,8 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
   const statusEl = root.querySelector('#sql-status');
   const whereEl = root.querySelector('#sql-where');
 
-  let info = { enabled: false, driver: null, connections: [], queries: [] };
+  let info = { enabled: false, driver: null, connections: vt ? [VT_CONNECTION] : [], queries: [], tables: [] };
+  let firstRefresh = true;
   let visible = false;
   let editorShare = 0.42; // of the pane's height, shared by every tab
 
@@ -156,6 +186,7 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
   /* A saved query's name, else the connection's: "Dev", "Dev 2"... */
   function tabLabel(tab) {
     if (tab.saved) return tab.saved.name;
+    if (vt) return tab.title || `Query ${tabs.filter(other => !other.title).indexOf(tab) + 1}`;
     const same = tabs.filter(other => !other.saved && other.connectionId === tab.connectionId);
     return same.length > 1 ? `${connName(tab)} ${same.indexOf(tab) + 1}` : connName(tab);
   }
@@ -230,7 +261,7 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
     connSelect.replaceChildren(...options);
     connSelect.value = active?.connectionId || '';
     connSelect.disabled = !info.enabled || !active || Boolean(active.running);
-    connSelect.hidden = !active;
+    connSelect.hidden = !active || vt;
     whereEl.textContent = !info.enabled ? 'Off'
       : !active ? 'No query tab'
         : active.saved ? `${connName(active)} / ${active.saved.name}${active.dirty ? ' •' : ''}` : tabLabel(active);
@@ -238,7 +269,8 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
     runButton.disabled = !info.enabled || !active || Boolean(active.running);
     stopButton.disabled = !active?.running;
     saveButton.disabled = !info.enabled || !active || !connection(active.connectionId);
-    runButton.hidden = stopButton.hidden = saveButton.hidden = !active;
+    runButton.hidden = stopButton.hidden = !active;
+    saveButton.hidden = !active || vt;
     paintTabs();
     onStateChanged?.(publicState());
   }
@@ -249,6 +281,7 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
       driver: info.driver,
       connections: info.connections,
       queries: info.queries,
+      tables: info.tables,
       tabs: tabs.length,
       running: tabs.filter(tab => tab.running).length,
       openQueries: tabs.filter(tab => tab.saved).map(tab => tab.saved.id),
@@ -273,6 +306,7 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
     const bar = tab.pane.querySelector('.sql-rtabs');
     const meta = tab.pane.querySelector('.sql-rmeta');
     const copy = tab.pane.querySelector('.sql-copy');
+    const keep = tab.pane.querySelector('.sql-keep');
     const msgs = tab.pane.querySelector('.sql-msgs');
     const empty = tab.pane.querySelector('.sql-rempty');
 
@@ -311,6 +345,7 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
     msgs.hidden = tab.view !== 'messages';
     empty.hidden = Boolean(buttons.length);
     copy.hidden = !showing;
+    keep.hidden = !showing;
 
     if (showing) {
       meta.textContent = `${plural(showing.total, 'row')} · ${showing.columns.length} col${showing.columns.length === 1 ? '' : 's'}`;
@@ -388,6 +423,9 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
         <div class="sql-rbar">
           <div class="sql-rtabs" role="tablist" aria-label="Results"></div>
           <span class="sql-rmeta"></span>
+          <button class="btn icon small sql-keep" type="button" aria-label="Keep as a virtual table" title="Keep this result as a virtual table in SQL - VT">
+            ${icon('table', 14)}
+          </button>
           <button class="btn icon small sql-copy" type="button" aria-label="Copy this result" title="Copy this result with its header, to paste into Excel">
             ${icon('copy', 14)}
           </button>
@@ -425,14 +463,15 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
             { key: 'F5', run: () => { run(tab); return true; } },
             { key: 'Mod-Shift-t', run: () => { newTab(); return true; } },
             { key: 'Mod-Shift-w', run: () => { closeTab(tab); return true; } },
-            { key: 'Mod-s', run: () => { save(tab); return true; } },
-            { key: 'Mod-Shift-s', run: () => { saveAs(tab); return true; } }
+            // Saved queries belong to connections; the VT space has none.
+            { key: 'Mod-s', run: () => { if (!vt) save(tab); return true; } },
+            { key: 'Mod-Shift-s', run: () => { if (!vt) saveAs(tab); return true; } }
           ])),
           EditorView.updateListener.of((update) => {
             if (update.docChanged) setDirty(tab);
           }),
           basicSetup,
-          tab.lang.of(dialect(tab.conn?.engine)),
+          tab.lang.of(dialect(tab.conn?.engine, vt ? schema() : null)),
           syntaxHighlighting(sqlHighlight),
           sqlTheme,
           EditorView.contentAttributes.of({ 'aria-label': 'SQL', spellcheck: 'false' })
@@ -447,6 +486,7 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
     });
 
     tab.pane.querySelector('.sql-copy').onclick = () => copyResult(tab);
+    tab.pane.querySelector('.sql-keep').onclick = () => keepAsVt(tab);
 
     tab.pane.querySelector('.sql-split').addEventListener('mousedown', (e) => {
       e.preventDefault();
@@ -533,7 +573,7 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
     return tab;
   }
 
-  async function newTab(connectionId = active?.connectionId || info.connections[0]?.id, text = '') {
+  async function newTab(connectionId = vt ? 'vt' : active?.connectionId || info.connections[0]?.id, text = '') {
     return Boolean((await openTab(connectionId, text))?.ready);
   }
 
@@ -767,6 +807,8 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
     }
     if (tab !== active) tab.unread = true;
     paint();
+    // SQL in the VT space may have made, changed or dropped virtual tables.
+    if (vt) onTablesChanged?.();
   });
 
   /* ---- the strip and the header ---- */
@@ -800,8 +842,8 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
   runButton.onclick = () => run();
   stopButton.onclick = () => cancel();
   saveButton.onclick = (e) => (e.shiftKey ? saveAs() : save());
-  root.querySelector('#sql-enable').onclick = () => enable();
-  root.querySelector('#sql-empty-new').onclick = () => onNewConnection?.();
+  root.querySelector('#sql-enable').onclick = () => (onEnable ? onEnable() : enable());
+  root.querySelector('#sql-empty-new').onclick = () => (vt ? newTab('vt') : onNewConnection?.());
 
   /* Switching a tab's connection keeps its SQL and connects it again. */
   connSelect.addEventListener('change', async () => {
@@ -820,6 +862,7 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
   });
 
   function setConnections(list) {
+    if (vt) return; // always the virtual tables' own database
     info.connections = Array.isArray(list) ? list : [];
     for (const tab of tabs) {
       const now = connection(tab.connectionId);
@@ -840,13 +883,76 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
     const res = await bridge.sql_state();
     if (res?.error) return publicState();
     info = { ...info, enabled: res.enabled, driver: res.driver };
-    if (res.sessions?.length && !tabs.length) {
+    if (firstRefresh && res.sessions?.length && !tabs.length) {
       // The page was reloaded while tabs were connected: start clean.
       await bridge.sql_close();
     }
+    firstRefresh = false;
     setConnections(res.connections);
     setQueries(res.queries);
+    setTables(res.vtables);
     return publicState();
+  }
+
+  /* ---- virtual tables ---- */
+
+  function schema() {
+    return Object.fromEntries(info.tables.map(t => [t.name, t.columns]));
+  }
+
+  /* The virtual tables changed: the VT space's editors complete the new names. */
+  function setTables(list) {
+    info.tables = Array.isArray(list) ? list : [];
+    if (vt) {
+      for (const tab of tabs) tab.editor.dispatch({ effects: tab.lang.reconfigure(dialect('sqlite', schema())) });
+    }
+    paint();
+  }
+
+  /* Copies a result into vt.db under a name, so it outlives the connection. */
+  async function keepAsVt(tab) {
+    if (typeof tab.view !== 'number' || !tab.sessionId) return false;
+    if (tab.running) {
+      notify?.('Wait for the query to finish first.');
+      return false;
+    }
+    const index = tab.view;
+    const result = tab.results[index];
+    const name = await promptText({
+      title: 'Keep as a virtual table',
+      message: `${plural(result.total, 'row')} from ${connName(tab)}. They stay in SQL - VT after you disconnect; query them by this name.`,
+      value: suggestVtName(queryText(tab), tab.saved?.name, index, tab.results.length),
+      placeholder: 'pending_batches',
+      confirmLabel: 'Keep',
+      iconName: 'table',
+      colorVar: '--vt',
+      maxLength: 63
+    });
+    if (!name || !tabs.includes(tab)) return false;
+    if (!VT_NAME.test(name)) {
+      notify?.('Use letters, digits and _ only, starting with a letter or _ (like pending_batches).');
+      return false;
+    }
+    if (result.total > 100_000) notify?.(`Copying ${plural(result.total, 'row')}…`);
+    let res = await bridge.sql_save_vt(tab.sessionId, index, name, false);
+    if (res?.error === 'exists') {
+      const ok = await confirmAction({
+        title: `Replace ${name}?`,
+        message: `There is already a virtual table named ${name}. It is replaced with this result.`,
+        confirmLabel: 'Replace',
+        danger: true,
+        iconName: 'table'
+      });
+      if (!ok) return false;
+      res = await bridge.sql_save_vt(tab.sessionId, index, name, true);
+    }
+    if (res?.error) {
+      notify?.(res.message || 'The result could not be kept.');
+      return false;
+    }
+    notify?.(`Kept ${plural(res.table.rows, 'row')} as ${res.table.name} in SQL - VT.`);
+    onTablesChanged?.(res.tables);
+    return true;
   }
 
   async function enable() {
@@ -860,8 +966,9 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
     return true;
   }
 
-  async function disable() {
-    await bridge.sql_disable();
+  /* told: Python was already told (the other SQL view turned it off). */
+  async function disable({ told = false } = {}) {
+    if (!told) await bridge.sql_disable();
     info.enabled = false;
     closeAll();
     paint();
@@ -876,6 +983,7 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
     disable,
     setConnections,
     setQueries,
+    setTables,
     getState: publicState,
 
     show() {
@@ -901,6 +1009,21 @@ export function createSqlView({ onStateChanged, notify, onNewConnection }) {
     save: () => save(),
     saveAs: () => saveAs(),
     /** Opens a saved query on its connection; { run: true } runs it too. */
-    openSaved
+    openSaved,
+
+    /** A virtual table was renamed: tabs titled after it follow (their SQL does not). */
+    retitle(oldName, newName) {
+      for (const tab of tabs) if (tab.title === oldName) tab.title = newName;
+      paint();
+    },
+
+    /** Opens a tab with SQL already in it (titled, in the VT space), and runs it. */
+    async openAndRun(connectionId, text, title = '') {
+      const tab = await openTab(connectionId, text);
+      if (!tab) return false;
+      tab.title = title;
+      paint();
+      return tab.ready ? run(tab) : false;
+    }
   };
 }

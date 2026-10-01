@@ -436,7 +436,8 @@ The frontend calls Python with `await window.pywebview.api.<name>(...)`, after t
     - Off by default. Only `sql_enable` turns it on, after a **native** confirmation dialog. Every call that reads or changes connections or runs SQL is refused while it is off.
     - Saved connections and saved queries live in `%LOCALAPPDATA%\VaultNotes\sql.db`, never in the notes folder, so never in the Drive backup. A SQL login password goes only to the Windows Credential Manager and never back to the page.
     - The page never sends a file path: a SQLite connection's file is picked in a native dialog, must already exist and must be a SQLite file. Connection-string values are braced, so a server or user name cannot add options.
-    - Result rows stay in Python's memory, per tab, and reach the page a page at a time. Nothing a query returns is written to disk.
+    - Result rows stay in Python's memory, per tab, and reach the page a page at a time. A query's result is written to disk only when the user keeps it as a virtual table.
+    - Virtual tables (the SQL - VT space) live in `%LOCALAPPDATA%\VaultNotes\vt.db`, an unencrypted SQLite file next to `sql.db`: never in the notes folder, so never in the Drive backup. Their names are plain identifiers (`[A-Za-z_][A-Za-z0-9_]{0,62}`, not `sqlite_*` or `_vt_*`), and every identifier the app writes into SQL is quoted. The space's tabs can only open `vt.db` itself (connection id `vt`), never a path from the page.
 
 ### Limits you should know about
 

@@ -80,6 +80,7 @@ from vaultnotes.sql import (
     public_connection,
 )
 from vaultnotes.storage.atomic import atomic_write
+from vaultnotes.vt import VT_CONNECTION_ID, VT_NAME, VtStore, clean_table_name
 from vaultnotes.terminal import (
     MAX_FAVORITES,
     MAX_RECENT,
@@ -293,6 +294,8 @@ class Api:
         #: sit in the Credential Manager.  Tests point both somewhere harmless.
         self.sql_dir = Path(sql_dir).resolve() if sql_dir is not None else get_local_app_dir()
         self.sql_store = SqlStore(self.sql_dir / "sql.db")
+        #: The SQL - VT space's tables: results kept after their connection closed.
+        self.vt_store = VtStore(self.sql_dir / "vt.db")
         self.sql_passwords = sql_passwords if sql_passwords is not None else SqlPasswords()
         self.sql = SqlManager(emit=lambda name, data: self._emit(name, data))
 
@@ -2695,6 +2698,7 @@ class Api:
             "driver": mssql_driver(),
             "connections": self._sql_connections() if enabled else [],
             "queries": self.sql_store.list_queries() if enabled else [],
+            "vtables": self.vt_store.list() if enabled else [],
             "sessions": self.sql.sessions() if enabled else [],
         }
 
@@ -2849,10 +2853,32 @@ class Api:
             self.sql.test(profile, secret)
         return {"ok": True, "elapsedMs": int((time.monotonic() - started) * 1000)}
 
+    def _vt_public(self) -> dict[str, Any]:
+        """The virtual tables' own database, shaped like a saved connection."""
+        return {
+            "id": VT_CONNECTION_ID,
+            "name": VT_NAME,
+            "engine": "sqlite",
+            "engineName": "SQLite",
+            "server": "",
+            "database": "",
+            "auth": "windows",
+            "username": "",
+            "encrypt": False,
+            "trust_cert": False,
+            "file": "",
+            "where": "vt.db",
+            "hasPassword": False,
+        }
+
     @bridge_method
     def sql_open(self, connection_id: str) -> dict[str, Any]:
-        """Connect a new query tab to a saved connection."""
+        """Connect a new query tab to a saved connection, or to ``vt`` for the virtual tables."""
         self._require_sql()
+        if connection_id == VT_CONNECTION_ID:
+            profile = self.vt_store.profile()
+            session = self.sql.open(profile, None)
+            return {"ok": True, **session, "connection": self._vt_public()}
         profile = self.sql_store.get_connection(connection_id)
         secret = self._sql_password_for(profile)
         self.sql.check_room()
@@ -2893,6 +2919,55 @@ class Api:
         """A whole result as tab-separated text with a header row, for the clipboard."""
         self._require_sql()
         return {"ok": True, "text": self.sql.copy_text(session_id, result_index)}
+
+    @bridge_method
+    def sql_vt_list(self) -> dict[str, Any]:
+        """The virtual tables, counted afresh (SQL in the space may have changed them)."""
+        self._require_sql()
+        self.vt_store.forget_stale_meta()
+        return {"ok": True, "tables": self.vt_store.list()}
+
+    @bridge_method
+    def sql_save_vt(self, session_id: str, result_index: int, name: str, replace: bool = False) -> dict[str, Any]:
+        """Keep one result of a tab's last run as a virtual table named ``name``.
+
+        Every row is copied into ``vt.db``, so the table outlives the
+        connection.  An existing table of that name is replaced only with
+        ``replace``; otherwise the answer is ``exists``.
+        """
+        self._require_sql()
+        table = clean_table_name(name)
+        origin, result = self.sql.finished_result(session_id, result_index)
+        if origin["connection"] == VT_CONNECTION_ID:
+            where = "vt.db"
+        else:
+            try:
+                where = self._sql_public(self.sql_store.get_connection(origin["connection"]))["where"]
+            except SqlError:
+                where = ""
+        source = {"connection": origin["connection"], "name": origin["name"], "where": where}
+        rows = list(result.rows)  # a snapshot: the tab may run again meanwhile
+        # Writing a big result takes a while; notes keep saving meanwhile.
+        with self._calls.released():
+            saved = self.vt_store.save(
+                table, result.names, [kind or "text" for kind in result.kinds], rows,
+                source=source, query=origin["query"], replace=replace is True,
+            )
+        return {"ok": True, "table": saved, "tables": self.vt_store.list()}
+
+    @bridge_method
+    def sql_rename_vt(self, name: str, new_name: str) -> dict[str, Any]:
+        """Give a virtual table another name."""
+        self._require_sql()
+        self.vt_store.rename(clean_table_name(name), clean_table_name(new_name))
+        return {"ok": True, "tables": self.vt_store.list()}
+
+    @bridge_method
+    def sql_delete_vt(self, name: str) -> dict[str, Any]:
+        """Drop a virtual table and forget where it came from."""
+        self._require_sql()
+        self.vt_store.delete(clean_table_name(name))
+        return {"ok": True, "tables": self.vt_store.list()}
 
     @bridge_method
     def sql_close(self, session_id: str | None = None) -> dict[str, bool]:

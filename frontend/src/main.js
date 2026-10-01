@@ -28,7 +28,7 @@ import {
   toggleActiveTag,
   isTagActive
 } from './ui/noteList.js';
-import { confirmAction, createMoveDialog } from './ui/dialogs.js';
+import { confirmAction, createMoveDialog, promptText } from './ui/dialogs.js';
 import {
   initEditor,
   setEditorContent,
@@ -50,6 +50,7 @@ import { createGraphOverlay } from './ui/graphView.js';
 import { createTerminal } from './ui/terminal.js';
 import { createCommandList } from './ui/commandList.js';
 import { createSqlView } from './ui/sqlView.js';
+import { createVtList } from './ui/vtList.js';
 import { createSqlList } from './ui/sqlList.js';
 import { createSqlConnectionDialog } from './ui/sqlConnectionDialog.js';
 import { toast, initToasts } from './ui/toasts.js';
@@ -88,6 +89,7 @@ const state = {
   panelsCollapsed: false, // Spaces and the note list hidden, the note gets the width
   terminalMode: false,  // the CMD space is showing instead of a note space
   sqlMode: false,       // the SQL space is showing instead of a note space
+  vtMode: false,        // the SQL - VT space (virtual tables) is showing
   theme: 'nebula',
   effects: 'full',
   editorFontSize: 13.5,
@@ -133,6 +135,8 @@ let tagBox = null;
 let terminalView = null;
 let commandList = null;
 let sqlView = null;
+let vtView = null;
+let vtList = null;
 let sqlList = null;
 let sqlConnDialog = null;
 
@@ -562,6 +566,7 @@ function cmdEntrySub(t = terminalView?.getState()) {
 async function enterTerminalMode() {
   if (!(await flushSave())) return;
   leaveSqlMode();
+  leaveVtMode();
   if (!state.terminalMode) {
     state.terminalMode = true;
     document.getElementById('app')?.classList.add('terminal-mode');
@@ -625,6 +630,7 @@ function sqlEntrySub(q = sqlView?.getState()) {
 async function enterSqlMode() {
   if (!(await flushSave())) return;
   leaveTerminalMode();
+  leaveVtMode();
   if (!state.sqlMode) {
     state.sqlMode = true;
     document.getElementById('app')?.classList.add('sql-mode');
@@ -647,19 +653,23 @@ function leaveSqlMode() {
 
 async function enableSql() {
   const ok = await sqlView.enable();
-  if (ok) toast('The SQL space is on.', { icon: 'database' });
+  if (ok) {
+    await vtView.refresh();
+    toast('The SQL space is on.', { icon: 'database' });
+  }
   return ok;
 }
 
 async function disableSql() {
   const ok = await confirmAction({
     title: 'Turn off the SQL space?',
-    message: 'Every query tab is closed and disconnected. Your saved connections and passwords are kept.',
+    message: 'Every query tab is closed and disconnected, in SQL and SQL - VT. Your saved connections, queries, passwords and virtual tables are kept.',
     confirmLabel: 'Turn off',
     iconName: 'database'
   });
   if (!ok) return;
   await sqlView.disable();
+  await vtView.disable({ told: true });
   toast('The SQL space is off.', { icon: 'database' });
 }
 
@@ -672,6 +682,103 @@ async function editSqlConnection(connection = null) {
   if (res.queries) sqlView.setQueries(res.queries);
   if (res.deleted) toast('Connection deleted.', { icon: 'trash' });
   else if (!connection) await sqlView.newTab(res.connection.id);
+}
+
+/* =================================================================
+   The SQL - VT space: virtual tables, results kept in vt.db after their
+   connection closed.  It is on whenever the SQL space is.
+   ================================================================= */
+
+function vtEntrySub(v = vtView?.getState()) {
+  if (!v?.enabled) return 'Off';
+  if (v.running) return `${v.running} running`;
+  const n = v.tables.length;
+  return `${n} table${n === 1 ? '' : 's'}`;
+}
+
+async function enterVtMode() {
+  if (!(await flushSave())) return;
+  leaveTerminalMode();
+  leaveSqlMode();
+  if (!state.vtMode) {
+    state.vtMode = true;
+    document.getElementById('app')?.classList.add('vt-mode');
+    setAccentColor('--vt');
+    setToolEntry('vt', { active: true });
+    const ws = document.getElementById('workspace');
+    if (ws) replay(ws, 'swap');
+  }
+  vtView.show();
+}
+
+function leaveVtMode() {
+  if (!state.vtMode) return;
+  state.vtMode = false;
+  vtView.hide();
+  document.getElementById('app')?.classList.remove('vt-mode');
+  setToolEntry('vt', { active: false });
+  setAccentColor(getActiveSpace()?.colorVar || '--accent');
+}
+
+/* The virtual tables changed: both SQL views, the list and the sidebar follow. */
+async function vtTablesChanged(tables) {
+  let list = tables;
+  if (!Array.isArray(list)) {
+    const res = await bridge.sql_vt_list();
+    if (res?.error) return;
+    list = res.tables;
+  }
+  vtView.setTables(list);
+  sqlView.setTables(list);
+}
+
+async function openVirtualTable(name) {
+  if (!state.vtMode) await enterVtMode();
+  await vtView.openAndRun('vt', `SELECT *\nFROM ${name}`, name);
+}
+
+async function newVtQuery() {
+  if (!state.vtMode) await enterVtMode();
+  await vtView.newTab('vt');
+}
+
+async function renameVirtualTable(name) {
+  const next = await promptText({
+    title: `Rename ${name}`,
+    message: 'Queries that use the old name need the new one.',
+    value: name,
+    confirmLabel: 'Rename',
+    iconName: 'table',
+    colorVar: '--vt',
+    maxLength: 63
+  });
+  if (!next || next === name) return;
+  const res = await bridge.sql_rename_vt(name, next);
+  if (res?.error) {
+    toast(res.message || 'The table could not be renamed.', { icon: 'alert' });
+    return;
+  }
+  vtView.retitle(name, next);
+  vtTablesChanged(res.tables);
+}
+
+async function deleteVirtualTable(name) {
+  const table = vtView.getState().tables.find(t => t.name === name);
+  const ok = await confirmAction({
+    title: `Delete ${name}?`,
+    message: `Its ${(table?.rows ?? 0).toLocaleString()} rows are removed from vt.db. The database it came from is not touched.`,
+    confirmLabel: 'Delete',
+    danger: true,
+    iconName: 'table'
+  });
+  if (!ok) return;
+  const res = await bridge.sql_delete_vt(name);
+  if (res?.error) {
+    toast(res.message || 'The table could not be deleted.', { icon: 'alert' });
+    return;
+  }
+  vtTablesChanged(res.tables);
+  toast(`${name} deleted.`, { icon: 'trash' });
 }
 
 /* A saved query opens on its own connection; run: true runs it there too. */
@@ -718,6 +825,7 @@ async function selectSpace(spaceId, targetNoteId = null, animate = true) {
   if (!(await flushSave())) return;
   leaveTerminalMode();
   leaveSqlMode();
+  leaveVtMode();
   const prevSpaceId = state.currentSpaceId;
   state.currentSpaceId = spaceId;
   state.trashMode = false;
@@ -763,6 +871,7 @@ async function openNote(noteId) {
   if (!(await flushSave())) return;
   leaveTerminalMode();
   leaveSqlMode();
+  leaveVtMode();
   state.trashMode = false;
   state.currentNoteId = noteId;
   const space = getActiveSpace();
@@ -1751,12 +1860,13 @@ async function saveBackupSettings(changes) {
 
 async function getPaletteCommands() {
   const space = getActiveSpace();
-  const hasOpenNote = !!state.currentNote && !space?.locked && !state.trashMode && !state.terminalMode && !state.sqlMode;
+  const hasOpenNote = !!state.currentNote && !space?.locked && !state.trashMode && !state.terminalMode && !state.sqlMode && !state.vtMode;
+  const vq = vtView?.getState() || { enabled: false, tables: [], active: null };
   const term = terminalView?.getState() || { enabled: false, shells: [], favorites: [] };
   const sq = sqlView?.getState() || { enabled: false, connections: [], tabs: 0, active: null };
   const commands = [
     { label: 'New note', hint: 'Ctrl N', icon: 'plus', run: () => createNote() },
-    (state.terminalMode || state.sqlMode)
+    (state.terminalMode || state.sqlMode || state.vtMode)
       ? { label: `Back to ${space?.name || 'notes'}`, icon: spaceIcon(space), colorVar: space?.colorVar, run: () => selectSpace(state.currentSpaceId) }
       : { label: 'Open CMD', sub: term.enabled ? term.shellName : 'off until you turn it on', icon: 'terminal', colorVar: '--cmd', run: () => enterTerminalMode() },
     ...(term.enabled ? [
@@ -1789,6 +1899,25 @@ async function getPaletteCommands() {
     ] : [
       { label: 'Turn on the CMD space…', sub: 'Windows asks you to confirm', icon: 'terminal', colorVar: '--cmd', run: async () => { await enterTerminalMode(); await enableTerminal(); } }
     ]),
+    ...(vq.enabled ? [
+      ...(!state.vtMode ? [
+        { label: 'Open SQL - VT', sub: vtEntrySub(vq), icon: 'table', colorVar: '--vt', run: () => enterVtMode() }
+      ] : []),
+      ...vq.tables.map(t => ({
+        label: `Open ${t.name}`,
+        sub: `virtual table · ${t.rows.toLocaleString()} rows${t.source ? ` · from ${t.source.name}` : ''}`,
+        icon: 'table',
+        colorVar: '--vt',
+        run: () => openVirtualTable(t.name)
+      })),
+      { label: 'SQL - VT: New query', icon: 'plus', colorVar: '--vt', run: () => newVtQuery() },
+      ...(state.vtMode && vq.active ? [
+        vq.active.running
+          ? { label: 'SQL - VT: Stop the query', sub: vq.active.name, icon: 'stop', colorVar: '--vt', run: () => vtView.cancel() }
+          : { label: 'SQL - VT: Run the query', sub: vq.active.name, hint: 'Ctrl Enter', icon: 'play', colorVar: '--vt', run: () => vtView.run() },
+        { label: 'SQL - VT: Close this tab', sub: vq.active.name, hint: 'Ctrl Shift W', icon: 'x', colorVar: '--vt', run: () => vtView.closeTab() }
+      ] : [])
+    ] : []),
     ...(!state.sqlMode ? [
       { label: 'Open SQL', sub: sq.enabled ? sqlEntrySub(sq) : 'off until you turn it on', icon: 'database', colorVar: '--sql', run: () => enterSqlMode() }
     ] : []),
@@ -2027,7 +2156,7 @@ function setupShortcuts() {
       return;
     }
     // Keys about the open note do nothing while the CMD or SQL space shows.
-    if ((state.terminalMode || state.sqlMode) && mod && ['n', 'd', 's', 'e'].includes(key)) {
+    if ((state.terminalMode || state.sqlMode || state.vtMode) && mod && ['n', 'd', 's', 'e'].includes(key)) {
       e.preventDefault();
       return;
     }
@@ -2036,25 +2165,26 @@ function setupShortcuts() {
       commandList?.focusFilter();
       return;
     }
-    if (state.sqlMode) {
+    if (state.sqlMode || state.vtMode) {
+      const view = state.vtMode ? vtView : sqlView;
       // The SQL editor has its own Ctrl+F (find), Ctrl+Enter and F5.
       if (e.target?.closest?.('.ws-sql .cm-editor')) {
         if (!mod || !(key === 'k' || key === 'l' || e.key === '\\')) return;
       } else if (e.key === 'F5' || (mod && e.key === 'Enter')) {
         e.preventDefault(); // F5 would reload the page and drop every tab
-        sqlView.run();
+        view.run();
         return;
       } else if (mod && e.shiftKey && key === 't') {
         e.preventDefault();
-        sqlView.newTab();
+        view.newTab();
         return;
       } else if (mod && e.shiftKey && key === 'w') {
         e.preventDefault();
-        sqlView.closeTab();
+        view.closeTab();
         return;
       } else if (mod && key === 'f') {
         e.preventDefault();
-        sqlList?.focusFilter();
+        (state.vtMode ? vtList : sqlList)?.focusFilter();
         return;
       }
     }
@@ -2242,7 +2372,10 @@ async function init() {
   // Mount Sidebar
   const sidebarContainer = document.getElementById('sidebar');
   const sidebarEl = createSidebar({
-    onSelectSpace: (id) => (id === 'cmd' ? enterTerminalMode() : id === 'sql' ? enterSqlMode() : selectSpace(id)),
+    onSelectSpace: (id) => (id === 'cmd' ? enterTerminalMode()
+      : id === 'sql' ? enterSqlMode()
+        : id === 'vt' ? enterVtMode()
+          : selectSpace(id)),
     onNewVault: async () => {
       // The setup dialog creates any missing built-in vaults. When both
       // vaults already exist there is nothing to set up in v1.
@@ -2332,10 +2465,34 @@ async function init() {
       setToolEntry('sql', { sub: sqlEntrySub(q) });
     },
     notify: (message) => toast(message, { icon: 'database' }),
-    onNewConnection: () => editSqlConnection()
+    onNewConnection: () => editSqlConnection(),
+    onEnable: () => enableSql(),
+    onTablesChanged: (tables) => vtTablesChanged(tables)
   });
   document.getElementById('workspace')?.appendChild(sqlView.element);
+
+  // The SQL - VT space: the same query view, on the virtual tables' vt.db.
+  vtList = createVtList({
+    onOpen: (name) => openVirtualTable(name),
+    onNewQuery: () => newVtQuery(),
+    onRename: (name) => renameVirtualTable(name),
+    onDelete: (name) => deleteVirtualTable(name)
+  });
+  sqlList.element.after(vtList.element);
+
+  vtView = createSqlView({
+    kind: 'vt',
+    onStateChanged: (v) => {
+      vtList.render(v);
+      setToolEntry('vt', { sub: vtEntrySub(v) });
+    },
+    notify: (message) => toast(message, { icon: 'table' }),
+    onEnable: () => enableSql(),
+    onTablesChanged: (tables) => vtTablesChanged(tables)
+  });
+  document.getElementById('workspace')?.appendChild(vtView.element);
   await sqlView.refresh();
+  await vtView.refresh();
 
   // Mount Status Bar
   const statusBarContainer = document.getElementById('statusbar');

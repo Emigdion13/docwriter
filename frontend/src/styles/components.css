@@ -2391,7 +2391,7 @@
   display: none;
 }
 
-.app.terminal-mode > .cmdlist:not(.sqllist) {
+.app.terminal-mode > .cmdlist:not(.sqllist, .vtlist) {
   display: flex;
 }
 
@@ -2857,27 +2857,34 @@
    workspace.  The header and the tab strip are the CMD space's.
    ================================================================= */
 .sqllist,
+.vtlist,
 .ws-sql {
   display: none;
 }
 
-.app.sql-mode > .notelist {
+.app.sql-mode > .notelist,
+.app.vt-mode > .notelist {
   display: none;
 }
 
-.app.sql-mode > .sqllist {
+.app.sql-mode > .sqllist,
+.app.vt-mode > .vtlist {
   display: flex;
 }
 
-.app.sql-mode .workspace > :not(.ws-sql) {
+/* Both SQL spaces use the same query view: .ws-query for SQL, .ws-vt for SQL - VT. */
+.app.sql-mode .workspace > :not(.ws-query),
+.app.vt-mode .workspace > :not(.ws-vt) {
   display: none;
 }
 
-.app.sql-mode .ws-sql {
+.app.sql-mode .ws-query,
+.app.vt-mode .ws-vt {
   display: flex;
 }
 
-.app.panels-collapsed > .sqllist {
+.app.panels-collapsed > .sqllist,
+.app.panels-collapsed > .vtlist {
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
@@ -2947,7 +2954,8 @@
   display: none;
 }
 
-.sqllist.is-off .cmd-scroll {
+.sqllist.is-off .cmd-scroll,
+.vtlist.is-off .cmd-scroll {
   opacity: .5;
 }
 
@@ -3486,4 +3494,31 @@
   color: var(--c, var(--accent));
   background: color-mix(in srgb, var(--c, var(--accent)) 12%, transparent);
   border-color: color-mix(in srgb, var(--c, var(--accent)) 32%, transparent);
+}
+
+/* The SQL - VT space: the SQL space's look, in its own colour */
+.ws-vt,
+.vtlist {
+  --sql: var(--vt);
+}
+
+.vtlist .vt-open .nm {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.vt-row {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.sql-rbar .sql-keep {
+  width: 28px;
+  height: 28px;
+  border-color: transparent;
+  background: none;
+  color: var(--muted);
+}
+
+.sql-rbar .sql-keep:hover {
+  color: var(--vt);
 }

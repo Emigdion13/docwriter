@@ -714,10 +714,16 @@ class _Session:
         self.conn = conn
         self.results: list[_Result] = []
         self.run_id: str | None = None
+        #: The SQL of the last run, kept with a virtual table saved from it.
+        self.last_text = ""
         self.cursor: Any = None
         self.cancelled = threading.Event()
         self.closed = False
         self.lock = threading.Lock()
+        if isinstance(conn, sqlite3.Connection):
+            # interrupt() is lost when Stop comes before SQLite starts the
+            # statement; SQLite asking this every few thousand steps is not.
+            conn.set_progress_handler(lambda: 1 if self.cancelled.is_set() else 0, 5000)
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -816,6 +822,7 @@ class SqlManager:
             session.run_id = run_id
             session.cancelled.clear()
             session.results = []
+            session.last_text = text
         threading.Thread(
             target=self._work, args=(session, run_id, pieces), name="VaultNotes-sql-run", daemon=True
         ).start()
@@ -948,6 +955,14 @@ class SqlManager:
         offset = _int(offset, "Offset", 0, 2**62)
         limit = _int(limit, "Limit", 1, MAX_PAGE_ROWS)
         return {"offset": offset, "total": len(result.rows), "rows": result.page(offset, limit)}
+
+    def finished_result(self, session_id: Any, index: Any) -> tuple[dict[str, Any], _Result]:
+        """A result to keep as a virtual table, and what the tab ran to get it."""
+        session = self._session(session_id)
+        if session.run_id is not None:
+            raise SqlError("busy", "This tab is still running a query. Wait for it to finish.")
+        result = self._result(session_id, index)
+        return {"connection": session.connection_id, "name": session.name, "query": session.last_text}, result
 
     def copy_text(self, session_id: Any, index: Any, with_header: bool = True) -> str:
         """A whole result as tab-separated text, for pasting into Excel."""

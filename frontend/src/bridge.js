@@ -373,6 +373,15 @@ const MOCK_SQL_COLUMNS = [
   { name: 'notes', kind: 'text' }
 ];
 
+// Virtual tables in the browser preview: their rows are made up like the rest.
+mockSql.vtables = [
+  {
+    name: 'failed_batches', rows: 10, columns: MOCK_SQL_COLUMNS.map(c => c.name),
+    source: { connection: 'mock-dev', name: 'Dev ingest', where: 'dev-sql01 / Ingest' },
+    query: 'SELECT TOP 10 *', created: '2026-10-01T09:00:00Z'
+  }
+];
+
 function mockSqlRow(i) {
   const statuses = ['Loaded', 'Pending', 'Failed', 'Loaded', 'Loaded'];
   return [
@@ -994,6 +1003,7 @@ export const bridge = {
       driver: 'ODBC Driver 18 for SQL Server',
       connections: mockSql.enabled ? mockSqlPublic() : [],
       queries: mockSql.enabled ? mockSqlQueries() : [],
+      vtables: mockSql.enabled ? mockSql.vtables.map(t => ({ ...t })) : [],
       sessions: []
     };
   },
@@ -1092,7 +1102,9 @@ export const bridge = {
   async sql_open(connection_id) {
     const api = await waitForBridge();
     if (api?.sql_open) return await api.sql_open(connection_id);
-    const connection = mockSql.connections.find(c => c.id === connection_id);
+    const connection = connection_id === 'vt'
+      ? { id: 'vt', name: 'Virtual tables', engine: 'sqlite', engineName: 'SQLite', where: 'vt.db' }
+      : mockSql.connections.find(c => c.id === connection_id);
     if (!connection) return { error: 'not_found', message: 'That connection does not exist any more.' };
     await new Promise(r => setTimeout(r, 250));
     const id = `mock-session-${++mockSqlSeq}`;
@@ -1106,9 +1118,11 @@ export const bridge = {
     if (api?.sql_run) return await api.sql_run(session_id, text, query_id);
     const savedQuery = mockSql.queries.find(q => q.id === query_id);
     if (savedQuery) savedQuery.lastRun = new Date().toISOString();
+
     const session = mockSql.sessions.get(session_id);
     if (!session) return { error: 'not_open', message: 'That query tab is not connected any more.' };
     if (!String(text).trim()) return { error: 'empty', message: 'There is no SQL to run.' };
+    session.lastText = String(text);
     const run = `mock-run-${++mockSqlSeq}`;
     session.running = run;
     const outcome = mockSqlResults(String(text));
@@ -1158,6 +1172,49 @@ export const bridge = {
     const lines = [result.columns.map(c => c.name).join('\t')];
     for (const row of mockSqlPage(result, 0, result.total)) lines.push(row.map(v => (v == null ? 'NULL' : v)).join('\t'));
     return { ok: true, text: lines.join('\r\n') };
+  },
+
+  /* ---- Virtual tables: results copied into vt.db, queried in SQL - VT ---- */
+  async sql_vt_list() {
+    const api = await waitForBridge();
+    if (api?.sql_vt_list) return await api.sql_vt_list();
+    return { ok: true, tables: mockSql.vtables.map(t => ({ ...t })) };
+  },
+
+  /** Keeps one result of a tab's last run as a virtual table; replace overwrites one of that name. */
+  async sql_save_vt(session_id, result_index, name, replace = false) {
+    const api = await waitForBridge();
+    if (api?.sql_save_vt) return await api.sql_save_vt(session_id, result_index, name, replace);
+    const session = mockSql.sessions.get(session_id);
+    const result = session?.results[result_index];
+    if (!result) return { error: 'not_found', message: 'That result is gone. Run the query again.' };
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(name)) return { error: 'invalid_input', message: 'Letters, digits and _ only.' };
+    const existing = mockSql.vtables.find(t => t.name.toLowerCase() === name.toLowerCase());
+    if (existing && !replace) return { error: 'exists', message: `A virtual table named ${existing.name} already exists.` };
+    const table = {
+      name, rows: result.total, columns: result.columns.map(c => c.name),
+      source: { connection: session.connection.id, name: session.connection.name, where: session.connection.where },
+      query: (session.lastText || '').split('\n')[0], created: new Date().toISOString()
+    };
+    mockSql.vtables = [...mockSql.vtables.filter(t => t !== existing), table].sort((a, b) => a.name.localeCompare(b.name));
+    return { ok: true, table: { name, rows: table.rows, columns: table.columns }, tables: mockSql.vtables.map(t => ({ ...t })) };
+  },
+
+  async sql_rename_vt(name, new_name) {
+    const api = await waitForBridge();
+    if (api?.sql_rename_vt) return await api.sql_rename_vt(name, new_name);
+    if (mockSql.vtables.some(t => t.name.toLowerCase() === new_name.toLowerCase() && t.name !== name)) {
+      return { error: 'exists', message: `A virtual table named ${new_name} already exists.` };
+    }
+    mockSql.vtables = mockSql.vtables.map(t => (t.name === name ? { ...t, name: new_name } : t));
+    return { ok: true, tables: mockSql.vtables.map(t => ({ ...t })) };
+  },
+
+  async sql_delete_vt(name) {
+    const api = await waitForBridge();
+    if (api?.sql_delete_vt) return await api.sql_delete_vt(name);
+    mockSql.vtables = mockSql.vtables.filter(t => t.name !== name);
+    return { ok: true, tables: mockSql.vtables.map(t => ({ ...t })) };
   },
 
   /** Closes one tab's connection, or every one when no id is given. */
