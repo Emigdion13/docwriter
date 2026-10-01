@@ -371,6 +371,20 @@ def test_cancel_stops_a_long_query(tmp_path: Path) -> None:
     assert done["cancelled"] is True and done["ok"] is False and done["error"] is None
 
 
+def test_stop_right_after_run_is_not_lost(tmp_path: Path) -> None:
+    """Stop pressed before SQLite started the statement still stops it."""
+    api, window, sid = sqlite_tab(tmp_path)
+    slow = (
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 300000000) "
+        "SELECT COUNT(*) FROM n"
+    )
+    for attempt in range(5):
+        api.sql_run(sid, slow)
+        api.sql_cancel(sid)
+        done = window.wait_for("sql_done", attempt + 1, timeout=5)[attempt]
+        assert done["cancelled"] is True
+
+
 def test_closing_and_turning_off_ends_the_tabs(tmp_path: Path) -> None:
     api, window, sid = sqlite_tab(tmp_path)
     assert [s["id"] for s in api.sql_state()["sessions"]] == [sid]
@@ -526,7 +540,7 @@ def test_no_sql_endpoint_raises_while_on(tmp_path: Path) -> None:
     api, _ = turned_on(tmp_path)
     api.window = None  # no native dialogs in a sweep
     names = [name for name in dir(Api) if name.startswith("sql_")]
-    assert len(names) == 17
+    assert len(names) == 21
     for name in names:
         method = getattr(api, name)
         arity = len(inspect.signature(method).parameters)
