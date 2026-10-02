@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from vaultnotes.ai_share import load_snapshot
 from vaultnotes.api import Api
 from vaultnotes.backup.gdrive_auth import TokenStore
 from vaultnotes.config import Config
@@ -614,7 +615,7 @@ def test_no_sql_endpoint_raises_while_on(tmp_path: Path) -> None:
     api, _ = turned_on(tmp_path)
     api.window = None  # no native dialogs in a sweep
     names = [name for name in dir(Api) if name.startswith("sql_")]
-    assert len(names) == 23
+    assert len(names) == 25
     for name in names:
         method = getattr(api, name)
         arity = len(inspect.signature(method).parameters)
@@ -624,6 +625,156 @@ def test_no_sql_endpoint_raises_while_on(tmp_path: Path) -> None:
             assert isinstance(result, dict), name
             assert {"ok", "error", "enabled"} & set(result), (name, result)
             assert result.get("error") != "internal_error", (name, hostile)
+
+
+# ----------------------------------------------------------------------
+# Sharing a result with AI helpers
+# ----------------------------------------------------------------------
+ROWS_1500 = (
+    "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1500) "
+    "SELECT i, 'row ' || i AS label FROM n"
+)
+
+
+def run_done(api: Api, window: FakeWindow, sid: str, text: str) -> dict[str, Any]:
+    """Run SQL in a tab and wait for its sql_done event."""
+    before = len(window.events("sql_done"))
+    assert api.sql_run(sid, text)["ok"] is True
+    return window.wait_for("sql_done", before + 1)[before]
+
+
+def shared(api: Api, window: FakeWindow, sid: str, text: str = "SELECT id, name FROM batches ORDER BY id") -> None:
+    run_done(api, window, sid, text)
+    assert api.sql_share_result(sid, 0, True)["ok"] is True
+    assert api.ai_share.path.exists()
+
+
+def test_sharing_needs_the_users_confirmation(tmp_path: Path) -> None:
+    api, window, sid = sqlite_tab(tmp_path)
+    run_done(api, window, sid, "SELECT id, name FROM batches")
+    assert api.sql_share_result(sid, 0)["error"] == "not_confirmed"
+    assert api.sql_share_result(sid, 0, "yes")["error"] == "not_confirmed"
+    assert api.sql_share_result(sid, 0, 1)["error"] == "not_confirmed"
+    assert not api.ai_share.path.exists()
+
+
+def test_a_shared_result_is_capped_and_kept_outside_the_notes_folder(tmp_path: Path) -> None:
+    api, window, sid = sqlite_tab(tmp_path)
+    run_done(api, window, sid, ROWS_1500)
+    res = api.sql_share_result(sid, 0, True)
+    assert res["ok"] is True and res["rows"] == 1000 and res["total"] == 1500 and res["truncated"] is True
+
+    snap = load_snapshot(api.ai_share.folder)
+    assert snap is not None
+    assert snap["shared_rows"] == 1000 and len(snap["rows"]) == 1000 and snap["total_rows"] == 1500
+    assert snap["truncated"] is True and snap["query"] == ROWS_1500
+    assert snap["rows"][0] == [1, "row 1"] and snap["rows"][-1] == [1000, "row 1000"]
+    assert [c["name"] for c in snap["columns"]] == ["i", "label"]
+    assert snap["connection"] == "ingest" and snap["engine"] == "SQLite"
+
+    assert api.ai_share.folder.is_relative_to(tmp_path / "local")
+    assert list((tmp_path / "notes").rglob("result.json")) == []
+
+
+def test_a_small_result_is_shared_whole(tmp_path: Path) -> None:
+    api, window, sid = sqlite_tab(tmp_path)
+    shared(api, window, sid)
+    snap = load_snapshot(api.ai_share.folder)
+    assert snap is not None and snap["shared_rows"] == 500 and snap["truncated"] is False
+
+
+def test_a_shared_file_expires_even_if_the_app_never_removed_it(tmp_path: Path) -> None:
+    api, window, sid = sqlite_tab(tmp_path)
+    shared(api, window, sid)
+    assert load_snapshot(api.ai_share.folder, now=time.time() + 60) is not None
+    assert load_snapshot(api.ai_share.folder, now=time.time() + 31 * 60) is None
+
+
+def test_the_share_expires_in_the_app_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("vaultnotes.sql.SHARE_EXPIRY_SECONDS", 0.2)
+    api, window, sid = sqlite_tab(tmp_path)
+    shared(api, window, sid)
+    event = window.wait_for("sql_share_changed")[-1]
+    assert event == {"session": sid, "shared": False, "reason": "expired"}
+    assert not api.ai_share.path.exists()
+
+
+def test_a_new_run_takes_the_share_back(tmp_path: Path) -> None:
+    api, window, sid = sqlite_tab(tmp_path)
+    shared(api, window, sid)
+    assert api.sql_run(sid, "SELECT 1")["ok"] is True
+    assert not api.ai_share.path.exists()  # gone before the new result even arrives
+    assert window.wait_for("sql_share_changed")[-1] == {"session": sid, "shared": False, "reason": "run"}
+    window.wait_for("sql_done", 2)
+    assert api.sql_share_result(sid, 0, True)["ok"] is True  # the new result can be shared afresh
+
+
+def test_closing_the_tab_or_turning_sql_off_takes_the_share_back(tmp_path: Path) -> None:
+    api, window, sid = sqlite_tab(tmp_path)
+    shared(api, window, sid)
+    api.sql_close(sid)
+    assert not api.ai_share.path.exists()
+    assert window.wait_for("sql_share_changed")[-1]["reason"] == "closed"
+
+    session = api.sql_open(api.sql_state()["connections"][0]["id"])["id"]
+    shared(api, window, session)
+    assert api.sql_disable()["enabled"] is False
+    assert not api.ai_share.path.exists()
+
+
+def test_unsharing_by_hand(tmp_path: Path) -> None:
+    api, window, sid = sqlite_tab(tmp_path)
+    shared(api, window, sid)
+    assert api.sql_unshare_result(sid) == {"ok": True}
+    assert not api.ai_share.path.exists()
+    assert window.wait_for("sql_share_changed")[-1] == {"session": sid, "shared": False, "reason": "user"}
+    assert api.sql_unshare_result(sid) == {"ok": True}  # nothing shared any more: still fine
+
+
+def test_sharing_another_result_replaces_the_first(tmp_path: Path) -> None:
+    api, window, sid = sqlite_tab(tmp_path)
+    other = api.sql_open(api.sql_state()["connections"][0]["id"])["id"]
+    shared(api, window, sid, "SELECT 1 AS a")
+    shared(api, window, other, "SELECT 2 AS b")
+    snap = load_snapshot(api.ai_share.folder)
+    assert snap is not None and snap["query"] == "SELECT 2 AS b"
+    assert {"session": sid, "shared": False, "reason": "replaced"} in window.wait_for("sql_share_changed")
+
+    api.sql_close(sid)  # the first tab no longer owns the file
+    assert api.ai_share.path.exists()
+    api.sql_close(other)
+    assert not api.ai_share.path.exists()
+
+
+def test_a_running_tab_cannot_share(tmp_path: Path) -> None:
+    api, window, sid = sqlite_tab(tmp_path)
+    run_done(api, window, sid, "SELECT 1")
+    slow = (
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 300000000) "
+        "SELECT COUNT(*) FROM n"
+    )
+    api.sql_run(sid, slow)
+    assert api.sql_share_result(sid, 0, True)["error"] == "busy"
+    api.sql_cancel(sid)
+    window.wait_for("sql_done", 2)
+    assert not api.ai_share.path.exists()
+
+
+def test_a_missing_result_or_tab_cannot_share(tmp_path: Path) -> None:
+    api, window, sid = sqlite_tab(tmp_path)
+    run_done(api, window, sid, "SELECT 1")
+    assert api.sql_share_result(sid, 5, True)["error"] == "not_found"
+    assert api.sql_share_result("not-a-tab", 0, True)["error"] == "not_open"
+    assert not api.ai_share.path.exists()
+
+
+def test_a_leftover_shared_file_is_removed_at_start_up(tmp_path: Path) -> None:
+    folder = tmp_path / "local" / "ai-share"
+    folder.mkdir(parents=True)
+    (folder / "result.json").write_text('{"left": "behind"}', encoding="utf-8")
+    api = make_api(tmp_path)
+    assert not (folder / "result.json").exists()
+    api.close()
 
 
 # ----------------------------------------------------------------------

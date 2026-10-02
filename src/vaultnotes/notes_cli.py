@@ -13,10 +13,18 @@ read-only, and the Encrypted vault is always refused.
     python -m vaultnotes.notes_cli --root <notes folder> delete ai "Old draft"
     python -m vaultnotes.notes_cli --root <notes folder> mark ai "PR 42 review" [--clear]
     python -m vaultnotes.notes_cli --root <notes folder> tag ai "PR 42 review" review backend [--remove]
+    python -m vaultnotes.notes_cli results
 
 ``--root`` and ``--personal-key`` can also come from the ``VAULTNOTES_ROOT`` and
 ``VAULTNOTES_PERSONAL_KEY`` environment variables.  The app's settings.json is
 not read, so the notes folder and key are always the ones named here.
+
+``results`` prints the one SQL result the user ticked "Share with AI" on in the
+SQL grid: the SQL, the columns and the first 1,000 rows.  It needs no ``--root``
+and reads only the app's ``ai-share`` folder (``--share-dir`` or
+``VAULTNOTES_SHARE_DIR`` name another).  It fails when nothing is shared or the
+share expired: the app takes a result back when its tab runs another query,
+closes, or after 30 minutes.
 
 The **Encrypted** vault is refused before anything is opened: it holds PHI, so
 this tool never lists it, never opens its folder and never decrypts it.  A key
@@ -33,14 +41,16 @@ folder; reading never creates anything.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import re
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
-from vaultnotes.config import AI_NOTES_FOLDER, ensure_ai_notes_folder
+from vaultnotes.ai_share import SHARE_FOLDER, load_snapshot
+from vaultnotes.config import AI_NOTES_FOLDER, ensure_ai_notes_folder, get_local_app_dir
 from vaultnotes.crypto.keyfile import KeyFileError, PassphraseRequired, load_key_file
 from vaultnotes.frontmatter import is_important, set_important, set_tags
 from vaultnotes.models import Note
@@ -371,6 +381,58 @@ def _matching_lines(body: str, needle: str, limit: int = 3) -> list[str]:
     return lines[:limit]
 
 
+def _share_dir(raw: str | None) -> Path:
+    folder = Path(raw).expanduser() if raw else get_local_app_dir() / SHARE_FOLDER
+    if _mentions_encrypted(folder):
+        raise Refused(ENCRYPTED_REFUSAL)
+    return folder
+
+
+def _cell_text(value: Any) -> str:
+    """One value on one line, tabs and line breaks flattened, NULL spelled out."""
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return " ".join(str(value).replace("\t", " ").splitlines())
+
+
+def _stamp(seconds: Any) -> str:
+    try:
+        return dt.datetime.fromtimestamp(float(seconds), dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "unknown"
+
+
+def _results(folder: Path) -> str:
+    """The SQL result the user shared with AI, as text; an error when none is shared."""
+    data = load_snapshot(folder)
+    if data is None:
+        raise CliError(
+            "Nothing is shared with AI right now. In VaultNotes, review the result for PHI and "
+            "tick the 'Share with AI' box under it. The app takes a result back when its tab runs "
+            "another query or closes, and after 30 minutes."
+        )
+    columns = [str(c.get("name", "")) if isinstance(c, dict) else str(c) for c in data.get("columns") or []]
+    rows = data["rows"] if isinstance(data.get("rows"), list) else []
+    total = data.get("total_rows", len(rows))
+    if data.get("truncated"):
+        shown = f"{len(rows)} of {total} rows (only the first {len(rows)} are shared)"
+    else:
+        shown = f"{total} rows"
+    lines = [
+        f"<!-- shared SQL result · {data.get('connection', '?')} ({data.get('engine', '?')}) · "
+        f"shared {_stamp(data.get('shared_at'))} · expires {_stamp(data.get('expires_at'))} -->",
+        "Query:",
+        str(data.get("query", "")).rstrip() + (" ...(cut short)" if data.get("query_truncated") else ""),
+        "",
+        shown,
+        "\t".join(_cell_text(name) for name in columns),
+    ]
+    lines.extend("\t".join(_cell_text(value) for value in row) for row in rows if isinstance(row, list))
+    return "\n".join(lines)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="notes.py",
@@ -385,7 +447,13 @@ def _parser() -> argparse.ArgumentParser:
         default=os.environ.get("VAULTNOTES_PERSONAL_KEY"),
         help="the Personal vault's .vnkey file (needed for the personal space)",
     )
+    parser.add_argument(
+        "--share-dir",
+        default=os.environ.get("VAULTNOTES_SHARE_DIR"),
+        help="the app's ai-share folder, for results (the per-PC VaultNotes folder by default)",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("results", help="print the SQL result the user shared with AI")
     listing = commands.add_parser("list", help="list note titles")
     listing.add_argument("space")
     listing.add_argument(
@@ -435,6 +503,9 @@ def run(argv: Sequence[str] | None = None, out=None, stdin=None) -> int:
 
     reader: NotesReader | None = None
     try:
+        if args.command == "results":  # no space and no notes folder: one shared file
+            print(_results(_share_dir(args.share_dir)), file=out)
+            return 0
         # Before anything else, so Encrypted (and a write outside AI-Notes) is
         # refused first.
         writing = args.command in WRITE_COMMANDS

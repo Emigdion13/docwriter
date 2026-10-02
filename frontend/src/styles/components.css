@@ -3543,3 +3543,35 @@
 .sql-rbar .sql-keep:hover {
   color: var(--vt);
 }
+
+.sql-rbar .sql-share {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.sql-rbar .sql-share[hidden] {
+  display: none;
+}
+
+.sql-rbar .sql-share input {
+  margin: 0;
+  accent-color: var(--sql);
+  cursor: pointer;
+}
+
+.sql-rbar .sql-share.on {
+  color: var(--warning);
+}
+
+.sql-rbar .sql-share:has(input:disabled) {
+  opacity: 0.5;
+  cursor: default;
+}

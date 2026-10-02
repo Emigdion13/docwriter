@@ -27,6 +27,14 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from vaultnotes.ai_share import (
+    MAX_SHARE_CELL_CHARS,
+    MAX_SHARE_QUERY_CHARS,
+    MAX_SHARE_ROWS,
+    SHARE_EXPIRY_SECONDS,
+    AiShare,
+)
+
 #: Engine ids in the order the page offers them.
 ENGINES = ("mssql", "sqlite")
 ENGINE_NAMES = {"mssql": "SQL Server", "sqlite": "SQLite"}
@@ -686,6 +694,14 @@ def full_text(value: Any) -> str | None:
 # ----------------------------------------------------------------------
 # Query tabs
 # ----------------------------------------------------------------------
+def _share_cell(value: Any) -> Any:
+    """A value for the shared file: JSON-safe like :func:`cell`, and cut shorter."""
+    shown = cell(value)
+    if isinstance(shown, str) and len(shown) > MAX_SHARE_CELL_CHARS:
+        return shown[:MAX_SHARE_CELL_CHARS] + "…"
+    return shown
+
+
 class _Result:
     """One result set of a run: its columns and every row, as the driver gave them."""
 
@@ -733,6 +749,9 @@ class _Session:
         self.cancelled = threading.Event()
         self.closed = False
         self.lock = threading.Lock()
+        #: Set while this tab's result is shared with AI helpers (see SqlManager.share).
+        self.shared: dict[str, Any] | None = None
+        self.share_timer: threading.Timer | None = None
         if isinstance(conn, sqlite3.Connection):
             # interrupt() is lost when Stop comes before SQLite starts the
             # statement; SQLite asking this every few thousand steps is not.
@@ -757,11 +776,21 @@ def _int(value: Any, name: str, low: int, high: int) -> int:
 class SqlManager:
     """The SQL space's open connections, one per query tab."""
 
-    def __init__(self, emit: Emit, connector: Callable[[dict[str, Any], str | None], Any] | None = None) -> None:
+    def __init__(
+        self,
+        emit: Emit,
+        connector: Callable[[dict[str, Any], str | None], Any] | None = None,
+        share: AiShare | None = None,
+    ) -> None:
         self._emit = emit
         self._connect = connector or connect
         self._lock = threading.Lock()
         self._sessions: dict[str, _Session] = {}
+        #: Where a result is shared with AI helpers, the lock that guards it and
+        #: the tab whose result is there (at most one).
+        self._share = share
+        self._share_lock = threading.Lock()
+        self._share_owner: str | None = None
 
     # -- tabs ----------------------------------------------------------
     def check_room(self) -> None:
@@ -810,6 +839,7 @@ class SqlManager:
                 ended = [one] if one is not None else []
         for session in ended:
             session.closed = True
+            self._unshare(session, "closed")
             self._interrupt(session)
             if session.run_id is None:
                 _close_quietly(session.conn)
@@ -840,6 +870,8 @@ class SqlManager:
             session.cancelled.clear()
             session.results = []
             session.last_text = text
+            # Whatever was shared from this tab is about to be replaced: take it back first.
+            self._unshare(session, "run")
         threading.Thread(
             target=self._work, args=(session, run_id, pieces), name="VaultNotes-sql-run", daemon=True
         ).start()
@@ -1152,6 +1184,98 @@ class SqlManager:
         lines = ["\t".join(result.names)] if with_header else []
         lines.extend("\t".join(field(value) for value in row) for row in result.rows)
         return "\r\n".join(lines)
+
+    # -- sharing a result with AI helpers ------------------------------
+    def share(self, session_id: Any, index: Any) -> dict[str, Any]:
+        """Share one finished result of a tab with AI helpers (``notes.py results``).
+
+        Only the first ``MAX_SHARE_ROWS`` rows are written, to the one shared
+        file, and only for ``SHARE_EXPIRY_SECONDS``.  A new run in the tab,
+        closing it or turning SQL off takes the result back at once, and
+        sharing another result (in this tab or another) replaces this one.
+        """
+        if self._share is None:
+            raise SqlError("share_off", "Sharing results with AI is not available.")
+        session = self._session(session_id)
+        with session.lock:
+            if session.run_id is not None:
+                raise SqlError("busy", "This tab is still running a query. Wait for it to finish.")
+            index = _int(index, "Result", 0, 10**6)
+            if index >= len(session.results):
+                raise SqlError("not_found", "That result is gone. Run the query again.")
+            result = session.results[index]
+            query = session.last_text
+            rows = [[_share_cell(value) for value in row] for row in result.rows[:MAX_SHARE_ROWS]]
+            snapshot = {
+                "connection": session.name,
+                "engine": ENGINE_NAMES.get(session.engine, session.engine),
+                "query": query[:MAX_SHARE_QUERY_CHARS],
+                "query_truncated": len(query) > MAX_SHARE_QUERY_CHARS,
+                "result_number": index + 1,
+                "columns": result.columns(),
+                "total_rows": len(result.rows),
+                "shared_rows": len(rows),
+                "truncated": len(rows) < len(result.rows),
+                "rows": rows,
+            }
+            with self._share_lock:
+                # close() sets ``closed`` before it asks for the file back, so a tab
+                # that closes after this check still finds its file and removes it.
+                if session.closed:
+                    raise SqlError("not_open", "That query tab is not connected any more.")
+                previous = self._share_owner
+                self._share.write(snapshot, SHARE_EXPIRY_SECONDS)
+                self._share_owner = session.id
+            self._forget_share(session, "replaced", emit=False)
+            stamp = secrets.token_hex(4)
+            session.shared = {"result": index, "stamp": stamp}
+            timer = threading.Timer(SHARE_EXPIRY_SECONDS, self._expire, args=(session, stamp))
+            timer.daemon = True
+            session.share_timer = timer
+            timer.start()
+        if previous is not None and previous != session.id:
+            with self._lock:
+                other = self._sessions.get(previous)
+            if other is not None:
+                self._forget_share(other, "replaced")
+        return {
+            "result": index,
+            "rows": len(rows),
+            "total": len(result.rows),
+            "truncated": len(rows) < len(result.rows),
+            "expiresInSeconds": SHARE_EXPIRY_SECONDS,
+        }
+
+    def unshare(self, session_id: Any) -> None:
+        """Take a tab's shared result back."""
+        self._unshare(self._session(session_id), "user")
+
+    def _forget_share(self, session: _Session, reason: str, emit: bool = True) -> None:
+        """Drop a tab's share flag and timer (the file is :meth:`_unshare`'s business)."""
+        timer, session.share_timer = session.share_timer, None
+        if timer is not None:
+            timer.cancel()
+        had, session.shared = session.shared is not None, None
+        if had and emit:
+            self._emit("sql_share_changed", {"session": session.id, "shared": False, "reason": reason})
+
+    def _unshare(self, session: _Session, reason: str) -> None:
+        """Remove the shared file when it is this tab's, and tell the page."""
+        cleared = False
+        with self._share_lock:
+            if self._share is not None and self._share_owner == session.id:
+                self._share_owner = None
+                self._share.clear()
+                cleared = True
+        had = session.shared is not None
+        self._forget_share(session, reason, emit=False)
+        if had or cleared:
+            self._emit("sql_share_changed", {"session": session.id, "shared": False, "reason": reason})
+
+    def _expire(self, session: _Session, stamp: str) -> None:
+        shared = session.shared
+        if shared is not None and shared.get("stamp") == stamp:
+            self._unshare(session, "expired")
 
 
 def _bracket(identifier: str) -> str:
