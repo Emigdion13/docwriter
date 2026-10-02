@@ -291,6 +291,13 @@ def test_allow_rule_for_a_web_address_is_its_domain() -> None:
     assert allow_rule(denial, "exact", ENC) == "WebFetch(domain:docs.example.com)"
 
 
+@pytest.mark.parametrize("name", ["mcp__claude_ai_Atlassian_Rovo__getJiraIssue", "mcp__claude-in-chrome__navigate"])
+def test_allow_rule_for_an_mcp_tool_is_the_tool(name: str) -> None:
+    denial = {"tool_name": name, "tool_input": {"issueIdOrKey": "DATAINGEST-1"}}
+    assert allow_rule(denial, "exact", ENC) == name
+    assert allow_rule(denial, "tool", ENC) == name
+
+
 @pytest.mark.parametrize("denial", [
     {}, {"tool_name": "Read(x)", "tool_input": {}}, {"tool_name": "Write", "tool_input": "x"},
     {"tool_name": "Write", "tool_input": {"file_path": "C:/a/(b).md"}}, {"tool_name": 5, "tool_input": {}},

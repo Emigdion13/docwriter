@@ -54,7 +54,8 @@ MAX_HISTORY_EVENTS = 400
 
 CHAT_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 SESSION_ID_RE = re.compile(r"^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
-TOOL_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,40}$")
+#: Long enough for MCP tools (``mcp__<server>__<tool>``); a server name may have hyphens.
+TOOL_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
 
 #: Tools that change a file; an Allow rule for one is an ``Edit(path)`` rule.
 EDIT_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
@@ -226,6 +227,8 @@ def allow_rule(denial: dict[str, Any], scope: str, encrypted_dir: Path | str | N
         url = data.get("url")
         host = re.match(r"^https?://([A-Za-z0-9.-]+)(?:[:/?#]|$)", url) if isinstance(url, str) else None
         return f"WebFetch(domain:{host.group(1)})" if host else None
+    if name.startswith("mcp__"):
+        return name  # an MCP tool takes no specifier: the tool itself is the narrowest rule
     return None
 
 
@@ -695,7 +698,9 @@ class ClaudeManager:
                 raise ClaudeError("not_found", "That request is not waiting any more.")
             rule = allow_rule(denial, scope, encrypted_dir)
             if rule is None:
-                raise ClaudeError("not_allowed", "That cannot be allowed one use at a time.")
+                if scope == "exact":
+                    raise ClaudeError("not_allowed", "That cannot be allowed one use at a time.")
+                raise ClaudeError("not_allowed", f"{denial.get('tool_name')} cannot be allowed from here.")
             rules.append(rule)
             summaries.append(f"{denial['tool_name']}: {summarize_tool(denial['tool_name'], denial.get('tool_input'))}")
         chat.allowed.update(rules)
