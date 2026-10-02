@@ -1157,6 +1157,21 @@ export const bridge = {
     return { ok: true, run, batches: 1 };
   },
 
+  /** Table and column names of a tab's database, for the editor's autocomplete. */
+  async sql_schema(session_id) {
+    const api = await waitForBridge();
+    if (api?.sql_schema) return await api.sql_schema(session_id);
+    if (!mockSql.sessions.has(session_id)) return { error: 'not_open', message: 'That query tab is not connected any more.' };
+    return {
+      ok: true,
+      truncated: false,
+      tables: [
+        { schema: 'dbo', name: 'Orders', columns: ['OrderId', 'CustomerId', 'Total', 'CreatedAt'] },
+        { schema: 'dbo', name: 'Customers', columns: ['CustomerId', 'Name', 'Email'] }
+      ]
+    };
+  },
+
   async sql_cancel(session_id) {
     const api = await waitForBridge();
     if (api?.sql_cancel) return await api.sql_cancel(session_id);

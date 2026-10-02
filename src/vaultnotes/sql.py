@@ -68,6 +68,19 @@ MAX_BINARY_PREVIEW = 64
 MAX_MESSAGES = 500
 #: "GO 5" runs a batch five times; more than this is refused.
 MAX_GO_REPEAT = 1000
+#: Columns sent to the editor for autocomplete; a bigger catalog is cut here.
+MAX_SCHEMA_COLUMNS = 40_000
+
+#: Table and column names only, never rows: what the editor completes.
+MSSQL_SCHEMA_SQL = (
+    "SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+    "ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION"
+)
+SQLITE_SCHEMA_SQL = (
+    "SELECT '', m.name, p.name FROM sqlite_master AS m, pragma_table_info(m.name) AS p "
+    "WHERE m.type IN ('table', 'view') AND m.name NOT LIKE 'sqlite!_%' ESCAPE '!' "
+    "ORDER BY m.name, p.cid"
+)
 
 KEYRING_SERVICE = "VaultNotes SQL"
 
@@ -1066,6 +1079,42 @@ class SqlManager:
                 cursor.execute(f"DROP TABLE IF EXISTS temp.{_quote(table)}")
         except Exception:  # noqa: BLE001
             pass
+
+    # -- autocomplete --------------------------------------------------
+    def schema(self, session_id: Any) -> dict[str, Any]:
+        """The tab's tables and views with their column names, for the editor's autocomplete.
+
+        Reads the catalog on the tab's own connection, so it waits for a run
+        in flight (``busy``).  Only names are read, never rows.
+        """
+        session = self._session(session_id)
+        with session.lock:
+            if session.run_id is not None:
+                raise SqlError("busy", "This tab is still running a query.")
+            tables: dict[tuple[str, str], list[str]] = {}
+            count = 0
+            cursor = None
+            try:
+                cursor = session.conn.cursor()
+                cursor.execute(MSSQL_SCHEMA_SQL if session.engine == "mssql" else SQLITE_SCHEMA_SQL)
+                while count < MAX_SCHEMA_COLUMNS:
+                    batch = cursor.fetchmany(FETCH_BATCH)
+                    if not batch:
+                        break
+                    for schema_name, table, column in batch:
+                        if count >= MAX_SCHEMA_COLUMNS:
+                            break
+                        tables.setdefault((str(schema_name or ""), str(table)), []).append(str(column))
+                        count += 1
+            except Exception as exc:  # noqa: BLE001 - a driver error becomes a message
+                raise SqlError("schema_failed", clean_driver_message(exc)) from exc
+            finally:
+                if cursor is not None:
+                    _close_quietly(cursor)
+        return {
+            "tables": [{"schema": s, "name": n, "columns": cols} for (s, n), cols in tables.items()],
+            "truncated": count >= MAX_SCHEMA_COLUMNS,
+        }
 
     # -- reading results -----------------------------------------------
     def _result(self, session_id: Any, index: Any) -> _Result:

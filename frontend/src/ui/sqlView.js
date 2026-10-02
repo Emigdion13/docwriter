@@ -18,14 +18,14 @@ import { basicSetup } from 'codemirror';
 import { EditorView, keymap } from '@codemirror/view';
 import { Compartment, EditorState, Prec } from '@codemirror/state';
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
-import { closeCompletion } from '@codemirror/autocomplete';
-import { sql, MSSQL, SQLite } from '@codemirror/lang-sql';
+import { acceptCompletion, closeCompletion } from '@codemirror/autocomplete';
 import { tags as t } from '@lezer/highlight';
 
 import { bridge, events } from '../bridge.js';
 import { icon } from '../icons.js';
 import { createResultGrid } from './resultGrid.js';
 import { confirmAction, pickOne, promptText } from './dialogs.js';
+import { catalogDialect, dialect } from './sqlComplete.js';
 
 // The most tabs open at once (Python's MAX_SESSIONS).
 export const MAX_TABS = 8;
@@ -60,10 +60,8 @@ const sqlTheme = EditorView.theme({
   '.cm-searchMatch': { background: 'color-mix(in srgb, var(--warning) 30%, transparent)' }
 });
 
-/* schema: { table: [columns] }, so the editor completes virtual tables' names. */
-function dialect(engine, schema) {
-  return sql({ dialect: engine === 'sqlite' ? SQLite : MSSQL, upperCaseKeywords: true, ...(schema ? { schema } : {}) });
-}
+/* Statements that change what tables and columns exist. */
+const CHANGES_SCHEMA = /\b(create|alter|drop)\s+(table|view)\b|\bselect\b[^;]*\binto\s+(?!#|@)[\w\[\]."]+\s+from\b|\bsp_rename\b/i;
 
 /* The virtual tables' own database, as the tabs of the SQL - VT space see it. */
 const VT_CONNECTION = {
@@ -471,6 +469,8 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
           Prec.highest(keymap.of([
             { key: 'Mod-Enter', run: () => { run(tab); return true; } },
             { key: 'F5', run: () => { run(tab); return true; } },
+            // Tab takes the highlighted suggestion; with none open it does what it did.
+            { key: 'Tab', run: acceptCompletion },
             { key: 'Mod-Shift-t', run: () => { newTab(); return true; } },
             { key: 'Mod-Shift-w', run: () => { closeTab(tab); return true; } },
             // Saved queries belong to connections; the VT space has none.
@@ -481,7 +481,7 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
             if (update.docChanged) setDirty(tab);
           }),
           basicSetup,
-          tab.lang.of(dialect(tab.conn?.engine, vt ? schema() : null)),
+          tab.lang.of(vt ? vtDialect() : dialect(tab.conn?.engine)),
           syntaxHighlighting(sqlHighlight),
           sqlTheme,
           EditorView.contentAttributes.of({ 'aria-label': 'SQL', spellcheck: 'false' })
@@ -541,6 +541,7 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
         notify?.(`Connected again, so ${tab.pushed.map(p => p.target).join(', ')} ${tab.pushed.length === 1 ? 'is' : 'are'} gone. Use ${tab.pushed.length === 1 ? 'it' : 'them'} again if you need ${tab.pushed.length === 1 ? 'it' : 'them'}.`);
         tab.pushed = [];
       }
+      loadCatalog(tab); // not awaited: the tab is usable while the names load
       return true;
     })();
     try {
@@ -549,6 +550,19 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
       tab.connecting = null;
       paint();
     }
+  }
+
+  /* Reads the connected database's table and column names into the tab's
+     autocomplete.  The VT space has its own list (see vtDialect()). */
+  async function loadCatalog(tab) {
+    if (vt || !tab.sessionId) return;
+    const session = tab.sessionId;
+    const res = await bridge.sql_schema(session);
+    if (!tabs.includes(tab) || tab.sessionId !== session || res?.error) return;
+    tab.editor.dispatch({
+      effects: tab.lang.reconfigure(catalogDialect(tab.conn?.engine, res.tables))
+    });
+    if (res.truncated) notify?.('This database is very large: autocomplete knows only its first tables.');
   }
 
   function activate(tab) {
@@ -751,6 +765,7 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
       return false;
     }
     setStatus(tab, 'Running…');
+    tab.ranText = text;
     // Only the saved SQL itself counts as a run of the saved query.
     const savedId = tab.saved && !tab.dirty && !hasSelection(tab) ? tab.saved.id : null;
     let res = await bridge.sql_run(tab.sessionId, text, savedId);
@@ -884,6 +899,8 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
     paint();
     // SQL in the VT space may have made, changed or dropped virtual tables.
     if (vt) onTablesChanged?.();
+    // A CREATE, ALTER or DROP: autocomplete should know the new names.
+    else if (!tab.error && CHANGES_SCHEMA.test(tab.ranText || '')) loadCatalog(tab);
   });
 
   /* ---- the strip and the header ---- */
@@ -930,6 +947,7 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
     tab.sessionId = null;
     tab.connectionId = wanted;
     tab.conn = connection(wanted);
+    // The old database's names go; connect() loads the new database's.
     tab.editor.dispatch({ effects: tab.lang.reconfigure(dialect(tab.conn.engine)) });
     tab.dirty = isDirty(tab); // a saved query moves only when it is saved again
     paint();
@@ -972,15 +990,16 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
 
   /* ---- virtual tables ---- */
 
-  function schema() {
-    return Object.fromEntries(info.tables.map(t => [t.name, t.columns]));
+  /* The virtual tables' names and columns, for the VT space's autocomplete. */
+  function vtDialect() {
+    return catalogDialect('sqlite', info.tables.map(t => ({ schema: '', name: t.name, columns: t.columns })));
   }
 
   /* The virtual tables changed: the VT space's editors complete the new names. */
   function setTables(list) {
     info.tables = Array.isArray(list) ? list : [];
     if (vt) {
-      for (const tab of tabs) tab.editor.dispatch({ effects: tab.lang.reconfigure(dialect('sqlite', schema())) });
+      for (const tab of tabs) tab.editor.dispatch({ effects: tab.lang.reconfigure(vtDialect()) });
     }
     paint();
   }

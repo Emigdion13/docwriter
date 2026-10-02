@@ -331,6 +331,80 @@ def test_run_reports_results_and_pages(tmp_path: Path) -> None:
     assert text == "n\r\n500"
 
 
+def test_schema_lists_tables_views_and_columns_for_autocomplete(tmp_path: Path) -> None:
+    api, window, sid = sqlite_tab(tmp_path)
+    api.sql_run(sid, "CREATE VIEW big AS SELECT id, name FROM batches WHERE size > 100")
+    window.wait_for("sql_done")
+
+    res = api.sql_schema(sid)
+    assert res["ok"] is True and res["truncated"] is False
+    assert res["tables"] == [
+        {"schema": "", "name": "batches", "columns": ["id", "name", "size", "started"]},
+        {"schema": "", "name": "big", "columns": ["id", "name"]},
+    ]
+    assert api.sql_schema("nope")["error"] == "not_open"
+
+
+def test_schema_waits_for_a_running_query(tmp_path: Path) -> None:
+    api, window, sid = sqlite_tab(tmp_path)
+    api.sql_run(sid, "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) SELECT COUNT(*) FROM n")
+    assert api.sql_schema(sid)["error"] == "busy"
+    api.sql_cancel(sid)
+    window.wait_for("sql_done")
+
+
+class SchemaCursor:
+    """What INFORMATION_SCHEMA.COLUMNS looks like through pyodbc."""
+
+    def __init__(self, rows: list[tuple[str, str, str]]) -> None:
+        self.rows = rows
+        self.executed = ""
+
+    def execute(self, text: str) -> None:
+        self.executed = text
+
+    def fetchmany(self, size: int) -> list[Any]:
+        out, self.rows = self.rows[:size], self.rows[size:]
+        return out
+
+    def close(self) -> None:
+        pass
+
+
+def test_schema_on_sql_server_groups_columns_by_schema_and_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    rows = [("dbo", "Orders", "OrderId"), ("dbo", "Orders", "Total"), ("ops", "Batches", "BatchId")]
+    cursor = SchemaCursor(rows)
+    conn = FakeConnection()
+    conn.cursor = lambda: cursor  # type: ignore[method-assign]
+    manager = SqlManager(emit=lambda *_: None, connector=lambda *_: conn)
+    profile = {**clean_profile({"engine": "mssql", "name": "Dev", "server": "s"}), "id": "c1"}
+    session = manager.open(profile, None)
+
+    assert manager.schema(session["id"]) == {
+        "tables": [
+            {"schema": "dbo", "name": "Orders", "columns": ["OrderId", "Total"]},
+            {"schema": "ops", "name": "Batches", "columns": ["BatchId"]},
+        ],
+        "truncated": False,
+    }
+    assert "INFORMATION_SCHEMA.COLUMNS" in cursor.executed
+
+    # A huge catalog is cut, and says so.
+    monkeypatch.setattr("vaultnotes.sql.MAX_SCHEMA_COLUMNS", 2)
+    cursor.rows = list(rows)
+    cut = manager.schema(session["id"])
+    assert cut["truncated"] is True and sum(len(t["columns"]) for t in cut["tables"]) == 2
+
+    # A driver error is a message, not an exception.
+    def broken() -> Any:
+        raise RuntimeError("boom")
+
+    conn.cursor = broken  # type: ignore[method-assign]
+    with pytest.raises(SqlError) as info:
+        manager.schema(session["id"])
+    assert info.value.code == "schema_failed"
+
+
 def test_writes_report_rows_affected_and_temp_tables_last_for_the_tab(tmp_path: Path) -> None:
     api, window, sid = sqlite_tab(tmp_path)
     api.sql_run(sid, "CREATE TEMP TABLE t (x); INSERT INTO t VALUES (1), (2), (3);")
@@ -540,7 +614,7 @@ def test_no_sql_endpoint_raises_while_on(tmp_path: Path) -> None:
     api, _ = turned_on(tmp_path)
     api.window = None  # no native dialogs in a sweep
     names = [name for name in dir(Api) if name.startswith("sql_")]
-    assert len(names) == 22
+    assert len(names) == 23
     for name in names:
         method = getattr(api, name)
         arity = len(inspect.signature(method).parameters)
