@@ -9,6 +9,7 @@ import './styles/tokens.css';
 import './styles/base.css';
 import './styles/components.css';
 import './styles/preview.css';
+import './styles/claude.css';
 
 // Bridge & Services
 import { bridge, events } from './bridge.js';
@@ -49,6 +50,8 @@ import { createSettingsOverlay } from './ui/settings.js';
 import { createGraphOverlay } from './ui/graphView.js';
 import { createTerminal } from './ui/terminal.js';
 import { createCommandList } from './ui/commandList.js';
+import { createClaudeView } from './ui/claudeView.js';
+import { createClaudeList } from './ui/claudeList.js';
 import { createSqlView } from './ui/sqlView.js';
 import { createVtList } from './ui/vtList.js';
 import { createSqlList } from './ui/sqlList.js';
@@ -88,6 +91,7 @@ const state = {
   viewMode: 'split', // 'edit' | 'split' | 'preview'
   panelsCollapsed: false, // Spaces and the note list hidden, the note gets the width
   terminalMode: false,  // the CMD space is showing instead of a note space
+  claudeMode: false,    // the Claude space (a chat with Claude Code) is showing
   sqlMode: false,       // the SQL space is showing instead of a note space
   vtMode: false,        // the SQL - VT space (virtual tables) is showing
   theme: 'nebula',
@@ -133,6 +137,8 @@ let graphOverlay = null;
 let moveDialog = null;
 let tagBox = null;
 let terminalView = null;
+let claudeView = null;
+let claudeList = null;
 let commandList = null;
 let sqlView = null;
 let vtView = null;
@@ -552,6 +558,61 @@ async function flushSave() {
 }
 
 /* =================================================================
+   The Claude space: a chat with Claude Code instead of notes.  Like CMD
+   it is not one of state.spaces, so nothing built for notes sees it.
+   ================================================================= */
+
+function claudeEntrySub(c = claudeView?.getState()) {
+  if (!c?.enabled) return c && c.available === false ? 'Not installed' : 'Off';
+  if (c.running) return 'Answering…';
+  const n = c.chats.length;
+  return n ? `${n} chat${n === 1 ? '' : 's'}` : 'Ask anything';
+}
+
+async function enterClaudeMode() {
+  if (!(await flushSave())) return;
+  leaveTerminalMode();
+  leaveSqlMode();
+  leaveVtMode();
+  if (!state.claudeMode) {
+    state.claudeMode = true;
+    document.getElementById('app')?.classList.add('claude-mode');
+    setAccentColor('--claude');
+    setToolEntry('claude', { active: true });
+    const ws = document.getElementById('workspace');
+    if (ws) replay(ws, 'swap');
+  }
+  await claudeView.show();
+}
+
+function leaveClaudeMode() {
+  if (!state.claudeMode) return;
+  state.claudeMode = false;
+  claudeView.hide();
+  document.getElementById('app')?.classList.remove('claude-mode');
+  setToolEntry('claude', { active: false });
+  setAccentColor(getActiveSpace()?.colorVar || '--accent');
+}
+
+async function enableClaude() {
+  const ok = await claudeView.enable();
+  if (ok) toast('The Claude space is on.', { icon: 'sparkle' });
+  return ok;
+}
+
+async function disableClaude() {
+  const ok = await confirmAction({
+    title: 'Turn off the Claude space?',
+    message: 'Every reply being written is stopped. Your chat titles are kept, and Claude Code keeps its own history.',
+    confirmLabel: 'Turn off',
+    iconName: 'sparkle'
+  });
+  if (!ok) return;
+  await claudeView.disable();
+  toast('The Claude space is off.', { icon: 'sparkle' });
+}
+
+/* =================================================================
    The CMD space: a shell instead of notes.  It is not one of state.spaces,
    so everything built around note spaces (links, graph, backup, notes.py)
    never sees it.
@@ -565,6 +626,7 @@ function cmdEntrySub(t = terminalView?.getState()) {
 
 async function enterTerminalMode() {
   if (!(await flushSave())) return;
+  leaveClaudeMode();
   leaveSqlMode();
   leaveVtMode();
   if (!state.terminalMode) {
@@ -630,6 +692,7 @@ function sqlEntrySub(q = sqlView?.getState()) {
 async function enterSqlMode() {
   if (!(await flushSave())) return;
   leaveTerminalMode();
+  leaveClaudeMode();
   leaveVtMode();
   if (!state.sqlMode) {
     state.sqlMode = true;
@@ -699,6 +762,7 @@ function vtEntrySub(v = vtView?.getState()) {
 async function enterVtMode() {
   if (!(await flushSave())) return;
   leaveTerminalMode();
+  leaveClaudeMode();
   leaveSqlMode();
   if (!state.vtMode) {
     state.vtMode = true;
@@ -834,6 +898,7 @@ async function openSqlConnection(connectionId) {
 async function selectSpace(spaceId, targetNoteId = null, animate = true) {
   if (!(await flushSave())) return;
   leaveTerminalMode();
+  leaveClaudeMode();
   leaveSqlMode();
   leaveVtMode();
   const prevSpaceId = state.currentSpaceId;
@@ -880,6 +945,7 @@ async function selectSpace(spaceId, targetNoteId = null, animate = true) {
 async function openNote(noteId) {
   if (!(await flushSave())) return;
   leaveTerminalMode();
+  leaveClaudeMode();
   leaveSqlMode();
   leaveVtMode();
   state.trashMode = false;
@@ -1903,15 +1969,33 @@ async function saveBackupSettings(changes) {
 
 async function getPaletteCommands() {
   const space = getActiveSpace();
-  const hasOpenNote = !!state.currentNote && !space?.locked && !state.trashMode && !state.terminalMode && !state.sqlMode && !state.vtMode;
+  const hasOpenNote = !!state.currentNote && !space?.locked && !state.trashMode && !state.terminalMode && !state.claudeMode && !state.sqlMode && !state.vtMode;
+  const cl = claudeView?.getState() || { enabled: false, available: true, chats: [], running: 0 };
   const vq = vtView?.getState() || { enabled: false, tables: [], active: null };
   const term = terminalView?.getState() || { enabled: false, shells: [], favorites: [] };
   const sq = sqlView?.getState() || { enabled: false, connections: [], tabs: 0, active: null };
   const commands = [
     { label: 'New note', hint: 'Ctrl N', icon: 'plus', run: () => createNote() },
-    (state.terminalMode || state.sqlMode || state.vtMode)
+    (state.terminalMode || state.claudeMode || state.sqlMode || state.vtMode)
       ? { label: `Back to ${space?.name || 'notes'}`, icon: spaceIcon(space), colorVar: space?.colorVar, run: () => selectSpace(state.currentSpaceId) }
       : { label: 'Open CMD', sub: term.enabled ? term.shellName : 'off until you turn it on', icon: 'terminal', colorVar: '--cmd', run: () => enterTerminalMode() },
+    ...(!state.claudeMode ? [
+      { label: 'Open Claude', sub: cl.enabled ? claudeEntrySub(cl) : 'off until you turn it on', icon: 'sparkle', colorVar: '--claude', run: () => enterClaudeMode() }
+    ] : []),
+    ...(cl.enabled ? [
+      { label: 'Claude: New chat', hint: state.claudeMode ? 'Ctrl Shift T' : undefined, icon: 'plus', colorVar: '--claude', run: async () => { await enterClaudeMode(); claudeView.newChat(); } },
+      ...(cl.running ? [{ label: 'Claude: Stop the reply', icon: 'stop', colorVar: '--claude', run: () => claudeView.stop() }] : []),
+      ...cl.chats.slice(0, 8).map(c => ({
+        label: `Claude: ${c.title || 'Chat'}`,
+        sub: 'open this chat',
+        icon: 'sparkle',
+        colorVar: '--claude',
+        run: async () => { await enterClaudeMode(); await claudeView.openChat(c.id); }
+      })),
+      { label: 'Turn off the Claude space', icon: 'sparkle', colorVar: '--claude', run: () => disableClaude() }
+    ] : [
+      { label: 'Turn on the Claude space…', sub: cl.available ? 'Windows asks you to confirm' : 'Claude Code was not found on this PC', icon: 'sparkle', colorVar: '--claude', run: async () => { await enterClaudeMode(); await enableClaude(); } }
+    ]),
     ...(term.enabled ? [
       ...term.shells.map(sh => ({
         label: `CMD: New ${sh.name} tab`,
@@ -2206,13 +2290,23 @@ function setupShortcuts() {
       return;
     }
     // Keys about the open note do nothing while the CMD or SQL space shows.
-    if ((state.terminalMode || state.sqlMode || state.vtMode) && mod && ['n', 'd', 's', 'e'].includes(key)) {
+    if ((state.terminalMode || state.claudeMode || state.sqlMode || state.vtMode) && mod && ['n', 'd', 's', 'e'].includes(key)) {
       e.preventDefault();
       return;
     }
     if (state.terminalMode && mod && key === 'f') {
       e.preventDefault();
       commandList?.focusFilter();
+      return;
+    }
+    if (state.claudeMode && mod && key === 'f') {
+      e.preventDefault();
+      claudeList?.focusFilter();
+      return;
+    }
+    if (state.claudeMode && mod && e.shiftKey && key === 't') {
+      e.preventDefault();
+      claudeView.newChat();
       return;
     }
     if (state.sqlMode || state.vtMode) {
@@ -2423,9 +2517,10 @@ async function init() {
   const sidebarContainer = document.getElementById('sidebar');
   const sidebarEl = createSidebar({
     onSelectSpace: (id) => (id === 'cmd' ? enterTerminalMode()
-      : id === 'sql' ? enterSqlMode()
-        : id === 'vt' ? enterVtMode()
-          : selectSpace(id)),
+      : id === 'claude' ? enterClaudeMode()
+        : id === 'sql' ? enterSqlMode()
+          : id === 'vt' ? enterVtMode()
+            : selectSpace(id)),
     onNewVault: async () => {
       // The setup dialog creates any missing built-in vaults. When both
       // vaults already exist there is nothing to set up in v1.
@@ -2495,6 +2590,25 @@ async function init() {
   });
   document.getElementById('workspace')?.appendChild(terminalView.element);
   await terminalView.refresh();
+
+  // The Claude space: its chats share the note list's column, and the chat
+  // sits in the workspace; CSS shows them only in Claude mode.
+  claudeList = createClaudeList({
+    onOpen: (id) => claudeView.openChat(id),
+    onNew: () => claudeView.newChat(),
+    onForget: (id) => claudeView.forget(id)
+  });
+  commandList.element.after(claudeList.element);
+
+  claudeView = createClaudeView({
+    onStateChanged: (c) => {
+      claudeList.render(c);
+      setToolEntry('claude', { sub: claudeEntrySub(c) });
+    },
+    notify: (message) => toast(message, { icon: 'sparkle' })
+  });
+  document.getElementById('workspace')?.appendChild(claudeView.element);
+  await claudeView.refresh();
 
   // The SQL space: its connections share the note list's column too, and
   // the query tabs sit in the workspace; CSS shows them only in SQL mode.
@@ -2702,6 +2816,9 @@ async function init() {
       toast('Settings saved', { icon: 'check' });
     },
     onChooseFolder: () => chooseNotesFolder(),
+    getClaude: () => claudeView.getState(),
+    onEnableClaude: () => enableClaude(),
+    onDisableClaude: () => disableClaude(),
     getTerminal: () => terminalView.getState(),
     onEnableTerminal: () => enableTerminal(),
     onDisableTerminal: () => disableTerminal(),

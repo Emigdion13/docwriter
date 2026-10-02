@@ -415,6 +415,44 @@ function mockSqlPage(result, offset, limit) {
   return rows;
 }
 
+/* A pretend Claude for the browser preview only: it answers every message with
+   a short streamed reply, a tool row, and (when the message says "write") a
+   refused write so the Allow card can be reviewed.  The desktop app runs the
+   real Claude Code instead. */
+const mockClaude = {
+  enabled: false,
+  chats: [], // { id, title, updated, running }
+  denied: new Map() // chat id -> true while a denial is waiting
+};
+let mockClaudeSeq = 0;
+
+function mockClaudePublic() {
+  return mockClaude.chats.map(c => ({ ...c }));
+}
+
+function mockClaudeReply(chatId, text, retry = false) {
+  const chat = mockClaude.chats.find(c => c.id === chatId);
+  const say = (kind, extra, ms) => setTimeout(() => events.emit('claude_event', { chat: chatId, kind, ...extra }), ms);
+  const words = (retry
+    ? 'Done. The note is written to **AI-Notes**.'
+    : `You said: *${text.slice(0, 80)}*\n\nHere is what I found in your vault:\n\n- A note about **DATAINGEST-1234**\n- Two notes tagged \`review\`\n\n\`\`\`py\nprint("hello")\n\`\`\`\n`
+  ).match(/\S+\s*/g);
+  let t = 120;
+  say('tool', { id: `t${mockClaudeSeq}`, name: 'Read', summary: 'plain/Shopping list.md' }, t);
+  say('tool_result', { id: `t${mockClaudeSeq}`, ok: true, preview: '1\t# Shopping list\n2\t- [ ] Coffee beans' }, t += 400);
+  for (const word of words) say('text', { text: word }, t += 45);
+  const wantsWrite = !retry && /write/i.test(text);
+  if (wantsWrite) mockClaude.denied.set(chatId, true);
+  // Like Python, the chat stops "running" just before the page hears "done".
+  setTimeout(() => { if (chat) chat.running = false; }, t + 40);
+  say('done', {
+    ok: true, error: null, gone: false, cost: 0.01, ms: t,
+    denials: wantsWrite
+      ? [{ id: `d${mockClaudeSeq}`, tool: 'PowerShell', summary: 'python notes.py write ai "Note" --text "…"', exact: true }]
+      : []
+  }, t + 60);
+}
+
 function mockTermOut(id, data) {
   if (mockTerminal.sessions.has(id)) setTimeout(() => events.emit('terminal_output', { id, data }), 5);
 }
@@ -1008,6 +1046,97 @@ export const bridge = {
     if (api?.terminal_clear_recent) return await api.terminal_clear_recent();
     mockTerminal.recent = [];
     return { ok: true, ...mockTermLists() };
+  },
+
+  /* ---- The Claude space.  Python runs Claude Code and names every argument
+     itself; the page sends only a chat id and the text typed.  A reply arrives
+     as claude_event events: text, tool, tool_result and, last, done. ---- */
+  async claude_state() {
+    const api = await waitForBridge();
+    if (api?.claude_state) return await api.claude_state();
+    return {
+      enabled: mockClaude.enabled,
+      available: true,
+      folder: 'C:\\Users\\you\\Desktop\\VaultNotes',
+      chats: mockClaude.enabled ? mockClaudePublic() : []
+    };
+  },
+
+  /** Python asks in a native Windows dialog before Claude is allowed. */
+  async claude_enable() {
+    const api = await waitForBridge();
+    if (api?.claude_enable) return await api.claude_enable();
+    mockClaude.enabled = true;
+    return { ok: true, enabled: true };
+  },
+
+  async claude_disable() {
+    const api = await waitForBridge();
+    if (api?.claude_disable) return await api.claude_disable();
+    mockClaude.enabled = false;
+    return { ok: true, enabled: false };
+  },
+
+  /** chat_id null starts a new chat; the reply follows as events. */
+  async claude_send(chat_id, text) {
+    const api = await waitForBridge();
+    if (api?.claude_send) return await api.claude_send(chat_id, text);
+    if (!mockClaude.enabled) return { error: 'claude_off', message: 'The Claude space is off. Turn it on first.' };
+    let chat = mockClaude.chats.find(c => c.id === chat_id);
+    if (chat_id && !chat) return { error: 'not_found', message: 'That chat is not in the list any more.' };
+    if (chat?.running) return { error: 'busy', message: 'Claude is still replying in this chat.' };
+    if (!chat) {
+      chat = { id: `mock${++mockClaudeSeq}`.padEnd(32, '0'), title: String(text).split('\n')[0].slice(0, 60), updated: new Date().toISOString(), running: false };
+      mockClaude.chats.unshift(chat);
+    }
+    chat.running = true;
+    chat.updated = new Date().toISOString();
+    mockClaudeReply(chat.id, String(text));
+    return { ok: true, chat: { ...chat } };
+  },
+
+  async claude_stop(chat_id) {
+    const api = await waitForBridge();
+    if (api?.claude_stop) return await api.claude_stop(chat_id);
+    return { ok: true };
+  },
+
+  /** scope "exact": only that use; "tool": every use of the tool in this chat. */
+  async claude_allow(chat_id, ids, scope) {
+    const api = await waitForBridge();
+    if (api?.claude_allow) return await api.claude_allow(chat_id, ids, scope);
+    const chat = mockClaude.chats.find(c => c.id === chat_id);
+    if (!chat) return { error: 'not_found', message: 'That chat is not in the list any more.' };
+    chat.running = true;
+    mockClaudeReply(chat.id, '', true);
+    return { ok: true, chat: { ...chat } };
+  },
+
+  async claude_history(chat_id) {
+    const api = await waitForBridge();
+    if (api?.claude_history) return await api.claude_history(chat_id);
+    return { ok: true, events: [] };
+  },
+
+  async claude_forget(chat_id) {
+    const api = await waitForBridge();
+    if (api?.claude_forget) return await api.claude_forget(chat_id);
+    mockClaude.chats = mockClaude.chats.filter(c => c.id !== chat_id);
+    return { ok: true, chats: mockClaudePublic() };
+  },
+
+  /** A reply's Markdown as HTML (no note links, no embeds); the page sanitizes it. */
+  async render_chat(body) {
+    const api = await waitForBridge();
+    if (api?.render_chat) return await api.render_chat(body);
+    const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return String(body ?? '').split(/\n{2,}/).map(block => {
+      if (block.startsWith('```')) return `<pre class="code"><span class="lang">py</span><code>${esc(block.replace(/^```\w*\n?|```\s*$/g, ''))}</code></pre>`;
+      const lines = block.split('\n');
+      const inline = (s) => esc(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\*(.+?)\*/g, '<em>$1</em>').replace(/`(.+?)`/g, '<code>$1</code>');
+      if (lines.every(l => l.startsWith('- '))) return `<ul>${lines.map(l => `<li>${inline(l.slice(2))}</li>`).join('')}</ul>`;
+      return `<p>${inline(block)}</p>`;
+    }).join('');
   },
   /* ---- The SQL space.  Python opens the connections and runs the SQL; a
      run answers at once and its result arrives as a sql_done event.  The
