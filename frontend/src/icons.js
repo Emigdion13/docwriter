@@ -21,6 +21,7 @@ export const ICONS = {
   eye: '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
   left: '<path d="M19 12H5M11 18l-6-6 6-6"/>',
   right: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+  down: '<path d="M12 5v14M6 13l6 6 6-6"/>',
   move: '<path d="M4 8h13l-3.5-3.5M20 16H7l3.5 3.5"/>',
   trash: '<path d="M4 7h16M9 7V4.5h6V7M6.5 7l1 13h9l1-13"/>',
   shield: '<path d="M12 3 4.5 6v6c0 4.6 3.2 7.8 7.5 9 4.3-1.2 7.5-4.4 7.5-9V6z"/><path d="m9 12 2 2 4-4"/>',

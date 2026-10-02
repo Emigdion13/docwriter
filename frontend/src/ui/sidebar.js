@@ -52,10 +52,11 @@ export function createSidebar({ onSelectSpace, onNewVault, onSyncDrive, onOpenDr
   return aside;
 }
 
-/* The tool entries under the note spaces: CMD, SQL and SQL - VT.  They are not spaces
+/* The tool entries under the note spaces: Claude, CMD, SQL and SQL - VT.  They are not spaces
    of notes, so each keeps its own state; while one is open no note space is
    highlighted. */
 const tools = {
+  claude: { name: 'Claude', icon: 'sparkle', colorVar: '--claude', active: false, sub: 'Off' },
   cmd: { name: 'CMD', icon: 'terminal', colorVar: '--cmd', active: false, sub: 'Off' },
   sql: { name: 'SQL', icon: 'database', colorVar: '--sql', active: false, sub: 'Off' },
   vt: { name: 'SQL - VT', icon: 'table', colorVar: '--vt', active: false, sub: 'Off' }

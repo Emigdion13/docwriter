@@ -20,6 +20,9 @@ export function createSettingsOverlay({
   onBackupNow,
   onRestoreDrive,
   onPruneDrive,
+  getClaude,
+  onEnableClaude,
+  onDisableClaude,
   getTerminal,
   onEnableTerminal,
   onDisableTerminal,
@@ -141,6 +144,21 @@ export function createSettingsOverlay({
       </div>
 
       <div class="settings-group">
+        <label>Claude space</label>
+        <div class="drive-state" id="set-claude-state">
+          <span class="dot"></span>
+          <span class="grow" id="set-claude-text">Off</span>
+          <button class="btn" id="set-claude-toggle" type="button">${icon('sparkle', 15)}<span>Turn on…</span></button>
+        </div>
+        <p class="settings-hint">
+          A chat with Claude Code under Spaces, run from your notes folder. It can send the
+          notes it reads to Anthropic and asks before it writes or runs anything; the
+          Encrypted vault is always kept out. Windows asks before it is turned on. Chat
+          titles are kept in settings.json.
+        </p>
+      </div>
+
+      <div class="settings-group">
         <label>CMD space</label>
         <div class="drive-state" id="set-term-state">
           <span class="dot"></span>
@@ -229,6 +247,22 @@ export function createSettingsOverlay({
   overlay.querySelector('#set-drive-restore').onclick = () => runDriveAction(onRestoreDrive);
   overlay.querySelector('#set-drive-prune').onclick = () => runDriveAction(onPruneDrive);
 
+  const paintClaude = () => {
+    const c = getClaude?.() || { enabled: false, chats: [] };
+    overlay.querySelector('#set-claude-state').classList.toggle('on', !!c.enabled);
+    const n = c.chats?.length || 0;
+    overlay.querySelector('#set-claude-text').textContent = c.enabled
+      ? `On · ${n} chat${n === 1 ? '' : 's'}${c.running ? ' · answering' : ''}`
+      : (c.available === false ? 'Off · Claude Code was not found' : 'Off');
+    overlay.querySelector('#set-claude-toggle span').textContent = c.enabled ? 'Turn off' : 'Turn on…';
+  };
+
+  overlay.querySelector('#set-claude-toggle').onclick = async () => {
+    const c = getClaude?.() || { enabled: false };
+    await (c.enabled ? onDisableClaude?.() : onEnableClaude?.());
+    paintClaude();
+  };
+
   const paintTerminal = () => {
     const t = getTerminal?.() || { enabled: false };
     overlay.querySelector('#set-term-state').classList.toggle('on', !!t.enabled);
@@ -300,6 +334,7 @@ export function createSettingsOverlay({
       overlay.querySelector('#set-folder').value = current.notes_root || '';
       paintDrive(getBackup ? getBackup() : null);
 
+      paintClaude();
       paintTerminal();
       paintSql();
       overlay.classList.add('open');

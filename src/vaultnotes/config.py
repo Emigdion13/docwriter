@@ -86,6 +86,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "sql": {
         "enabled": False,
     },
+    # The Claude space.  Off until the user allows it in a native Windows dialog
+    # (api.claude_enable).  ``chats`` holds ids and titles only; the messages
+    # stay in Claude Code's own history.
+    "claude": {
+        "enabled": False,
+        "chats": [],
+    },
 }
 
 INITIAL_SHOPPING_LIST = """# Shopping list
@@ -265,12 +272,12 @@ class Config:
             self.data["autolock_minutes"] = defaults["autolock_minutes"]
             reset.append("autolock_minutes")
 
-        for block in ("look", "backup", "terminal", "sql"):
+        for block in ("look", "backup", "terminal", "sql", "claude"):
             if not isinstance(self.data.get(block), dict):
                 self.data[block] = defaults[block]
                 reset.append(block)
         look, backup, terminal = self.data["look"], self.data["backup"], self.data["terminal"]
-        sql = self.data["sql"]
+        sql, claude = self.data["sql"], self.data["claude"]
         checks = {
             ("look", "theme"): look.get("theme") in ("nebula", "synthwave", "arctic"),
             ("look", "effects"): look.get("effects") in ("full", "lite", "off"),
@@ -288,6 +295,8 @@ class Config:
             ("terminal", "recent"): isinstance(terminal.get("recent"), list),
             ("terminal", "favorites"): isinstance(terminal.get("favorites"), list),
             ("sql", "enabled"): isinstance(sql.get("enabled"), bool),
+            ("claude", "enabled"): isinstance(claude.get("enabled"), bool),
+            ("claude", "chats"): isinstance(claude.get("chats"), list),
         }
         for (block, key), ok in checks.items():
             if not ok:

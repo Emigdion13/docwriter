@@ -59,7 +59,8 @@ from vaultnotes.events import emit_event
 from vaultnotes.frontmatter import is_important, set_important, set_tags
 from vaultnotes.links import LinkIndex, count_links, rename_links
 from vaultnotes.models import Note
-from vaultnotes.render import render_preview, toggle_task
+from vaultnotes.claude_chat import ClaudeError, ClaudeManager
+from vaultnotes.render import render_markdown, render_preview, toggle_task
 from vaultnotes.tags import (
     MAX_TAGS_PER_NOTE,
     clean_tag,
@@ -184,7 +185,7 @@ def bridge_method(method: Callable[..., Any]) -> Callable[..., Any]:
     def guarded(self: "Api", *args: Any, **kwargs: Any) -> Any:
         try:
             return method(self, *args, **kwargs)
-        except (BridgeError, TerminalError, SqlError) as exc:
+        except (BridgeError, TerminalError, SqlError, ClaudeError) as exc:
             return _error(exc.code, exc.message)
         except VaultLockedError as exc:
             return _error("locked", str(exc) or "Vault is locked")
@@ -289,6 +290,14 @@ class Api:
         #: terminal's own threads, never through the call lock.
         self.terminal = TerminalManager(emit=lambda name, data: self._emit(name, data))
 
+        #: The Claude space's chats.  Replies arrive as events from the chat's
+        #: own threads; the list of chats is saved in settings.json.
+        self.claude = ClaudeManager(
+            emit=lambda name, data: self._emit(name, data),
+            on_change=self._claude_chats_changed,
+        )
+        self.claude.load(self._claude_settings().get("chats"))
+
         #: The SQL space.  ``sql.db`` (saved connections) sits in
         #: ``%LOCALAPPDATA%\\VaultNotes``, never in the notes folder; passwords
         #: sit in the Credential Manager.  Tests point both somewhere harmless.
@@ -308,6 +317,7 @@ class Api:
         # Outside the call lock: the backup's own callbacks need it.
         self.backup.finish_on_close()
         self.terminal.stop()
+        self.claude.stop_all()
         self.sql.close()
         with self._calls:
             self.autolock.stop()
@@ -1494,6 +1504,15 @@ class Api:
         )
 
     @bridge_method
+    def render_chat(self, body: str) -> str:
+        """Render a chat message's Markdown: no links to notes, no embeds.
+
+        A reply is not a note, so ``[[Title]]`` stays plain text and nothing
+        from a vault can be pulled in by what a reply says (security rule 11).
+        """
+        return render_markdown(self._body_text(body))
+
+    @bridge_method
     def toggle_task(self, space_id: str, body: str, index: int) -> dict[str, Any]:
         """Flip one checklist item of ``body`` (the note as the editor holds it).
 
@@ -2638,6 +2657,111 @@ class Api:
         """Empty Recent; favorites stay."""
         self._save_terminal(recent=[])
         return {"ok": True, **self._terminal_lists()}
+
+    # ------------------------------------------------------------------
+    # The Claude space: chats with Claude Code, run from the notes folder
+    # ------------------------------------------------------------------
+    def _claude_settings(self) -> dict[str, Any]:
+        block = self.config.data.get("claude")
+        if not isinstance(block, dict):
+            block = {"enabled": False, "chats": []}
+            self.config.data["claude"] = block
+        return block
+
+    def _save_claude(self, **changes: Any) -> None:
+        self._claude_settings().update(changes)
+        self.config.save()
+
+    def _claude_chats_changed(self) -> None:
+        """Save the chat list; also called from a reply's own thread, so under the call lock."""
+        with self._calls:
+            self._save_claude(chats=self.claude.dump())
+
+    def _require_claude(self) -> None:
+        if self._claude_settings().get("enabled") is not True:
+            raise BridgeError("claude_off", "The Claude space is off. Turn it on first.")
+
+    def _claude_paths(self) -> dict[str, Path]:
+        """Where Claude runs, and the vault folder it is kept out of."""
+        root = self.config.notes_root
+        try:
+            encrypted = self.config.vault_dir("encrypted")
+        except (KeyError, ValueError):
+            encrypted = root / "vaults" / "encrypted"
+        return {"cwd": root, "encrypted_dir": encrypted, "notes_root": root}
+
+    @bridge_method
+    def claude_state(self) -> dict[str, Any]:
+        """Whether the Claude space is on, whether Claude Code is installed, and the chats."""
+        enabled = self._claude_settings().get("enabled") is True
+        return {
+            "enabled": enabled,
+            "available": self.claude.available(),
+            "folder": str(self.config.notes_root),
+            "chats": self.claude.chats() if enabled else [],
+        }
+
+    @bridge_method
+    def claude_enable(self) -> dict[str, Any]:
+        """Turn the Claude space on, but only after the user says yes in a native dialog."""
+        if self._claude_settings().get("enabled") is True:
+            return {"ok": True, "enabled": True}
+        if self.window is None:
+            raise BridgeError("no_window", "The Claude space can only be turned on in the app window.")
+        if not self.claude.available():
+            raise BridgeError("no_claude", "Claude Code was not found on this PC. Install it, then try again.")
+        try:
+            with self._calls.released():
+                allowed = self.window.create_confirmation_dialog(
+                    "Turn on the Claude space?",
+                    "The Claude space runs Claude Code (the claude program on this PC) from your notes "
+                    "folder. It can read your Plain, Personal and AI-Notes files and send what it reads "
+                    "to Anthropic. It cannot change anything or run a command until you press Allow on "
+                    "it, and the Encrypted vault folder is always kept out of its reach.\n\nTurn it on?",
+                )
+        except Exception as exc:  # noqa: BLE001
+            raise BridgeError("dialog_failed", f"The question could not be shown ({type(exc).__name__}).") from exc
+        if allowed is not True:
+            return _error("cancelled", "The Claude space stays off.")
+        self._save_claude(enabled=True)
+        return {"ok": True, "enabled": True}
+
+    @bridge_method
+    def claude_disable(self) -> dict[str, Any]:
+        """Stop every reply and turn the Claude space off (no question needed)."""
+        self.claude.stop_all()
+        self._save_claude(enabled=False)
+        return {"ok": True, "enabled": False}
+
+    @bridge_method
+    def claude_send(self, chat_id: str | None, text: str) -> dict[str, Any]:
+        """Send a message; ``chat_id`` None starts a new chat. The reply comes as events."""
+        self._require_claude()
+        return {"ok": True, **self.claude.send(chat_id, text, **self._claude_paths())}
+
+    @bridge_method
+    def claude_stop(self, chat_id: str) -> dict[str, bool]:
+        """Stop the reply being written in a chat."""
+        self.claude.stop(chat_id)
+        return {"ok": True}
+
+    @bridge_method
+    def claude_allow(self, chat_id: str, ids: list[str], scope: str) -> dict[str, Any]:
+        """Allow what Claude was refused (``exact``: those uses; ``tool``: the tool) and retry."""
+        self._require_claude()
+        return {"ok": True, **self.claude.allow(chat_id, ids, scope, **self._claude_paths())}
+
+    @bridge_method
+    def claude_history(self, chat_id: str) -> dict[str, Any]:
+        """What was said in a chat, read from Claude Code's own history file."""
+        self._require_claude()
+        return {"ok": True, "events": self.claude.history(chat_id, self.config.notes_root)}
+
+    @bridge_method
+    def claude_forget(self, chat_id: str) -> dict[str, Any]:
+        """Take a chat off the list (Claude Code's own history file is left alone)."""
+        self.claude.forget(chat_id)
+        return {"ok": True, "chats": self.claude.chats()}
 
     # ------------------------------------------------------------------
     # The SQL space: saved connections and query tabs
