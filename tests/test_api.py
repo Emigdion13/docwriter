@@ -609,6 +609,8 @@ BRIDGE_SURFACE = [
     "sql_schema",
     "sql_rows",
     "sql_copy",
+    "sql_share_result",
+    "sql_unshare_result",
     "sql_close",
     # Extra: the Claude space (tests/test_claude_chat.py covers what they do).
     "claude_state",

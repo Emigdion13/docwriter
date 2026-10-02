@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from vaultnotes import notes_cli
+from vaultnotes.ai_share import AiShare
 from vaultnotes.crypto.keyfile import generate_key_file
 from vaultnotes.storage.plain_store import PlainStore
 from vaultnotes.storage.vault_store import VaultStore
@@ -261,6 +262,65 @@ def test_a_wrong_root_never_grows_an_ai_notes_folder(tmp_path: Path) -> None:
     code, _, err = cli("--root", str(somewhere), "write", "ai", "Findings", "--text", "x")
     assert code == notes_cli.EXIT_ERROR and "Is --root the notes folder" in err
     assert list(somewhere.iterdir()) == []
+
+
+def _shared(folder: Path, expires_in: float = 1800, **changes: object) -> None:
+    """What the app's "Share with AI" box leaves behind."""
+    snapshot: dict[str, object] = {
+        "connection": "Dev ingest",
+        "engine": "SQL Server",
+        "query": "SELECT id, note FROM batches",
+        "query_truncated": False,
+        "result_number": 1,
+        "columns": [{"name": "id", "kind": "number"}, {"name": "note", "kind": "text"}],
+        "total_rows": 3,
+        "shared_rows": 3,
+        "truncated": False,
+        "rows": [[1, "plain"], [2, None], [3, "two\tparts\nlines"]],
+    }
+    AiShare(folder).write({**snapshot, **changes}, expires_in)
+
+
+def test_results_prints_the_shared_result(tmp_path: Path) -> None:
+    folder = tmp_path / "share"
+    _shared(folder)
+    code, out, _ = cli("--share-dir", str(folder), "results")
+    assert code == 0
+    lines = out.splitlines()
+    assert lines[0].startswith("<!-- shared SQL result · Dev ingest (SQL Server)")
+    assert "SELECT id, note FROM batches" in lines
+    assert lines[lines.index("3 rows") + 1:] == ["id\tnote", "1\tplain", "2\tNULL", "3\ttwo parts lines"]
+
+
+def test_results_says_when_a_result_was_cut_short(tmp_path: Path) -> None:
+    folder = tmp_path / "share"
+    _shared(folder, total_rows=1500, shared_rows=2, truncated=True, rows=[[1, "a"], [2, "b"]])
+    code, out, _ = cli("--share-dir", str(folder), "results")
+    assert code == 0 and "2 of 1500 rows (only the first 2 are shared)" in out
+
+
+def test_results_needs_something_shared(tmp_path: Path) -> None:
+    code, out, err = cli("--share-dir", str(tmp_path / "nothing-here"), "results")
+    assert code == notes_cli.EXIT_ERROR and out == "" and "Nothing is shared" in err
+
+    folder = tmp_path / "damaged"
+    folder.mkdir()
+    (folder / "result.json").write_text("not json at all", encoding="utf-8")
+    code, out, err = cli("--share-dir", str(folder), "results")
+    assert code == notes_cli.EXIT_ERROR and out == "" and "Nothing is shared" in err
+
+
+def test_results_ignores_an_expired_share_and_removes_nothing(tmp_path: Path) -> None:
+    folder = tmp_path / "share"
+    _shared(folder, expires_in=-1)
+    code, out, err = cli("--share-dir", str(folder), "results")
+    assert code == notes_cli.EXIT_ERROR and out == "" and "Nothing is shared" in err
+    assert (folder / "result.json").exists()
+
+
+def test_results_never_reads_the_encrypted_vault(notes_root: Path) -> None:
+    code, out, err = cli("--share-dir", str(notes_root / "vaults" / "encrypted"), "results")
+    assert code == notes_cli.EXIT_REFUSED and out == "" and "off-limits" in err
 
 
 def test_delete_before_any_write_changes_nothing(notes_root: Path, tmp_path: Path) -> None:

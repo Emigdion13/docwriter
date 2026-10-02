@@ -1336,6 +1336,26 @@ export const bridge = {
     return { ok: true, text: lines.join('\r\n') };
   },
 
+  /** Shares one result with AI helpers, once the user confirmed a PHI review. */
+  async sql_share_result(session_id, result_index, confirmed = false) {
+    const api = await waitForBridge();
+    if (api?.sql_share_result) return await api.sql_share_result(session_id, result_index, confirmed);
+    const result = mockSql.sessions.get(session_id)?.results[result_index];
+    if (!result) return { error: 'not_found', message: 'That result is gone. Run the query again.' };
+    if (confirmed !== true) return { error: 'not_confirmed', message: 'Review the result for PHI and confirm before sharing it.' };
+    return {
+      ok: true, result: result_index, rows: Math.min(result.total, 1000), total: result.total,
+      truncated: result.total > 1000, expiresInSeconds: 1800
+    };
+  },
+
+  /** Takes a tab's shared result back. */
+  async sql_unshare_result(session_id) {
+    const api = await waitForBridge();
+    if (api?.sql_unshare_result) return await api.sql_unshare_result(session_id);
+    return { ok: true };
+  },
+
   /* ---- Virtual tables: results copied into vt.db, queried in SQL - VT ---- */
   async sql_vt_list() {
     const api = await waitForBridge();

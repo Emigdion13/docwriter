@@ -104,7 +104,10 @@ def system_prompt(notes_root: Path | str, encrypted_dir: Path | str) -> str:
         f"The notes folder is {notes_root}. "
         "Write notes only to the AI-Notes space, through notes.py. "
         f"Never open, list or search the Encrypted vault ({encrypted_dir}) or its key: it holds PHI. "
-        "Never put PHI in a note. Keep replies readable in a narrow chat window."
+        "Never put PHI in a note. "
+        "The user may share a SQL result they reviewed for PHI: read it with notes.py results "
+        "(it fails when nothing is shared). Summarise findings in notes, but never paste its rows. "
+        "Keep replies readable in a narrow chat window."
     )
 
 

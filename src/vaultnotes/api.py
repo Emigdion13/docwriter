@@ -69,6 +69,7 @@ from vaultnotes.tags import (
     split_query,
     unique_tags,
 )
+from vaultnotes.ai_share import SHARE_FOLDER, AiShare
 from vaultnotes.sql import (
     SqlError,
     SqlManager,
@@ -306,7 +307,11 @@ class Api:
         #: The SQL - VT space's tables: results kept after their connection closed.
         self.vt_store = VtStore(self.sql_dir / "vt.db")
         self.sql_passwords = sql_passwords if sql_passwords is not None else SqlPasswords()
-        self.sql = SqlManager(emit=lambda name, data: self._emit(name, data))
+        #: The one SQL result shared with AI helpers (``notes.py results``), also kept
+        #: outside the notes folder.  Whatever a crash left behind is never shared again.
+        self.ai_share = AiShare(self.sql_dir / SHARE_FOLDER)
+        self.ai_share.clear()
+        self.sql = SqlManager(emit=lambda name, data: self._emit(name, data), share=self.ai_share)
 
     def set_window(self, window: Any) -> None:
         """Store the pywebview window used for native file dialogs/events."""
@@ -319,6 +324,7 @@ class Api:
         self.terminal.stop()
         self.claude.stop_all()
         self.sql.close()
+        self.ai_share.clear()
         with self._calls:
             self.autolock.stop()
             for store in self.vault_stores.values():
@@ -3067,6 +3073,26 @@ class Api:
         """A whole result as tab-separated text with a header row, for the clipboard."""
         self._require_sql()
         return {"ok": True, "text": self.sql.copy_text(session_id, result_index)}
+
+    @bridge_method
+    def sql_share_result(self, session_id: str, result_index: int, confirmed: bool = False) -> dict[str, Any]:
+        """Share one result of a tab with AI helpers (``notes.py results``).
+
+        Only after the page says the user confirmed a PHI review (``confirmed``
+        is exactly ``True``).  The first rows go to one file outside the notes
+        folder; a new run in the tab, closing it or 30 minutes takes it back,
+        and each of those arrives as a ``sql_share_changed`` event.
+        """
+        self._require_sql()
+        if confirmed is not True:
+            raise BridgeError("not_confirmed", "Review the result for PHI and confirm before sharing it.")
+        return {"ok": True, **self.sql.share(session_id, result_index)}
+
+    @bridge_method
+    def sql_unshare_result(self, session_id: str) -> dict[str, Any]:
+        """Take a tab's shared result back; always allowed, even with SQL off."""
+        self.sql.unshare(session_id)
+        return {"ok": True}
 
     @bridge_method
     def sql_vt_list(self) -> dict[str, Any]:

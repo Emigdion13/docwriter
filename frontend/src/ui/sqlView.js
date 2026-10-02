@@ -29,6 +29,8 @@ import { catalogDialect, dialect } from './sqlComplete.js';
 
 // The most tabs open at once (Python's MAX_SESSIONS).
 export const MAX_TABS = 8;
+// The most rows one shared result carries (Python's MAX_SHARE_ROWS).
+const SHARE_ROWS = 1000;
 
 const sqlHighlight = HighlightStyle.define([
   { tag: t.keyword, color: 'var(--sql)', fontWeight: '600' },
@@ -355,6 +357,14 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
     copy.hidden = !showing;
     keep.hidden = !showing;
 
+    const share = tab.pane.querySelector('.sql-share');
+    const shareBox = share.querySelector('input');
+    const shared = typeof tab.view === 'number' && tab.shared === tab.view;
+    share.hidden = !showing;
+    share.classList.toggle('on', shared);
+    shareBox.checked = shared;
+    shareBox.disabled = Boolean(tab.running);
+
     if (showing) {
       meta.textContent = `${plural(showing.total, 'row')} · ${showing.columns.length} col${showing.columns.length === 1 ? '' : 's'}`;
     } else {
@@ -420,7 +430,7 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
       key: ++tabSeq, connectionId, conn: connection(connectionId) || null, sessionId: null,
       connecting: null, running: null, doneRun: null, status: '', unread: false,
       results: [], messages: [], error: null, cancelled: false, elapsedMs: null, view: null,
-      saved, dirty: false
+      saved, dirty: false, shared: null
     };
     tab.pane = document.createElement('div');
     tab.pane.className = 'sql-pane';
@@ -431,6 +441,10 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
         <div class="sql-rbar">
           <div class="sql-rtabs" role="tablist" aria-label="Results"></div>
           <span class="sql-rmeta"></span>
+          <label class="sql-share" title="Let AI helpers such as Claude read this result (the first 1,000 rows). Review it for PHI first. Running another query, closing the tab or 30 minutes takes it back.">
+            <input type="checkbox" class="sql-share-box">
+            <span>Share with AI</span>
+          </label>
           <button class="btn icon small sql-keep" type="button" aria-label="Keep as a virtual table" title="Keep this result as a virtual table in SQL - VT">
             ${icon('table', 14)}
           </button>
@@ -497,6 +511,7 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
 
     tab.pane.querySelector('.sql-copy').onclick = () => copyResult(tab);
     tab.pane.querySelector('.sql-keep').onclick = () => keepAsVt(tab);
+    tab.pane.querySelector('.sql-share-box').onchange = (e) => shareResult(tab, e.target.checked);
 
     tab.pane.querySelector('.sql-split').addEventListener('mousedown', (e) => {
       e.preventDefault();
@@ -766,6 +781,7 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
     }
     setStatus(tab, 'Running…');
     tab.ranText = text;
+    tab.shared = null; // Python takes a shared result back as soon as a run starts
     // Only the saved SQL itself counts as a run of the saved query.
     const savedId = tab.saved && !tab.dirty && !hasSelection(tab) ? tab.saved.id : null;
     let res = await bridge.sql_run(tab.sessionId, text, savedId);
@@ -809,6 +825,50 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
       notify?.('Copying was blocked.');
     }
   }
+
+  /* The "Share with AI" box.  The user confirms a PHI review, then Python writes the
+     result where notes.py results reads it.  Python takes it back by itself (a new run,
+     closing the tab, 30 minutes) and says so with sql_share_changed. */
+  async function shareResult(tab, on) {
+    if (typeof tab.view !== 'number' || !tab.sessionId) return;
+    const index = tab.view;
+    if (!on) {
+      tab.shared = null;
+      paintResults(tab);
+      await bridge.sql_unshare_result(tab.sessionId);
+      return;
+    }
+    const result = tab.results[index];
+    const shown = Math.min(result.total, SHARE_ROWS);
+    const ok = await confirmAction({
+      title: 'Share this result with AI?',
+      message: `Claude will be able to read ${plural(shown, 'row')}${result.total > shown ? ` (the first ${shown.toLocaleString()} of ${result.total.toLocaleString()})` : ''}, the column names and the SQL you ran. Share it only if you checked that it holds no PHI: no patient names, MRNs or patient IDs. It is taken back when you run another query, close this tab, or after 30 minutes.`,
+      confirmLabel: 'No PHI: share it',
+      iconName: 'shield'
+    });
+    if (!ok || !tabs.includes(tab) || tab.view !== index || tab.running || !tab.sessionId) {
+      paintResults(tab);
+      return;
+    }
+    const res = await bridge.sql_share_result(tab.sessionId, index, true);
+    if (!tabs.includes(tab)) return;
+    if (res?.error) {
+      notify?.(res.message || 'The result could not be shared.');
+    } else {
+      tab.shared = res.result;
+      notify?.(`Shared ${plural(res.rows, 'row')} with AI.${res.truncated ? ` Only the first ${res.rows.toLocaleString()} are shared.` : ''}`);
+    }
+    paintResults(tab);
+  }
+
+  events.on('sql_share_changed', (data) => {
+    const tab = tabBySession(data?.session);
+    if (!tab || data.shared) return;
+    tab.shared = null;
+    paintResults(tab);
+    if (data.reason === 'expired') notify?.('Sharing with AI ended after 30 minutes.');
+    else if (data.reason === 'replaced') notify?.('Another result is shared with AI now, so this one is not.');
+  });
 
   events.on('sql_push_progress', (data) => {
     const tab = tabBySession(data?.session);
@@ -881,6 +941,7 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
     if (!tab) return;
     tab.doneRun = data.run;
     tab.running = null;
+    tab.shared = null; // a finished run replaced whatever was shared
     tab.results = data.results || [];
     tab.messages = data.messages || [];
     tab.error = data.error || null;
@@ -943,8 +1004,9 @@ export function createSqlView({ kind = 'sql', onStateChanged, notify, onNewConne
     const tab = active;
     const wanted = connSelect.value;
     if (!tab || wanted === tab.connectionId || !connection(wanted)) return;
-    if (tab.sessionId) bridge.sql_close(tab.sessionId);
+    if (tab.sessionId) bridge.sql_close(tab.sessionId); // Python takes a shared result back too
     tab.sessionId = null;
+    tab.shared = null;
     tab.connectionId = wanted;
     tab.conn = connection(wanted);
     // The old database's names go; connect() loads the new database's.
