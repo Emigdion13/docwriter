@@ -606,6 +606,7 @@ BRIDGE_SURFACE = [
     "sql_open",
     "sql_run",
     "sql_cancel",
+    "sql_schema",
     "sql_rows",
     "sql_copy",
     "sql_close",

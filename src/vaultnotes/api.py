@@ -2927,6 +2927,12 @@ class Api:
         return {"ok": True, "cancelled": self.sql.cancel(session_id)}
 
     @bridge_method
+    def sql_schema(self, session_id: str) -> dict[str, Any]:
+        """The table and column names of a tab's database, for autocomplete."""
+        self._require_sql()
+        return {"ok": True, **self.sql.schema(session_id)}
+
+    @bridge_method
     def sql_rows(self, session_id: str, result_index: int, offset: int = 0, limit: int = 200) -> dict[str, Any]:
         """A page of rows of one result of a tab's last run."""
         self._require_sql()
