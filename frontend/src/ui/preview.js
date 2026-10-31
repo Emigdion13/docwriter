@@ -16,8 +16,32 @@ let linkHandlers = {
   onCreateNotePrompt: null,
   onMissingNoteInOtherSpace: null,
   onExternalLink: null,
-  onToggleTask: null
+  onToggleTask: null,
+  onNotice: null
 };
+
+/* A Copy button on every code block. */
+function addCopyButtons() {
+  for (const pre of previewContainer.querySelectorAll('pre')) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'vn-copy';
+    button.textContent = 'Copy';
+    button.setAttribute('aria-label', 'Copy this code');
+    pre.appendChild(button);
+  }
+}
+
+async function copyCode(button) {
+  const pre = button.closest('pre');
+  try {
+    await navigator.clipboard.writeText((pre.querySelector('code') || pre).textContent);
+    button.textContent = 'Copied';
+    window.setTimeout(() => { button.textContent = 'Copy'; }, 1200);
+  } catch {
+    linkHandlers.onNotice?.('Copying was blocked. Select the text and press Ctrl+C.');
+  }
+}
 
 /**
  * The checkboxes a click can flip: the note's own, in the order the preview
@@ -68,6 +92,12 @@ export function initPreview(container, handlers = {}) {
   linkHandlers = { ...linkHandlers, ...handlers };
 
   previewContainer.addEventListener('click', (e) => {
+    const copy = e.target.closest?.('.vn-copy');
+    if (copy) {
+      copyCode(copy);
+      return;
+    }
+
     // A checklist box: tell the app which one, and it rewrites the note's text.
     // The browser flips the box at once; the re-render that follows confirms it
     // (or puts it back when the note could not be changed).
@@ -138,6 +168,7 @@ export async function renderPreview(spaceId, body) {
   });
 
   previewContainer.innerHTML = cleanHtml;
+  addCopyButtons();
 
   // The renderer draws every box locked; the note's own can be clicked.
   if (linkHandlers.onToggleTask) {

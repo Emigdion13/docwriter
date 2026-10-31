@@ -11,6 +11,11 @@
   line-height: 1.7;
   -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 30px);
           mask-image: linear-gradient(to bottom, transparent 0, #000 30px);
+  /* pywebview locks selection on <body> (text_select=False); a note's text can
+     be selected and copied. */
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: auto;
 }
 
 .preview > :first-child {
@@ -217,6 +222,39 @@
   letter-spacing: .16em;
   text-transform: uppercase;
   color: var(--faint);
+  user-select: none;
+  transition: opacity .15s;
+}
+
+/* Copy button on a code block: takes the language badge's corner on hover. */
+.preview pre .vn-copy {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  padding: 3px 8px;
+  border: 1px solid var(--glass-border);
+  border-radius: 7px;
+  background: var(--glass-strong);
+  color: var(--muted);
+  font: 500 10.5px/1.2 var(--font-mono);
+  cursor: pointer;
+  user-select: none;
+  opacity: 0;
+  transition: opacity .15s, color .15s;
+}
+
+.preview pre:hover > .vn-copy,
+.preview pre .vn-copy:focus-visible {
+  opacity: 1;
+}
+
+.preview pre:has(> .vn-copy):hover > .lang,
+.preview pre:has(> .vn-copy:focus-visible) > .lang {
+  opacity: 0;
+}
+
+.preview pre .vn-copy:hover {
+  color: var(--text);
 }
 
 /* Syntax Highlighting Tokens (Pygments prefix .tok-) */
