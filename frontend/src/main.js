@@ -2706,6 +2706,7 @@ async function init() {
   const previewContainer = document.getElementById('preview');
   initPreview(previewContainer, {
     onToggleTask: (index) => toggleTaskInNote(index),
+    onNotice: (msg) => toast(msg, { icon: 'alert' }),
     onOpenNoteByTitle: (targetTitle, options = {}) => openLinkTarget(targetTitle, options),
     onCreateNotePrompt: (title) => createNoteFromLink(title),
     // A link to a note that is missing in ANOTHER space: report it, never create
