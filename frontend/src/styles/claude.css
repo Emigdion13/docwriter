@@ -520,6 +520,30 @@ pre:hover > .cl-copy,
   display: none;
 }
 
+/* Header badge: may PHI go in AI-Notes (Vertex + encrypted AI-Notes)? */
+.cl-vertex {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font: 500 11px/1.2 var(--font-mono);
+  color: var(--muted);
+  background: var(--glass);
+  border: 1px solid var(--line, transparent);
+  white-space: nowrap;
+}
+
+.cl-vertex[hidden] {
+  display: none;
+}
+
+.cl-vertex.on {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  border-color: color-mix(in srgb, var(--success) 40%, transparent);
+}
+
 /* ---- Off ---- */
 .ws-claude .cl-off {
   display: none;

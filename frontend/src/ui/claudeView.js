@@ -45,6 +45,7 @@ export function createClaudeView({ onStateChanged, notify }) {
     <div class="term-head">
       <div class="crumb"><span class="crumb-dot"></span><span>Claude</span><span class="sep">/</span><span id="cl-where">New chat</span></div>
       <div class="term-actions">
+        <span class="cl-vertex" id="cl-vertex" hidden></span>
         <span class="meta" id="cl-status"></span>
         <button class="btn icon" id="cl-new-chat" type="button" aria-label="New chat" title="New chat (Ctrl+Shift+T)">
           ${icon('plus', 16)}
@@ -99,8 +100,9 @@ export function createClaudeView({ onStateChanged, notify }) {
   const whereEl = root.querySelector('#cl-where');
   const statusEl = root.querySelector('#cl-status');
   const footEl = root.querySelector('#cl-foot');
+  const vertexEl = root.querySelector('#cl-vertex');
 
-  let info = { enabled: false, available: true, folder: '', chats: [] };
+  let info = { enabled: false, available: true, folder: '', chats: [], vertex: null };
   let visible = false;
 
   /* A thread is one chat: { key, id, title, el, inner, running, loaded, stick, scrollTop,
@@ -137,8 +139,21 @@ export function createClaudeView({ onStateChanged, notify }) {
     stopBtn.hidden = !t?.running;
     input.disabled = !info.enabled;
     footEl.textContent = info.enabled && info.folder ? `Runs in ${info.folder} · the Encrypted vault is kept out` : '';
+    paintVertex();
     updateJump();
     onStateChanged?.(publicState());
+  }
+
+  /* Whether PHI may go in AI-Notes: Python checks Vertex and AI-Notes
+     encryption; this only shows the answer.  Anything unknown counts as no. */
+  function paintVertex() {
+    const v = info.vertex;
+    const ready = v?.ready === true;
+    vertexEl.hidden = !info.enabled;
+    vertexEl.classList.toggle('on', ready);
+    vertexEl.innerHTML = `${icon(ready ? 'shield' : 'alert', 12)}<span>${ready ? 'Vertex ready' : 'No PHI'}</span>`;
+    vertexEl.title = typeof v?.reason === 'string' ? v.reason : 'Vertex status unknown: no PHI';
+    vertexEl.setAttribute('aria-label', vertexEl.title);
   }
 
   function setStatus(thread, text) {
