@@ -262,11 +262,10 @@ export function createMoveDialog() {
         </div>`);
     }
     if (targetSpace.id === 'ai') {
-      const unencrypted = sourceSpace.kind === 'vault' ? ', and it will be stored <b>unencrypted</b>' : '';
       parts.push(`
         <div class="setup-warning">
           ${icon('bot', 15)}
-          <span>AI helpers can read and change notes in <b>AI-Notes</b>${unencrypted}.</span>
+          <span>AI helpers can read and change notes in <b>AI-Notes</b>. It is encrypted with a key kept on this PC.</span>
         </div>`);
     } else if (sourceSpace.kind === 'vault' && targetSpace.kind === 'plain') {
       parts.push(`
@@ -320,7 +319,7 @@ export function createMoveDialog() {
         btn.querySelector('.nm').textContent = t.name;
         btn.querySelector('.sub').textContent = t.locked
           ? 'Locked — unlock it first'
-          : t.id === 'ai' ? 'Unencrypted, AI helpers can edit' : t.kind === 'plain' ? 'Unencrypted' : 'Encrypted';
+          : t.id === 'ai' ? 'Encrypted, AI helpers can edit' : t.kind === 'plain' ? 'Unencrypted' : 'Encrypted';
         btn.onclick = () => {
           if (t.locked) return;
           selectedTarget = t.id;

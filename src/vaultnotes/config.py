@@ -125,9 +125,13 @@ INITIAL_READING_LIST = """# Reading list
 - [[Book club]] picks for October
 """
 
-#: Folder of the AI-Notes space, beside ``plain``: ordinary ``.md`` files that AI
-#: helpers may create and change (``notes.py`` writes nowhere else).
+#: Folder of the AI-Notes space, beside ``plain``: an always-open encrypted
+#: vault that AI helpers may create and change notes in (``notes.py`` writes
+#: nowhere else).  See :mod:`vaultnotes.storage.ai_store`.
 AI_NOTES_FOLDER = "ai-notes"
+
+#: File name of the AI-Notes key, kept in the per-PC folder (never the notes folder).
+AI_KEY_FILE_NAME = "ai-notes.vnkey"
 
 AI_GUIDE_TITLE = "About AI-Notes"
 
@@ -136,29 +140,39 @@ INITIAL_AI_GUIDE = """# About AI-Notes
 This space belongs to AI helpers such as Claude. They write their findings,
 summaries, drafts and hand-over notes here, so Plain stays yours alone.
 
-- **AI helpers** create, read and change notes here, with `notes.py` or by
-  writing `.md` files in the `ai-notes` folder. Plain and Personal are
-  read-only to them, and Encrypted is off-limits.
+- **AI helpers** create, read and change notes here with `notes.py`. Plain and
+  Personal are read-only to them, and Encrypted is off-limits.
 - **You** can read, edit, move or delete anything here, like any other note.
 - **Link to your own notes** with `[[Plain:Title]]`.
-- **Never store** PHI, passwords or keys here: these notes are unencrypted and
-  go to the Google Drive backup like the rest of the notes folder.
+- **Encrypted:** these notes are stored encrypted, so the Google Drive backup
+  only holds ciphertext. The key is `ai-notes.vnkey` in this PC's VaultNotes
+  folder (`%LOCALAPPDATA%\\VaultNotes`), never in the notes folder.
+- **Keep a copy of that key** somewhere safe. Without it these notes cannot be
+  read, from this PC or from a backup.
+- **Never store** passwords or keys here.
 """
+
+
+def get_ai_key_path() -> Path:
+    """Where the AI-Notes key file lives: ``%LOCALAPPDATA%\\VaultNotes\\ai-notes.vnkey``.
+
+    ``VAULTNOTES_AI_KEY`` names another file (tests, or a key kept elsewhere).
+    """
+    override = os.environ.get("VAULTNOTES_AI_KEY")
+    if override:
+        return Path(override).expanduser()
+    return get_local_app_dir() / AI_KEY_FILE_NAME
 
 
 def ensure_ai_notes_folder(notes_root: Path | str) -> Path:
     """Create the AI-Notes folder and its trash; return the folder.
 
-    The guide note is written only when the folder itself is new, so deleting
-    it is permanent.
+    The folder holds encrypted notes only.  The vault header, its key and the
+    guide note are created by :class:`~vaultnotes.storage.ai_store.EncryptedAIStore`
+    the first time AI-Notes is opened.
     """
     folder = Path(notes_root) / AI_NOTES_FOLDER
-    first_run = not folder.exists()
     (folder / ".trash").mkdir(parents=True, exist_ok=True)
-    if first_run:
-        guide = folder / f"{AI_GUIDE_TITLE}.md"
-        if not guide.exists():
-            atomic_write(guide, INITIAL_AI_GUIDE.encode("utf-8"))
     return folder
 
 
@@ -200,6 +214,11 @@ class Config:
     @property
     def ai_dir(self) -> Path:
         return self.notes_root / AI_NOTES_FOLDER
+
+    @property
+    def ai_key_path(self) -> Path:
+        """The AI-Notes key file (per PC, outside the notes folder)."""
+        return get_ai_key_path()
 
     def load(self) -> dict[str, Any]:
         """Load settings from settings.json or populate with defaults.

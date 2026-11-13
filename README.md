@@ -6,8 +6,9 @@ live on **your** computer (or a USB stick) — never in the cloud, never in the 
 - **Plain** — ordinary `.md` files you can open in any editor.
 - **Encrypted** and **Personal** — each note is AES-256-GCM encrypted on disk, each
   with its own key file. The two vaults use different keys, on purpose.
-- **AI-Notes** — ordinary `.md` files that belong to AI helpers such as Claude: they
-  write their findings and drafts there, so Plain stays yours alone (§7).
+- **AI-Notes** — the space that belongs to AI helpers such as Claude: they write their
+  findings and drafts there, so Plain stays yours alone (§7). It is encrypted with a
+  key kept on this PC, and always open.
 - **Google Drive backup** — your notes folder, uploaded by you, on your schedule.
   The key files are never part of it.
 
@@ -65,12 +66,12 @@ opening the app; there is no separate JS test step.
 ## 2. First run
 
 1. VaultNotes asks for a **notes folder** (default: `Documents\VaultNotes`). Everything
-   you write lives there, in plain files:
+   you write lives there:
 
    ```
    Documents\VaultNotes\
    ├─ plain\                 Shopping list.md, Home lab.md, …   (+ .trash\)
-   ├─ ai-notes\              About AI-Notes.md, …               (+ .trash\)
+   ├─ ai-notes\              vault.json, <opaque-id>.vnote      (+ .trash\)
    └─ vaults\
       ├─ encrypted\          vault.json, <opaque-id>.vnote      (+ .trash\)
       └─ personal\           vault.json, <opaque-id>.vnote      (+ .trash\)
@@ -300,8 +301,22 @@ Arctic. **Effects:** *Lite* and *Off* drop the blur and glow for older machines
 
 **AI-Notes** is the space AI helpers write in: findings, reviews, summaries, notes to
 pick up next time. It sits last in the sidebar, in its own colour. It works like Plain
-(ordinary `.md` files in `ai-notes\`, a trash, links, the Drive backup), and you can
-read, edit, move or delete anything in it. A note in it can point at yours with
+(always open, a trash, links, the Drive backup), and you can read, edit, move or
+delete anything in it.
+
+AI-Notes is **encrypted** like a vault (`vault.json` and `.vnote` files in
+`ai-notes\`), so the Drive backup only holds ciphertext. Because helpers write to it
+from outside the app, it never locks: its key, `ai-notes.vnkey`, has no passphrase and
+lives in `%LOCALAPPDATA%\VaultNotes`, never in the notes folder. VaultNotes creates it
+the first time AI-Notes opens, and the same key opens AI-Notes in every notes folder
+you use on that PC. **Keep a copy of `ai-notes.vnkey`** somewhere safe: without it
+these notes cannot be read, from the PC or from a backup.
+
+An AI-Notes folder from an older version (plain `.md` files) is encrypted once with
+`python -m vaultnotes.migrate_ai --root <notes folder>` (close the app first; add
+`--dry-run` to see what it would do). It checks every note against the encrypted copy
+and then moves the plain files to `%LOCALAPPDATA%\VaultNotes\ai-notes-plaintext-<time>`
+for you to delete. A note in it can point at yours with
 `[[Plain:Title]]`. The move dialog warns before a note goes *into* AI-Notes, because
 helpers can then read and change it. Its first note, *About AI-Notes*, tells a helper
 these rules.
@@ -330,7 +345,8 @@ Use Encrypted for anything a helper must not see, such as PHI.
 ```
 
 `--root` and `--personal-key` can be set once as `VAULTNOTES_ROOT` and
-`VAULTNOTES_PERSONAL_KEY`. `read` accepts a note id, its title, or a unique part of the
+`VAULTNOTES_PERSONAL_KEY`. AI-Notes opens with this PC's `ai-notes.vnkey`; `--ai-key`
+(or `VAULTNOTES_AI_KEY`) names another file. `read` accepts a note id, its title, or a unique part of the
 title; `append`, `delete`, `mark` and `tag` need the exact title. `write` refuses a title that is
 already taken unless you add `--replace`, and `append` creates the note if it is
 missing. The text comes from `--text`, `--file` or standard input. Prefer `--file`
@@ -339,9 +355,10 @@ pipes text to a program. A passphrase-protected Personal key is not accepted; op
 that vault in the app.
 
 `notes.py` writes nothing outside `ai-notes\`. It refuses key files, `.vnote` files,
-anything in the vault folders, and any text that is a key file. It creates `ai-notes\`
-on its first write if the app has not yet, but only inside a real notes folder, and
-reading never creates anything. The app shows a helper's changes the next time it
+anything in the vault folders or in `ai-notes\`, and any text that is a key file. A key
+whose vault id is not the AI-Notes vault's is refused before it is decoded. It creates
+the AI-Notes vault on its first write if the app has not yet, but only inside a real
+notes folder, and reading never creates anything. The app shows a helper's changes the next time it
 reads the list (switching spaces, searching, saving), or at once with the
 **refresh** button in the list header (*Refresh … list* in the palette). It does not
 reload a note that is open in the editor: type in it after a helper changed it and

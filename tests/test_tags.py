@@ -220,7 +220,7 @@ def test_set_tags_refuses_bad_input_and_locked_vaults(api: Api) -> None:
 # ----------------------------------------------------------------------
 def test_notes_cli_tags_and_filters(api: Api) -> None:
     root = str(api.config.notes_root)
-    api.create_note("ai", "PR review")
+    note_id = api.create_note("ai", "PR review")["id"]
     api.create_note("plain", "Mine")
     api.set_tags("plain", "Mine", ["home"])
 
@@ -230,11 +230,11 @@ def test_notes_cli_tags_and_filters(api: Api) -> None:
 
     code, out = cli("tag", "ai", "pr review", "#review", "backend")
     assert code == 0 and "#review #backend" in out
-    assert api.open_note("ai", "PR review")["tags"] == ["review", "backend"]
+    assert api.open_note("ai", note_id)["tags"] == ["review", "backend"]
     assert cli("tag", "ai", "PR review", "review")[1].endswith("nothing changed.\n")
 
     code, out = cli("tag", "ai", "PR review", "backend", "--remove")
-    assert code == 0 and api.open_note("ai", "PR review")["tags"] == ["review"]
+    assert code == 0 and api.open_note("ai", note_id)["tags"] == ["review"]
 
     code, out = cli("list", "ai", "--tag", "review")
     assert code == 0 and [line.split("\t")[0] for line in out.splitlines()] == ["PR review"]

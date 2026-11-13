@@ -398,6 +398,13 @@ class PlainStore:
         trash_path.unlink()
         return title
 
+    def detach_note(self, note_id: str) -> None:
+        """Remove an active note without putting it in the trash (a move, not a delete)."""
+        path = self._resolve_note_path(note_id)
+        if not path.is_file():
+            raise FileNotFoundError(f"Note not found: {note_id}")
+        path.unlink()
+
     def empty_trash(self) -> int:
         """Permanently delete every note in .trash/. Returns the count."""
         count = 0

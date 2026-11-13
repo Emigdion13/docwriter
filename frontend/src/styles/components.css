@@ -304,6 +304,17 @@
   background: var(--glass);
 }
 
+/* A note card is being dragged over a space that accepts it. */
+.space.drop-ok {
+  background: var(--glass-strong);
+  border-color: color-mix(in srgb, var(--c) 60%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--c) 35%, transparent);
+}
+
+.note.dragging {
+  opacity: .45;
+}
+
 .space.active {
   background: var(--glass-strong);
   border-color: color-mix(in srgb, var(--c) 38%, transparent);

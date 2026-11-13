@@ -29,9 +29,9 @@ A Windows desktop app for writing Markdown notes. Notes are organized in four **
 | **Plain** | normal `.md` files that any editor can read | nothing, always open |
 | **Encrypted** | encrypted `.vnote` files | key file #1 (e.g. `encrypted.vnkey`) |
 | **Personal** | encrypted `.vnote` files | key file #2 (e.g. `personal.vnkey`) |
-| **AI-Notes** | normal `.md` files, like Plain, in `ai-notes/` | nothing, always open |
+| **AI-Notes** | encrypted, like a vault (`vault.json` + `.vnote`), in `ai-notes/` | nothing, always open (its key, `ai-notes.vnkey`, sits in `%LOCALAPPDATA%\VaultNotes`) |
 
-AI-Notes (space id `ai`, added after v1) belongs to AI helpers: `notes.py` lets them write there and nowhere else, so their findings never mix with the user's Plain notes. The app treats it exactly like Plain.
+AI-Notes (space id `ai`, added after v1) belongs to AI helpers: `notes.py` lets them write there and nowhere else, so their findings never mix with the user's Plain notes. The app treats it like Plain (always open, no lock UI), but its files are encrypted with a passphrase-free key kept on the PC, outside the notes folder, so the Drive backup only holds ciphertext (`storage/ai_store.py`; older plain folders are converted once by `vaultnotes.migrate_ai`).
 
 Notes can link to each other the way Obsidian does, by writing `[[Note title]]`. Each note also shows a "Linked from" list of the notes that link to it (backlinks).
 
@@ -190,8 +190,8 @@ vaultnotes/
 ├─ plain\
 │  ├─ Shopping list.md
 │  └─ .trash\
-├─ ai-notes\                                (AI helpers write here; same format as plain\)
-│  ├─ About AI-Notes.md
+├─ ai-notes\                                (AI helpers write here; same format as a vault\)
+│  ├─ vault.json
 │  └─ .trash\
 └─ vaults\
    ├─ encrypted\
