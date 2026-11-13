@@ -31,6 +31,7 @@ from vaultnotes.claude_chat import (
     summarize_tool,
 )
 from vaultnotes.config import Config
+from vaultnotes.storage.ai_store import UnavailableAIStore
 
 SESSION = "46733bfa-5ee0-455a-b5eb-e27c48027277"
 SESSION_2 = "11111111-2222-3333-4444-555555555555"
@@ -657,3 +658,69 @@ def test_hostile_chat_ids_get_an_error_not_a_crash(tmp_path: Path) -> None:
     for bad in (None, 0, "", [], {}, "../../x"):
         for call in (api.claude_stop, api.claude_forget, api.claude_history):
             assert call(bad).get("error"), call
+
+
+# ----------------------------------------------------------------------
+# The "Vertex ready" badge: PHI may go in AI-Notes only on Vertex with an
+# encrypted AI-Notes.
+# ----------------------------------------------------------------------
+VERTEX_ENV = {"CLAUDE_CODE_USE_VERTEX": "1", "ANTHROPIC_VERTEX_PROJECT_ID": "dev-code-assist-464720"}
+
+
+def set_vertex_env(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> None:
+    for name in VERTEX_ENV:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+
+def test_vertex_ready_needs_vertex_and_an_encrypted_ai_notes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    api = make_api(tmp_path, FakeWindow())
+    set_vertex_env(monkeypatch, VERTEX_ENV)
+    vertex = api.claude_state()["vertex"]
+    assert vertex["ready"] is True and vertex["vertex"] is True and vertex["ai_encrypted"] is True
+
+
+def test_vertex_ready_is_off_outside_vertex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    api = make_api(tmp_path, FakeWindow())
+    set_vertex_env(monkeypatch, {})
+    vertex = api.claude_state()["vertex"]
+    assert vertex["ready"] is False and vertex["vertex"] is False and "no PHI" in vertex["reason"]
+    set_vertex_env(monkeypatch, {**VERTEX_ENV, "ANTHROPIC_VERTEX_PROJECT_ID": "some-other-project"})
+    assert api.claude_state()["vertex"]["ready"] is False
+
+
+def test_vertex_ready_is_off_while_ai_notes_holds_plain_notes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    api = make_api(tmp_path, FakeWindow())
+    set_vertex_env(monkeypatch, VERTEX_ENV)
+    (api.config.ai_dir / "Leftover.md").write_text("# Leftover\n", encoding="utf-8")
+    vertex = api.claude_state()["vertex"]
+    assert vertex["ready"] is False and vertex["vertex"] is True and vertex["ai_encrypted"] is False
+
+
+def test_vertex_ready_is_off_when_ai_notes_cannot_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    api = make_api(tmp_path, FakeWindow())
+    set_vertex_env(monkeypatch, VERTEX_ENV)
+    api.plain_stores["ai"] = UnavailableAIStore(api.config.ai_dir, "the key file is missing")
+    assert api.claude_state()["vertex"]["ready"] is False
+
+
+def test_the_chat_prompt_allows_phi_notes_only_when_vertex_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    api = make_api(tmp_path, FakeWindow())
+    h = Harness(tmp_path, [reply(delta("ok"), result()), reply(delta("ok"), result())])
+    api.claude = ClaudeManager(h._emit, api._claude_chats_changed, spawn=h._spawn, find=lambda: "claude")
+    api.claude_enable()
+
+    def prompt_of(argv: list[str]) -> str:
+        return argv[argv.index("--append-system-prompt") + 1]
+
+    set_vertex_env(monkeypatch, {})
+    api.claude_send(None, "Outside Vertex")
+    h.wait()
+    assert "Never put PHI in a note." in prompt_of(h.spawned[0][0])
+
+    set_vertex_env(monkeypatch, VERTEX_ENV)
+    api.claude_send(None, "On Vertex")
+    assert eventually(lambda: len(h.spawned) == 2)
+    prompt = prompt_of(h.spawned[1][0])
+    assert "PHI may go in AI-Notes notes" in prompt and "Never put PHI in a note." not in prompt

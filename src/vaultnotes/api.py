@@ -93,7 +93,8 @@ from vaultnotes.terminal import (
     clean_command_list,
     remember,
 )
-from vaultnotes.storage.ai_store import AiNotesError, EncryptedAIStore, UnavailableAIStore
+from vaultnotes.phi.hook import VERTEX_PROJECT, is_vertex
+from vaultnotes.storage.ai_store import AiNotesError, EncryptedAIStore, UnavailableAIStore, plaintext_note_files
 from vaultnotes.storage.plain_store import MAX_TITLE_LENGTH, PlainStore, make_snippet, sanitize_title
 from vaultnotes.storage.vault_store import (
     DamagedVaultError,
@@ -2736,7 +2737,29 @@ class Api:
             "available": self.claude.available(),
             "folder": str(self.config.notes_root),
             "chats": self.claude.chats() if enabled else [],
+            "vertex": self._vertex_status(),
         }
+
+    def _vertex_status(self) -> dict[str, Any]:
+        """Whether a Claude-space chat may put PHI in AI-Notes.
+
+        Both must hold: the chat runs on Vertex (it inherits this process's
+        environment, checked the same way as the PHI filter), and AI-Notes is
+        an encrypted vault with no plain ``.md`` notes left in it.
+        """
+        vertex = is_vertex()
+        ai = self.plain_stores.get("ai")
+        try:
+            encrypted = isinstance(ai, EncryptedAIStore) and not plaintext_note_files(ai.root)
+        except OSError:
+            encrypted = False
+        if vertex and encrypted:
+            reason = f"Vertex (project {VERTEX_PROJECT}) and AI-Notes is encrypted: PHI may go in AI-Notes"
+        elif not vertex:
+            reason = f"Not a Vertex session (needs CLAUDE_CODE_USE_VERTEX=1, project {VERTEX_PROJECT}): no PHI"
+        else:
+            reason = "Vertex, but AI-Notes is not encrypted (or could not be opened): no PHI"
+        return {"ready": vertex and encrypted, "vertex": vertex, "ai_encrypted": encrypted, "reason": reason}
 
     @bridge_method
     def claude_enable(self) -> dict[str, Any]:
@@ -2774,7 +2797,8 @@ class Api:
     def claude_send(self, chat_id: str | None, text: str) -> dict[str, Any]:
         """Send a message; ``chat_id`` None starts a new chat. The reply comes as events."""
         self._require_claude()
-        return {"ok": True, **self.claude.send(chat_id, text, **self._claude_paths())}
+        return {"ok": True, **self.claude.send(chat_id, text, **self._claude_paths(),
+                                               phi_notes=self._vertex_status()["ready"])}
 
     @bridge_method
     def claude_stop(self, chat_id: str) -> dict[str, bool]:
@@ -2786,7 +2810,8 @@ class Api:
     def claude_allow(self, chat_id: str, ids: list[str], scope: str) -> dict[str, Any]:
         """Allow what Claude was refused (``exact``: those uses; ``tool``: the tool) and retry."""
         self._require_claude()
-        return {"ok": True, **self.claude.allow(chat_id, ids, scope, **self._claude_paths())}
+        return {"ok": True, **self.claude.allow(chat_id, ids, scope, **self._claude_paths(),
+                                                phi_notes=self._vertex_status()["ready"])}
 
     @bridge_method
     def claude_history(self, chat_id: str) -> dict[str, Any]:

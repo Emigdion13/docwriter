@@ -96,15 +96,24 @@ def deny_rules(encrypted_dir: Path | str) -> list[str]:
     return [f"Read({base}/**)", f"Edit({base}/**)"]
 
 
-def system_prompt(notes_root: Path | str, encrypted_dir: Path | str) -> str:
-    """Added to Claude Code's own prompt, on top of the user's CLAUDE.md."""
+def system_prompt(notes_root: Path | str, encrypted_dir: Path | str, phi_notes: bool = False) -> str:
+    """Added to Claude Code's own prompt, on top of the user's CLAUDE.md.
+
+    ``phi_notes`` is the "Vertex ready" check (Vertex session and an encrypted
+    AI-Notes); only then may PHI go in a note, and only in AI-Notes.
+    """
+    phi_rule = (
+        "This session is on Vertex and AI-Notes is encrypted, so PHI may go in AI-Notes notes. "
+        "Nowhere else: not in Jira, Slack, commits, memory files or any other space. "
+        if phi_notes else "Never put PHI in a note. "
+    )
     return (
         "You are running in the Claude space inside the VaultNotes app, which shows your replies "
         "in a chat window. "
         f"The notes folder is {notes_root}. "
         "Write notes only to the AI-Notes space, through notes.py. "
         f"Never open, list or search the Encrypted vault ({encrypted_dir}) or its key: it holds PHI. "
-        "Never put PHI in a note. "
+        f"{phi_rule}"
         "The user may share a SQL result they reviewed for PHI: read it with notes.py results "
         "(it fails when nothing is shared). Summarise findings in notes, but never paste its rows. "
         "Keep replies readable in a narrow chat window."
@@ -609,6 +618,7 @@ class ClaudeManager:
         cwd: Path,
         encrypted_dir: Path,
         notes_root: Path,
+        phi_notes: bool = False,
     ) -> dict[str, Any]:
         """Send a message in a chat (``None`` starts a new one) and start the reply."""
         if chat_id is not None and not isinstance(chat_id, str):
@@ -637,7 +647,7 @@ class ClaudeManager:
             chat.denials = {}
             argv = build_args(
                 exe, session_id=chat.session_id, allowed=chat.allowed, denied=deny_rules(encrypted_dir),
-                prompt=system_prompt(notes_root, encrypted_dir),
+                prompt=system_prompt(notes_root, encrypted_dir, phi_notes),
             )
             started = self._start(chat, argv, str(cwd), text)
         self._changed()
@@ -689,7 +699,10 @@ class ClaudeManager:
         if turn is not None:
             turn.stop()
 
-    def allow(self, chat_id: Any, ids: Any, scope: Any, *, cwd: Path, encrypted_dir: Path, notes_root: Path) -> dict[str, Any]:
+    def allow(
+        self, chat_id: Any, ids: Any, scope: Any, *, cwd: Path, encrypted_dir: Path, notes_root: Path,
+        phi_notes: bool = False,
+    ) -> dict[str, Any]:
         """Allow the denied actions the user picked in this chat, and let Claude retry."""
         if scope not in ("exact", "tool") or not isinstance(ids, list) or not ids:
             raise ClaudeError("invalid_input", "Pick what to allow.")
@@ -708,7 +721,8 @@ class ClaudeManager:
             summaries.append(f"{denial['tool_name']}: {summarize_tool(denial['tool_name'], denial.get('tool_input'))}")
         chat.allowed.update(rules)
         prompt = "I have now allowed this, so please go ahead and retry it:\n" + "\n".join(f"- {s}" for s in summaries[:5])
-        return self.send(chat.id, prompt, cwd=cwd, encrypted_dir=encrypted_dir, notes_root=notes_root)
+        return self.send(chat.id, prompt, cwd=cwd, encrypted_dir=encrypted_dir, notes_root=notes_root,
+                         phi_notes=phi_notes)
 
     def forget(self, chat_id: Any) -> None:
         """Take a chat off the list (Claude Code's own history file is left alone)."""
