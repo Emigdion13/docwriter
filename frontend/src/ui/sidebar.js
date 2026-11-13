@@ -4,8 +4,9 @@
    ================================================================= */
 
 import { icon, spaceIcon } from '../icons.js';
+import { canDropOn, getDraggedNote } from './noteList.js';
 
-export function createSidebar({ onSelectSpace, onNewVault, onSyncDrive, onOpenDriveSettings }) {
+export function createSidebar({ onSelectSpace, onNewVault, onSyncDrive, onOpenDriveSettings, onDropNote }) {
   const aside = document.createElement('aside');
   aside.className = 'sidebar glass';
 
@@ -36,7 +37,41 @@ export function createSidebar({ onSelectSpace, onNewVault, onSyncDrive, onOpenDr
   };
   aside.querySelector('#drive-details').onclick = () => onOpenDriveSettings?.();
 
-  aside.querySelector('#spaces').addEventListener('click', (e) => {
+  // A note card dropped on a space moves the note there (only the routes
+  // noteList.js allows); every other space refuses the drop.
+  const spacesNav = aside.querySelector('#spaces');
+  const dropTarget = (e) => {
+    const dragged = getDraggedNote();
+    const el = e.target.closest?.('.space[data-space]');
+    return dragged && el && canDropOn(dragged.spaceId, el.dataset.space) ? el : null;
+  };
+  const clearDrop = () => spacesNav.querySelectorAll('.space.drop-ok')
+    .forEach(el => el.classList.remove('drop-ok'));
+  spacesNav.addEventListener('dragover', (e) => {
+    if (!getDraggedNote()) return;
+    const el = dropTarget(e);
+    e.dataTransfer.dropEffect = el ? 'move' : 'none';
+    if (!el) return;
+    e.preventDefault();
+    if (!el.classList.contains('drop-ok')) {
+      clearDrop();
+      el.classList.add('drop-ok');
+    }
+  });
+  spacesNav.addEventListener('dragleave', (e) => {
+    if (!e.relatedTarget?.closest?.('.space.drop-ok')) clearDrop();
+  });
+  spacesNav.addEventListener('drop', (e) => {
+    const el = dropTarget(e);
+    const dragged = getDraggedNote();
+    clearDrop();
+    if (!el) return;
+    e.preventDefault();
+    onDropNote?.(dragged, el.dataset.space);
+  });
+  document.addEventListener('dragend', clearDrop);
+
+  spacesNav.addEventListener('click', (e) => {
     const tool = e.target.closest('.space-tool');
     if (tool) {
       onSelectSpace?.(tool.dataset.tool);

@@ -1504,6 +1504,48 @@ async function moveCurrentNote() {
   });
 }
 
+/* A note card dragged onto a space in the sidebar.  Unlike the Move dialog this
+   stays in the current space, so several cards can be dragged one after another. */
+async function dropNoteOnSpace(dragged, targetId) {
+  const space = state.spaces.find(s => s.id === dragged?.spaceId);
+  const target = state.spaces.find(s => s.id === targetId);
+  if (!space || !target || state.trashMode) return;
+  if (!(await flushSave())) return;
+
+  const res = await bridge.move_note(space.id, dragged.noteId, targetId);
+  // move_partial: the note did arrive, only the original could not be removed.
+  if (res.error && res.error !== 'move_partial') {
+    toast(res.message, { icon: 'move' });
+    return;
+  }
+
+  await refreshSpaces();
+  await refreshTitles();
+  // The open note may be the one that just left; then the first note opens.
+  await selectSpace(space.id, state.currentNoteId === dragged.noteId ? null : state.currentNoteId, false);
+  pushHistory();
+
+  if (res.error) {
+    toast(res.message, { icon: 'move' });
+    return;
+  }
+  const broken = res.broken_links || 0;
+  const brokenMsg = broken ? ` ${broken} link${broken === 1 ? '' : 's'} broke.` : '';
+  toast(`Moved “${res.title}” to ${target.name}.${brokenMsg}`, {
+    icon: 'move',
+    action: 'Undo',
+    onAction: async () => {
+      const undo = await bridge.move_note(targetId, res.new_id, space.id);
+      await refreshSpaces();
+      if (undo.error) {
+        toast(undo.message, { icon: 'move' });
+        return;
+      }
+      await selectSpace(space.id, undo.new_id, false);
+    }
+  });
+}
+
 async function importNotes() {
   const space = getActiveSpace();
   if (!space || space.locked) {
@@ -2531,7 +2573,8 @@ async function init() {
       else toast('Encrypted and Personal vaults already exist', { icon: 'shield' });
     },
     onSyncDrive: runBackup,
-    onOpenDriveSettings: () => settingsOverlay?.open()
+    onOpenDriveSettings: () => settingsOverlay?.open(),
+    onDropNote: dropNoteOnSpace
   });
   sidebarContainer.replaceWith(sidebarEl);
 

@@ -19,6 +19,11 @@ read-only, and the Encrypted vault is always refused.
 ``VAULTNOTES_PERSONAL_KEY`` environment variables.  The app's settings.json is
 not read, so the notes folder and key are always the ones named here.
 
+AI-Notes is an encrypted vault that is always open: its key is
+``%LOCALAPPDATA%\\VaultNotes\\ai-notes.vnkey`` unless ``--ai-key`` (or
+``VAULTNOTES_AI_KEY``) names another file.  A key file whose vault id is not
+the AI-Notes vault's is refused before its key is decoded.
+
 ``results`` prints the one SQL result the user ticked "Share with AI" on in the
 SQL grid: the SQL, the columns and the first 1,000 rows.  It needs no ``--root``
 and reads only the app's ``ai-share`` folder (``--share-dir`` or
@@ -32,10 +37,11 @@ file whose vault id is not Personal's (the Encrypted key under any file name)
 is refused before its key is decoded.
 
 Only the ``ai-notes`` folder is ever written.  ``write``, ``append`` and
-``delete`` refuse every other space, never copy a key file or an encrypted note
-into a note, and ``delete`` only moves a note to the AI-Notes trash.  The first
-write creates the folder if the app has not yet, but only inside a real notes
-folder; reading never creates anything.
+``delete`` refuse every other space, never copy a key file, an encrypted note or
+anything in the ``ai-notes`` folder into a note, and ``delete`` only moves a
+note to the AI-Notes trash.  The first write creates the AI-Notes vault (and its
+key) if the app has not yet, but only inside a real notes folder; reading never
+creates anything.
 """
 
 from __future__ import annotations
@@ -50,10 +56,18 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from vaultnotes.ai_share import SHARE_FOLDER, load_snapshot
-from vaultnotes.config import AI_NOTES_FOLDER, ensure_ai_notes_folder, get_local_app_dir
+from vaultnotes.config import (
+    AI_GUIDE_TITLE,
+    AI_NOTES_FOLDER,
+    INITIAL_AI_GUIDE,
+    ensure_ai_notes_folder,
+    get_ai_key_path,
+    get_local_app_dir,
+)
 from vaultnotes.crypto.keyfile import KeyFileError, PassphraseRequired, load_key_file
 from vaultnotes.frontmatter import is_important, set_important, set_tags
 from vaultnotes.models import Note
+from vaultnotes.storage.ai_store import AiNotesError, EncryptedAIStore, plaintext_note_files
 from vaultnotes.storage.plain_store import MAX_TITLE_LENGTH, PlainStore, sanitize_title
 from vaultnotes.storage.vault_store import VaultStore, VaultStoreError
 from vaultnotes.tags import MAX_TAGS_PER_NOTE, clean_tag, count_tags, extract_tags, has_tags, tag_key, unique_tags
@@ -131,10 +145,12 @@ def _existing_folder(folder: Path, what: str) -> Path:
 class NotesReader:
     """Opens Plain, AI-Notes or Personal on demand and forgets the Personal key when closed."""
 
-    def __init__(self, root: Path, personal_key: Path | None) -> None:
+    def __init__(self, root: Path, personal_key: Path | None, ai_key: Path | None = None) -> None:
         self.root = root
         self.personal_key = personal_key
+        self.ai_key = ai_key
         self._vault: VaultStore | None = None
+        self._ai_notes: EncryptedAIStore | None = None
 
     def notes(self, space: str, query: str = "") -> list[Note]:
         if space == "plain":
@@ -147,8 +163,10 @@ class NotesReader:
     def _plain(self) -> PlainStore:
         return PlainStore(_existing_folder(self.root / "plain", "Plain folder"))
 
-    def _ai(self) -> PlainStore | None:
-        return _ai_store(self.root, create=False)
+    def _ai(self) -> EncryptedAIStore | None:
+        if self._ai_notes is None:
+            self._ai_notes = _ai_store(self.root, self.ai_key, create=False)
+        return self._ai_notes
 
     def _personal(self) -> VaultStore:
         if self._vault is not None:
@@ -203,19 +221,41 @@ class NotesReader:
         if self._vault is not None:
             self._vault.lock()
             self._vault = None
+        if self._ai_notes is not None:
+            self._ai_notes.close()
+            self._ai_notes = None
 
 
-def _ai_store(root: Path, *, create: bool) -> PlainStore | None:
-    """AI-Notes, or ``None`` while nothing has made its folder yet.
+def _ai_key_path(raw: Path | None) -> Path:
+    path = (raw if raw is not None else get_ai_key_path()).expanduser()
+    if _mentions_encrypted(path):
+        raise Refused(ENCRYPTED_REFUSAL)
+    return path
 
-    ``create`` makes the folder, for the first write.  Only inside a real notes
-    folder: a mistyped ``--root`` must not grow an ``ai-notes`` folder elsewhere.
+
+def _ai_store(root: Path, ai_key: Path | None, *, create: bool) -> EncryptedAIStore | None:
+    """AI-Notes, or ``None`` while nothing has set up its vault yet.
+
+    ``create`` sets up the folder, vault and key, for the first write.  Only
+    inside a real notes folder: a mistyped ``--root`` must not grow an
+    ``ai-notes`` folder elsewhere.
     """
     _existing_folder(root / "plain", "Plain folder")
-    if create:
-        return PlainStore(ensure_ai_notes_folder(root))
+    key_path = _ai_key_path(ai_key)
     folder = root / AI_NOTES_FOLDER
-    return PlainStore(folder) if (folder / ".trash").is_dir() else None
+    if not create and not (folder / "vault.json").is_file():
+        if plaintext_note_files(folder):
+            raise CliError(
+                "AI-Notes still holds plain .md notes. Encrypt them first with: "
+                f"python -m vaultnotes.migrate_ai --root {root}"
+            )
+        return None
+    if create:
+        ensure_ai_notes_folder(root)
+    try:
+        return EncryptedAIStore(folder, key_path, create=create, guide=(AI_GUIDE_TITLE, INITIAL_AI_GUIDE))
+    except (AiNotesError, VaultStoreError) as exc:
+        raise CliError(str(exc)) from exc
 
 
 def _find(notes: list[Note], wanted: str) -> Note:
@@ -234,7 +274,7 @@ def _find(notes: list[Note], wanted: str) -> Note:
     raise CliError(f"No note matches {wanted!r}.")
 
 
-def _existing(store: PlainStore, wanted: str) -> Note | None:
+def _existing(store: EncryptedAIStore, wanted: str) -> Note | None:
     """The note titled exactly ``wanted`` (any case), as typed or as it would be saved.
 
     Writes never guess from a fragment the way ``read`` does: appending to or
@@ -242,12 +282,7 @@ def _existing(store: PlainStore, wanted: str) -> Note | None:
     """
     if not wanted.strip():
         return None  # sanitize_title("") is "Untitled", a real note's name
-    for candidate in dict.fromkeys((wanted.strip(), sanitize_title(wanted))):
-        try:
-            return store.read_note(candidate)
-        except (FileNotFoundError, ValueError):
-            continue
-    return None
+    return store.find_by_title(wanted)
 
 
 def _title(raw: str) -> str:
@@ -271,6 +306,9 @@ def _read_text_file(path: Path, root: Path) -> str:
     if resolved.suffix.lower() in {".vnkey", ".vnote"}:
         raise Refused(KEY_MATERIAL_REFUSAL)
     if resolved.is_relative_to((root / "vaults").resolve()):
+        raise Refused(KEY_MATERIAL_REFUSAL)
+    # The AI-Notes folder holds only its vault header and ciphertext.
+    if resolved.is_relative_to((root / AI_NOTES_FOLDER).resolve()):
         raise Refused(KEY_MATERIAL_REFUSAL)
     try:
         if resolved.stat().st_size > MAX_NOTE_BYTES:
@@ -303,7 +341,7 @@ def _note_text(args: argparse.Namespace, root: Path, stdin) -> str:
     return _check_size(text)
 
 
-def _write(store: PlainStore, title: str, text: str, replace: bool) -> str:
+def _write(store: EncryptedAIStore, title: str, text: str, replace: bool) -> str:
     body = text if text.endswith("\n") else text + "\n"
     existing = _existing(store, title)
     if existing is not None:
@@ -318,7 +356,7 @@ def _write(store: PlainStore, title: str, text: str, replace: bool) -> str:
     return f'Created "{note.title}" in AI-Notes.'
 
 
-def _append(store: PlainStore, wanted: str, text: str) -> str:
+def _append(store: EncryptedAIStore, wanted: str, text: str) -> str:
     addition = text.strip("\n")
     existing = _existing(store, wanted)
     if existing is None:
@@ -330,7 +368,7 @@ def _append(store: PlainStore, wanted: str, text: str) -> str:
     return f'Appended to "{note.title}" in AI-Notes.'
 
 
-def _delete(store: PlainStore | None, wanted: str) -> str:
+def _delete(store: EncryptedAIStore | None, wanted: str) -> str:
     existing = _existing(store, wanted) if store is not None else None
     if existing is None:
         raise CliError(f"AI-Notes has no note titled {wanted!r}. delete needs the exact title.")
@@ -338,7 +376,7 @@ def _delete(store: PlainStore | None, wanted: str) -> str:
     return f'Moved "{existing.title}" to the AI-Notes trash; it can be restored from there in VaultNotes.'
 
 
-def _mark(store: PlainStore | None, wanted: str, important: bool) -> str:
+def _mark(store: EncryptedAIStore | None, wanted: str, important: bool) -> str:
     """Set or clear the important mark, the same front matter line the app writes."""
     existing = _existing(store, wanted) if store is not None else None
     if existing is None:
@@ -353,7 +391,7 @@ def _mark(store: PlainStore | None, wanted: str, important: bool) -> str:
     return f'Cleared the important mark on "{note.title}".'
 
 
-def _tag(store: PlainStore | None, wanted: str, tags: list[str], remove: bool) -> str:
+def _tag(store: EncryptedAIStore | None, wanted: str, tags: list[str], remove: bool) -> str:
     """Add or remove tags: the same front matter line the app's tag box writes."""
     existing = _existing(store, wanted) if store is not None else None
     if existing is None:
@@ -448,6 +486,11 @@ def _parser() -> argparse.ArgumentParser:
         help="the Personal vault's .vnkey file (needed for the personal space)",
     )
     parser.add_argument(
+        "--ai-key",
+        default=os.environ.get("VAULTNOTES_AI_KEY"),
+        help="the AI-Notes key file (%%LOCALAPPDATA%%\\VaultNotes\\ai-notes.vnkey by default)",
+    )
+    parser.add_argument(
         "--share-dir",
         default=os.environ.get("VAULTNOTES_SHARE_DIR"),
         help="the app's ai-share folder, for results (the per-PC VaultNotes folder by default)",
@@ -513,25 +556,26 @@ def run(argv: Sequence[str] | None = None, out=None, stdin=None) -> int:
         if not args.root:
             raise CliError("Name the notes folder with --root (or VAULTNOTES_ROOT).")
         root = Path(args.root).expanduser()
+        ai_key = Path(args.ai_key) if args.ai_key else None
         if args.command == "write":
             title, text = _title(args.title), _note_text(args, root, stdin)
-            print(_write(_ai_store(root, create=True), title, text, args.replace), file=out)
+            print(_write(_ai_store(root, ai_key, create=True), title, text, args.replace), file=out)
             return 0
         if args.command == "append":
             text = _note_text(args, root, stdin)
-            print(_append(_ai_store(root, create=True), args.note, text), file=out)
+            print(_append(_ai_store(root, ai_key, create=True), args.note, text), file=out)
             return 0
         if args.command == "delete":
-            print(_delete(_ai_store(root, create=False), args.note), file=out)
+            print(_delete(_ai_store(root, ai_key, create=False), args.note), file=out)
             return 0
         if args.command == "mark":
-            print(_mark(_ai_store(root, create=False), args.note, not args.clear), file=out)
+            print(_mark(_ai_store(root, ai_key, create=False), args.note, not args.clear), file=out)
             return 0
         if args.command == "tag":
-            print(_tag(_ai_store(root, create=False), args.note, args.tags, args.remove), file=out)
+            print(_tag(_ai_store(root, ai_key, create=False), args.note, args.tags, args.remove), file=out)
             return 0
 
-        reader = NotesReader(root, Path(args.personal_key) if args.personal_key else None)
+        reader = NotesReader(root, Path(args.personal_key) if args.personal_key else None, ai_key)
         if args.command == "list":
             wanted = [clean_tag(tag) for tag in args.tag]
             if not all(wanted):

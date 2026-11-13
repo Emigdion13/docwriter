@@ -122,13 +122,13 @@ const mockSpaces = [
     locked: false,
     notes: [
       {
-        id: 'Home lab check',
+        id: '5d0c3f1e9a7b4c2d8e6f1a2b3c4d5e6f',
         title: 'Home lab check',
         modified: 'Today 09:40',
         body: `---\ntags: [projects/homelab]\n---\n# Home lab check\n\nThe air sensor in [[Plain:Home lab]] still needs batteries; they are already on [[Plain:Shopping list]].\n\n- [x] Read the Plain notes\n- [ ] Order the NAS\n\nMore in [[About AI-Notes]].`
       },
       {
-        id: 'About AI-Notes',
+        id: '9f8e7d6c5b4a43219f8e7d6c5b4a4321',
         title: 'About AI-Notes',
         modified: 'Today 08:30',
         body: `# About AI-Notes\n\nThis space belongs to AI helpers such as Claude. They write their findings, summaries, drafts and hand-over notes here, so Plain stays yours alone.`

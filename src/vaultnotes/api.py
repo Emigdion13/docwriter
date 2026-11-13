@@ -45,7 +45,7 @@ from vaultnotes.backup.gdrive_backup import (
     BackupRunner,
     GoogleDriveClient,
 )
-from vaultnotes.config import Config, get_app_dir, get_config, get_local_app_dir
+from vaultnotes.config import AI_GUIDE_TITLE, INITIAL_AI_GUIDE, Config, get_app_dir, get_config, get_local_app_dir
 from vaultnotes.crypto.keyfile import (
     KeyFileError,
     PassphraseRequired,
@@ -93,6 +93,7 @@ from vaultnotes.terminal import (
     clean_command_list,
     remember,
 )
+from vaultnotes.storage.ai_store import AiNotesError, EncryptedAIStore, UnavailableAIStore
 from vaultnotes.storage.plain_store import MAX_TITLE_LENGTH, PlainStore, make_snippet, sanitize_title
 from vaultnotes.storage.vault_store import (
     DamagedVaultError,
@@ -236,6 +237,7 @@ class Api:
         app_dir: Path | str | None = None,
         sql_dir: Path | str | None = None,
         sql_passwords: SqlPasswords | None = None,
+        ai_key_path: Path | str | None = None,
     ) -> None:
         self._calls = CallLock()
         #: Set by :meth:`ready_to_close` once the page saved its last edit.
@@ -245,7 +247,10 @@ class Api:
         #: ``%APPDATA%\\VaultNotes``: settings, manifest, OAuth client file.
         #: Tests point it at a temporary folder.
         self.app_dir = Path(app_dir).resolve() if app_dir is not None else get_app_dir()
-        self.plain_stores: dict[str, PlainStore] = {}
+        #: The AI-Notes key (per PC, outside the notes folder).  Tests point it
+        #: at a temporary file so they never touch the real one.
+        self.ai_key_path = Path(ai_key_path) if ai_key_path is not None else None
+        self.plain_stores: dict[str, PlainStore | EncryptedAIStore] = {}
         self._build_plain_stores()
         self.vault_stores: dict[str, VaultStore] = {}
         self._build_vault_stores()
@@ -329,15 +334,36 @@ class Api:
             self.autolock.stop()
             for store in self.vault_stores.values():
                 store.lock()
+            self.plain_stores["ai"].close()
             # Decrypted titles must not outlive the vault they came from.
             for index in self.link_indexes.values():
                 index.clear()
 
     def _build_plain_stores(self) -> None:
-        """Open Plain and AI-Notes in the current notes folder."""
+        """Open Plain and AI-Notes in the current notes folder.
+
+        AI-Notes is an always-open encrypted vault (see
+        :mod:`vaultnotes.storage.ai_store`): it behaves like a plain space here,
+        but its files on disk, and so in the Drive backup, are ciphertext.  Its
+        vault, key and guide note are created the first time it is opened.
+        """
+        old_ai = self.plain_stores.get("ai") if hasattr(self, "plain_stores") else None
+        if old_ai is not None:
+            old_ai.close()
+        key_path = self.ai_key_path if self.ai_key_path is not None else self.config.ai_key_path
+        try:
+            ai_store: EncryptedAIStore | UnavailableAIStore = EncryptedAIStore(
+                self.config.ai_dir,
+                key_path,
+                create=True,
+                guide=(AI_GUIDE_TITLE, INITIAL_AI_GUIDE),
+            )
+        except (AiNotesError, VaultStoreError, OSError) as exc:
+            # A missing key or an unmigrated folder must not stop the app.
+            ai_store = UnavailableAIStore(self.config.ai_dir, str(exc))
         self.plain_stores = {
             "plain": PlainStore(self.config.plain_dir),
-            "ai": PlainStore(self.config.ai_dir),
+            "ai": ai_store,
         }
 
     @property
@@ -550,6 +576,9 @@ class Api:
             if space_id is not None and plain_space != space_id:
                 continue
             where = "" if plain_space == "plain" else f" in {SPACE_NAMES[plain_space]}"
+            problem = getattr(store, "problem", None)
+            if problem:
+                warnings.append(f"AI-Notes could not be opened: {problem}")
             for name in store.skipped_files:
                 warnings.append(f"Skipped a note{where} that could not be read: {name}")
         for vault_space in SPACE_DEFINITIONS:
@@ -1259,10 +1288,7 @@ class Api:
         source_plain = self._plain(space)
         try:
             if source_plain is not None:
-                source_path = source_plain._resolve_note_path(clean_id)  # noqa: SLF001 - same package
-                if not source_path.is_file():
-                    raise FileNotFoundError(f"Note not found: {clean_id}")
-                source_path.unlink()
+                source_plain.detach_note(clean_id)
             else:
                 assert source_store is not None  # narrowed by the checks above
                 source_store._require_unlocked()  # noqa: SLF001 - same package
@@ -1837,6 +1863,11 @@ class Api:
     def choose_key_file(self, space_id: str) -> dict[str, Any]:
         """Let the native UI choose a key and keep its path server-side."""
         space = self._known_space(space_id)
+        if space == "ai":
+            return _error(
+                "invalid_space",
+                "AI-Notes opens with this PC's own key (ai-notes.vnkey) and has no key file to choose",
+            )
         if space in self.plain_stores:
             return _error("invalid_space", f"{SPACE_NAMES[space]} is not encrypted and has no key file")
         selected = self._choose_file(False, f"{space}.vnkey")

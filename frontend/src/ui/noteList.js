@@ -61,6 +61,22 @@ function hasTags(noteTags, wanted) {
   });
 }
 
+// Where a card may be dragged: source space -> target spaces.  Deliberately a
+// short list, so a stray drag can never carry a note out of (or into) a vault.
+const DRAG_MOVES = { ai: ['plain'] };
+
+export function canDropOn(fromSpaceId, targetSpaceId) {
+  return !!DRAG_MOVES[fromSpaceId]?.includes(targetSpaceId);
+}
+
+// The card being dragged ({ spaceId, noteId }).  dragover cannot read
+// dataTransfer data, so the sidebar asks for it here.
+let draggedNote = null;
+
+export function getDraggedNote() {
+  return draggedNote;
+}
+
 // Tags shown on one card before the rest fold into "+3".
 const CARD_TAG_LIMIT = 3;
 
@@ -160,7 +176,22 @@ export function createNoteList({
     onSearchInput?.(searchInput.value);
   });
 
-  section.querySelector('#notes').addEventListener('click', (e) => {
+  const notesEl = section.querySelector('#notes');
+  notesEl.addEventListener('dragstart', (e) => {
+    const card = e.target.closest?.('.note[draggable="true"]');
+    if (!card) return;
+    draggedNote = { spaceId: card.dataset.space, noteId: card.dataset.note };
+    // A custom type only: the editor must not take the card as dropped text.
+    e.dataTransfer.setData('application/x-vaultnotes-note', draggedNote.noteId);
+    e.dataTransfer.effectAllowed = 'move';
+    card.classList.add('dragging');
+  });
+  notesEl.addEventListener('dragend', () => {
+    draggedNote = null;
+    notesEl.querySelectorAll('.note.dragging').forEach(el => el.classList.remove('dragging'));
+  });
+
+  notesEl.addEventListener('click', (e) => {
     const actionBtn = e.target.closest('[data-trash-action]');
     if (actionBtn) {
       e.stopPropagation();
@@ -366,10 +397,13 @@ export function renderNotes(space, notes, activeNoteId, animate = true, opts = {
     const delay = staggered ? Math.min(i, STAGGER_LIMIT) * 45 : 0;
     // A line between the important notes and the rest.
     const firstOfRest = !n.important && i > 0 && notes[i - 1].important;
+    const drag = DRAG_MOVES[space.id]
+      ? ` draggable="true" data-space="${escapeHtml(space.id)}" title="Drag onto a space in the sidebar to move this note"`
+      : '';
 
     return `
       <button class="note ${isActive ? 'active' : ''} ${staggered ? '' : 'still'} ${n.important ? 'important' : ''} ${firstOfRest ? 'first-of-rest' : ''}"
-              data-note="${escapeHtml(n.id)}"
+              data-note="${escapeHtml(n.id)}"${drag}
               style="animation-delay:${delay}ms">
         <span class="t">${n.important ? `<span class="imp" title="Important">${icon('star', 12)}</span>` : ''}${escapeHtml(n.title)}</span>
         <span class="s">${escapeHtml(n.snippet || '')}</span>

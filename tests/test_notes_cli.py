@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 import uuid
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import pytest
 from vaultnotes import notes_cli
 from vaultnotes.ai_share import AiShare
 from vaultnotes.crypto.keyfile import generate_key_file
+from vaultnotes.storage.ai_store import EncryptedAIStore
 from vaultnotes.storage.plain_store import PlainStore
 from vaultnotes.storage.vault_store import VaultStore
 
@@ -47,6 +49,23 @@ def cli(*args: str, stdin=None) -> tuple[int, str, str]:
     with contextlib.redirect_stderr(err):
         code = notes_cli.run(list(args), out=out, stdin=stdin)
     return code, out.getvalue(), err.getvalue()
+
+
+def ai_notes(root: Path) -> dict[str, str]:
+    """Title -> text of every active AI-Notes note, decrypted as the app would."""
+    store = EncryptedAIStore(root / "ai-notes", os.environ["VAULTNOTES_AI_KEY"])
+    try:
+        return {note.title: note.body for note in store.list_notes()}
+    finally:
+        store.close()
+
+
+def ai_trash(root: Path) -> list[str]:
+    store = EncryptedAIStore(root / "ai-notes", os.environ["VAULTNOTES_AI_KEY"])
+    try:
+        return [note.title for note in store.list_trash()]
+    finally:
+        store.close()
 
 
 def snapshot(folder: Path) -> dict[str, tuple[int, int]]:
@@ -150,19 +169,21 @@ def test_writes_create_append_replace_and_trash_ai_notes(notes_root: Path) -> No
     code, out, err = cli("--root", root, "write", "ai", "PR 42: review", "--text", "# PR 42\n\nLooks good.")
     assert code == 0, err
     assert out.strip() == 'Created "PR 42- review" in AI-Notes.'
-    assert (ai / "PR 42- review.md").read_text(encoding="utf-8") == "# PR 42\n\nLooks good.\n"
-    assert (ai / "About AI-Notes.md").is_file(), "the first write brings the guide note"
+    assert ai_notes(notes_root)["PR 42- review"] == "# PR 42\n\nLooks good.\n"
+    assert "About AI-Notes" in ai_notes(notes_root), "the first write brings the guide note"
+    assert (ai / "vault.json").is_file() and list(ai.rglob("*.md")) == []
 
     # The title as typed finds the note it became.
     code, out, _ = cli("--root", root, "append", "ai", "PR 42: review", "--text", "\n- one nit\n")
     assert code == 0 and out.startswith('Appended to "PR 42- review"')
-    assert (ai / "PR 42- review.md").read_text(encoding="utf-8") == "# PR 42\n\nLooks good.\n\n- one nit\n"
+    assert ai_notes(notes_root)["PR 42- review"] == "# PR 42\n\nLooks good.\n\n- one nit\n"
 
     code, _, err = cli("--root", root, "write", "ai", "pr 42- REVIEW", "--text", "gone?")
     assert code == notes_cli.EXIT_ERROR and "--replace" in err
     code, out, _ = cli("--root", root, "write", "ai", "PR 42- review", "--text", "# Rewritten", "--replace")
     assert code == 0 and out.startswith('Replaced "PR 42- review"')
-    assert (ai / "PR 42- review.md").read_text(encoding="utf-8") == "# Rewritten\n"
+    assert ai_notes(notes_root)["PR 42- review"] == "# Rewritten\n"
+    assert len(ai_notes(notes_root)) == 2  # replaced, not duplicated
 
     code, out, _ = cli("--root", root, "read", "ai", "rewritten")
     assert code == notes_cli.EXIT_ERROR  # read matches titles, not text
@@ -171,8 +192,8 @@ def test_writes_create_append_replace_and_trash_ai_notes(notes_root: Path) -> No
 
     code, out, _ = cli("--root", root, "delete", "ai", "PR 42- review")
     assert code == 0 and "trash" in out
-    assert not (ai / "PR 42- review.md").exists()
-    assert (ai / ".trash" / "PR 42- review.md").is_file()
+    assert "PR 42- review" not in ai_notes(notes_root)
+    assert ai_trash(notes_root) == ["PR 42- review"]
     assert [line.split("\t")[0] for line in cli("--root", root, "list", "ai")[1].splitlines()] == ["About AI-Notes"]
 
 
@@ -180,33 +201,32 @@ def test_append_creates_a_missing_note_and_never_guesses(notes_root: Path) -> No
     root = str(notes_root)
     assert cli("--root", root, "append", "ai", "Session log", "--text", "- started")[0] == 0
     assert cli("--root", root, "append", "ai", "session LOG", "--text", "- finished")[0] == 0
-    log = notes_root / "ai-notes" / "Session log.md"
-    assert log.read_text(encoding="utf-8") == "- started\n\n- finished\n"
+    assert ai_notes(notes_root)["Session log"] == "- started\n\n- finished\n"
 
     # A fragment is a new title for append, and not enough for delete.
     assert cli("--root", root, "append", "ai", "Session", "--text", "other")[0] == 0
-    assert (notes_root / "ai-notes" / "Session.md").is_file()
+    assert ai_notes(notes_root)["Session"] == "other\n"
     code, _, err = cli("--root", root, "delete", "ai", "log")
     assert code == notes_cli.EXIT_ERROR and "exact title" in err
-    assert log.is_file()
+    assert "Session log" in ai_notes(notes_root)
 
 
 def test_text_comes_from_stdin_or_a_file(notes_root: Path, tmp_path: Path) -> None:
     root = str(notes_root)
     piped = io.BytesIO("\ufeff# Piped\r\n\r\nCafé ✓\r\n".encode("utf-8"))
     assert cli("--root", root, "write", "ai", "Piped", stdin=piped)[0] == 0
-    assert (notes_root / "ai-notes" / "Piped.md").read_text(encoding="utf-8") == "# Piped\n\nCafé ✓\n"
+    assert ai_notes(notes_root)["Piped"] == "# Piped\n\nCafé ✓\n"
 
     draft = tmp_path / "draft.md"
     draft.write_text("# From a file\n\nÜber\n", encoding="utf-8-sig")
     assert cli("--root", root, "write", "ai", "From a file", "--file", str(draft))[0] == 0
-    assert (notes_root / "ai-notes" / "From a file.md").read_text(encoding="utf-8") == "# From a file\n\nÜber\n"
+    assert ai_notes(notes_root)["From a file"] == "# From a file\n\nÜber\n"
 
     code, _, err = cli("--root", root, "write", "ai", "Empty", stdin=io.BytesIO(b"  \n"))
     assert code == notes_cli.EXIT_ERROR and "empty" in err
     code, _, err = cli("--root", root, "write", "ai", "Both", "--text", "a", "--file", str(draft))
     assert code == notes_cli.EXIT_ERROR and "not both" in err
-    assert not (notes_root / "ai-notes" / "Empty.md").exists()
+    assert "Empty" not in ai_notes(notes_root)
 
 
 @pytest.mark.parametrize(
@@ -254,6 +274,52 @@ def test_key_material_never_becomes_a_note(notes_root: Path, tmp_path: Path) -> 
     code, _, _ = cli("--root", root, "append", "ai", "Keys", stdin=io.BytesIO(key.read_bytes()))
     assert code == notes_cli.EXIT_REFUSED
     assert not (notes_root / "ai-notes").exists()
+
+
+def test_nothing_in_the_ai_notes_folder_becomes_a_note(notes_root: Path) -> None:
+    root = str(notes_root)
+    assert cli("--root", root, "write", "ai", "First", "--text", "x")[0] == 0
+    ai = notes_root / "ai-notes"
+    for source in (ai / "vault.json", next(ai.glob("*.vnote"))):
+        code, _, err = cli("--root", root, "write", "ai", "Copy", "--file", str(source))
+        assert code == notes_cli.EXIT_REFUSED and "never copied" in err
+    assert "Copy" not in ai_notes(notes_root)
+
+
+def test_another_vaults_key_is_refused_for_ai_notes_before_it_is_decoded(
+    notes_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = str(notes_root)
+    assert cli("--root", root, "write", "ai", "First", "--text", "x")[0] == 0
+    monkeypatch.setattr(
+        "vaultnotes.storage.ai_store.load_key_file", lambda *a, **k: pytest.fail("decoded a foreign key")
+    )
+    personal_key = str(notes_root.parent / "keys" / "personal.vnkey")
+    code, _, err = cli("--root", root, "--ai-key", personal_key, "list", "ai")
+    assert code == notes_cli.EXIT_ERROR and "does not belong to the AI-Notes vault" in err
+
+    encrypted_key = str(notes_root.parent / "keys" / "encrypted.vnkey")
+    code, _, err = cli("--root", root, "--ai-key", encrypted_key, "list", "ai")
+    assert code == notes_cli.EXIT_REFUSED and "PHI" in err
+
+
+def test_a_new_ai_notes_vault_never_reuses_another_vaults_key(notes_root: Path) -> None:
+    personal_key = notes_root.parent / "keys" / "personal.vnkey"
+    before = personal_key.read_bytes()
+    code, _, err = cli("--root", str(notes_root), "--ai-key", str(personal_key), "write", "ai", "x", "--text", "y")
+    assert code == notes_cli.EXIT_ERROR and "not an AI-Notes key file" in err
+    assert personal_key.read_bytes() == before
+    assert not (notes_root / "ai-notes" / "vault.json").exists()
+
+
+def test_plain_ai_notes_must_be_migrated_first(notes_root: Path) -> None:
+    folder = notes_root / "ai-notes"
+    (folder / ".trash").mkdir(parents=True)
+    (folder / "Old.md").write_text("# Old", encoding="utf-8")
+    for command in (["list", "ai"], ["write", "ai", "New", "--text", "x"]):
+        code, _, err = cli("--root", str(notes_root), *command)
+        assert code == notes_cli.EXIT_ERROR and "migrate_ai" in err
+    assert sorted(path.name for path in folder.iterdir()) == [".trash", "Old.md"]
 
 
 def test_a_wrong_root_never_grows_an_ai_notes_folder(tmp_path: Path) -> None:
