@@ -6,6 +6,7 @@
     python phi.py scan                    # stdin -> tokenised stdout
     python phi.py status                  # where the key and store are, how many tokens
     python phi.py purge --days 30         # forget tokens older than N days
+    python phi.py prune                   # forget stored values today's rules reject
 
 Every reveal is logged (time and tokens, never values) to ``reveal.log``.
 """
@@ -116,6 +117,7 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("--stdin", action="store_true", help="decrypt every token in the text on stdin")
     sub.add_parser("scan", help="tokenise stdin to stdout")
     sub.add_parser("status", help="show the key, the store and the token count")
+    sub.add_parser("prune", help="forget stored values that the current detection rules reject")
     g = sub.add_parser("purge", help="forget tokens older than N days")
     g.add_argument("--days", type=int, required=True)
     return p
@@ -136,6 +138,16 @@ def run(argv: Sequence[str] | None = None, stdin=None, out=None) -> int:
         return _cmd_scan(stdin, out)
     if args.command == "status":
         return _cmd_status(out)
+    if args.command == "prune":
+        from vaultnotes.phi.detect import resolve_kind
+
+        vault = Vault()
+        try:
+            kept, removed = vault.prune(lambda kind, value: resolve_kind(kind, value) == kind)
+            out.write(f"{removed} token(s) removed, {kept} kept\n")
+        finally:
+            vault.close()
+        return 0
     if args.command == "purge":
         vault = Vault()
         try:

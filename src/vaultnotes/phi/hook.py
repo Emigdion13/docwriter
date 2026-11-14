@@ -37,6 +37,9 @@ _REVEAL_RE = re.compile(
     rf"{_SAFE}*phi\.py\s+(?:--{_SAFE}+\s+)*reveal(?:\s+{_SAFE}+)+\s*$"
 )
 
+#: Any attempt to run a reveal, well formed or not.
+_INVOKES_REVEAL = re.compile(r"phi\.py[\"']?\s+(?:--\S+\s+)*reveal\b")
+
 #: Keys whose string values are part of the output's shape, not its content.
 _SHAPE_KEYS = {"type", "filePath", "file_path", "path", "media_type", "mimeType", "encoding"}
 WITHHELD = "[PHI filter failed: output withheld. See %LOCALAPPDATA%\\VaultNotes\\phi\\hook-errors.log]"
@@ -78,8 +81,8 @@ def pre_tool_use(event: dict[str, Any]) -> dict[str, Any] | None:
     if event.get("tool_name") != "Bash":
         return None
     command = (event.get("tool_input") or {}).get("command")
-    if not isinstance(command, str) or "phi.py" not in command or "reveal" not in command:
-        return None
+    if not isinstance(command, str) or not _INVOKES_REVEAL.search(command):
+        return None   # not running "phi.py reveal" (merely mentioning it is fine)
     if not is_reveal_command(command):
         decision, reason = "deny", ("phi.py reveal must run on its own: no pipes, redirects, "
                                     "';' or other commands in the same call.")

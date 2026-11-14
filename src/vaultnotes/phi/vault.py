@@ -206,6 +206,32 @@ class Vault:
             return 0
         return self._conn().execute("SELECT COUNT(*) FROM tokens").fetchone()[0]
 
+    def prune(self, still_valid) -> tuple[int, int]:
+        """Delete stored values that ``still_valid(kind, value)`` rejects.
+
+        For when the detection rules tighten: values stored under old rules
+        (a common word taken for an MRN) stop matching everywhere.  Values are
+        only decrypted in memory here, never returned.  Returns (kept, removed).
+        """
+        if not self.db_path.is_file():
+            return 0, 0
+        self._load_key()
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        aes = AESGCM(self._enc_key)
+        db = self._conn()
+        kept = removed = 0
+        for token, mac, kind, nonce, ct in db.execute(
+                "SELECT token, mac, kind, nonce, ct FROM tokens").fetchall():
+            value = aes.decrypt(nonce, ct, mac.encode("ascii")).decode("utf-8")
+            if still_valid(kind, value):
+                kept += 1
+            else:
+                db.execute("DELETE FROM tokens WHERE token = ?", (token,))
+                removed += 1
+        self._known = None
+        return kept, removed
+
     def purge(self, days: int) -> int:
         if not self.db_path.is_file():
             return 0

@@ -139,13 +139,17 @@ def resolve_kind(kind: str, value: str) -> str | None:
     if kind == "PERSON":
         if re.fullmatch(r"[A-Za-z'.\-]+(?:,?\s+[A-Za-z'.\-]+){1,4}", v):
             return "NAME"
-        if re.fullmatch(r"[A-Za-z0-9\-.]{2,64}", v):
+        if re.fullmatch(r"[A-Za-z0-9\-.]{2,64}", v) and _DATE_SHAPE.search(v):
             return "ID"
         return None
-    if kind in ("DOB", "DATE") and not _DATE_SHAPE.search(v):
-        return None
-    if kind == "NAME" and (not _NAME_SHAPE.search(v) or "://" in v or "\\" in v or len(v) > 100):
-        return None
+    if kind in ("DOB", "DATE", "MRN", "ID") and not _DATE_SHAPE.search(v):
+        return None   # ids and dates have digits; "MRN lookup" is not an MRN
+    if kind == "NAME":
+        first = _NAME_SHAPE.search(v)
+        # Names are capitalised ("Alicia", "EXAMPLAR"); "patientName: the name"
+        # in docs or code must not store "the" as a name.
+        if not first or not first.group(0).isupper() or "://" in v or "\\" in v or len(v) > 100:
+            return None
     if kind == "EMAIL" and "@" not in v:
         return None
     return kind

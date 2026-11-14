@@ -134,7 +134,9 @@ class Redactor:
         for m in _ID_CANDIDATE.finditer(part):
             value = m.group(0).rstrip(".-")
             start, end = m.start(), m.start() + len(value)
-            if len(value) < 4 or any(a < end and start < b for a, b in taken):
+            # Ids carry digits; a plain word is only ever matched as a name.
+            if len(value) < 4 or not any(c.isdigit() for c in value) \
+                    or any(a < end and start < b for a, b in taken):
                 continue
             entry = known.get(self.vault.mac("ID", value))
             # Names are matched by the capitalised-word pass above only: a lower

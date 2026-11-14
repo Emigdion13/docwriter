@@ -273,3 +273,20 @@ def test_purge(vault):
 def test_unrelated_pair_does_not_hide_the_next_one():
     found = values("hook check: patientName=Testy Fakename MRN=ZZ0000001")
     assert ("NAME", "Testy Fakename") in found and ("MRN", "ZZ0000001") in found
+
+
+def test_words_are_not_ids_or_names():
+    assert values("MRN lookup failed. patientName: the name field. patient=abcdefg") == set()
+
+
+def test_prune_drops_values_the_rules_now_reject(vault):
+    good = vault.token_for("MRN", "ZZ0000001")
+    vault.token_for("MRN", "lookup")          # stored by an older, looser rule
+    vault.token_for("NAME", "the")
+    assert vault.prune(lambda k, v: detect.resolve_kind(k, v) == k) == (1, 2)
+    assert vault.reveal(good)[2] == "ZZ0000001"
+
+
+def test_pre_hook_ignores_commands_that_only_mention_reveal(vault):
+    cmd = "python edit.py  # touches phi.py docs and vault.reveal()"
+    assert handle({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": cmd}}) is None
