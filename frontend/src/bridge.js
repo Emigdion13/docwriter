@@ -425,6 +425,16 @@ const mockClaude = {
   denied: new Map() // chat id -> true while a denial is waiting
 };
 let mockClaudeSeq = 0;
+let mockEditorSeq = 0;
+const mockClaudeChoice = {
+  model: 'opus',
+  effort: 'high',
+  models: [
+    { id: 'opus', label: 'Opus 5.5' }, { id: 'sonnet', label: 'Sonnet 5.5' },
+    { id: 'haiku', label: 'Haiku 5.5' }, { id: 'fable', label: 'Fable 5.1' }
+  ],
+  efforts: ['low', 'medium', 'high', 'xhigh', 'max']
+};
 
 function mockClaudePublic() {
   return mockClaude.chats.map(c => ({ ...c }));
@@ -1058,8 +1068,20 @@ export const bridge = {
       enabled: mockClaude.enabled,
       available: true,
       folder: 'C:\\Users\\you\\Desktop\\VaultNotes',
-      chats: mockClaude.enabled ? mockClaudePublic() : []
+      chats: mockClaude.enabled ? mockClaudePublic() : [],
+      choice: { ...mockClaudeChoice }
     };
+  },
+
+  /** The model and effort for the next messages; Python checks both against its lists. */
+  async claude_set_choice(model, effort) {
+    const api = await waitForBridge();
+    if (api?.claude_set_choice) return await api.claude_set_choice(model, effort);
+    if (!mockClaudeChoice.models.some(m => m.id === model) || !mockClaudeChoice.efforts.includes(effort)) {
+      return { error: 'invalid_input', message: 'Pick a model and effort from the list.' };
+    }
+    Object.assign(mockClaudeChoice, { model, effort });
+    return { ok: true, choice: { ...mockClaudeChoice } };
   },
 
   /** Python asks in a native Windows dialog before Claude is allowed. */
@@ -1123,6 +1145,39 @@ export const bridge = {
     if (api?.claude_forget) return await api.claude_forget(chat_id);
     mockClaude.chats = mockClaude.chats.filter(c => c.id !== chat_id);
     return { ok: true, chats: mockClaudePublic() };
+  },
+
+  /* ---- The Editor space.  Python opens and saves files through native
+     dialogs and hands back an opaque id per file; the page never sends a
+     path.  Unsaved text stays here, in memory. ---- */
+  async editor_open() {
+    const api = await waitForBridge();
+    if (api?.editor_open) return await api.editor_open();
+    const id = `mockfile${++mockEditorSeq}`.padEnd(32, '0');
+    return {
+      ok: true, failed: [],
+      files: [{ id, name: 'example.json', path: 'C:\\Users\\you\\example.json', encoding: 'utf-8', eol: 'CRLF',
+        text: '{\n  "name": "VaultNotes",\n  "spaces": ["Plain", "AI-Notes"],\n  "editor": true\n}\n' }]
+    };
+  },
+
+  async editor_save(file_id, text, eol, encoding) {
+    const api = await waitForBridge();
+    if (api?.editor_save) return await api.editor_save(file_id, text, eol, encoding);
+    return { ok: true, file: { id: file_id, name: 'example.json', path: 'C:\\Users\\you\\example.json', encoding, eol } };
+  },
+
+  async editor_save_as(file_id, text, eol, encoding, name) {
+    const api = await waitForBridge();
+    if (api?.editor_save_as) return await api.editor_save_as(file_id, text, eol, encoding, name);
+    const id = file_id || `mockfile${++mockEditorSeq}`.padEnd(32, '0');
+    return { ok: true, file: { id, name: name || 'new.txt', path: `C:\\Users\\you\\${name || 'new.txt'}`, encoding, eol } };
+  },
+
+  async editor_close(file_id) {
+    const api = await waitForBridge();
+    if (api?.editor_close) return await api.editor_close(file_id);
+    return { ok: true };
   },
 
   /** A reply's Markdown as HTML (no note links, no embeds); the page sanitizes it. */

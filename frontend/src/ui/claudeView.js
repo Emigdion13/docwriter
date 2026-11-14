@@ -45,6 +45,10 @@ export function createClaudeView({ onStateChanged, notify }) {
     <div class="term-head">
       <div class="crumb"><span class="crumb-dot"></span><span>Claude</span><span class="sep">/</span><span id="cl-where">New chat</span></div>
       <div class="term-actions">
+        <div class="cl-pick" id="cl-pick" hidden>
+          <select id="cl-model" aria-label="Model" title="Model for the next message"></select>
+          <select id="cl-effort" aria-label="Effort" title="Effort for the next message"></select>
+        </div>
         <span class="cl-vertex" id="cl-vertex" hidden></span>
         <span class="meta" id="cl-status"></span>
         <button class="btn icon" id="cl-new-chat" type="button" aria-label="New chat" title="New chat (Ctrl+Shift+T)">
@@ -101,8 +105,11 @@ export function createClaudeView({ onStateChanged, notify }) {
   const statusEl = root.querySelector('#cl-status');
   const footEl = root.querySelector('#cl-foot');
   const vertexEl = root.querySelector('#cl-vertex');
+  const pickEl = root.querySelector('#cl-pick');
+  const modelSel = root.querySelector('#cl-model');
+  const effortSel = root.querySelector('#cl-effort');
 
-  let info = { enabled: false, available: true, folder: '', chats: [], vertex: null };
+  let info = { enabled: false, available: true, folder: '', chats: [], vertex: null, choice: null };
   let visible = false;
 
   /* A thread is one chat: { key, id, title, el, inner, running, loaded, stick, scrollTop,
@@ -140,6 +147,7 @@ export function createClaudeView({ onStateChanged, notify }) {
     input.disabled = !info.enabled;
     footEl.textContent = info.enabled && info.folder ? `Runs in ${info.folder} · the Encrypted vault is kept out` : '';
     paintVertex();
+    paintChoice();
     updateJump();
     onStateChanged?.(publicState());
   }
@@ -155,6 +163,44 @@ export function createClaudeView({ onStateChanged, notify }) {
     vertexEl.title = typeof v?.reason === 'string' ? v.reason : 'Vertex status unknown: no PHI';
     vertexEl.setAttribute('aria-label', vertexEl.title);
   }
+
+  /* The model and effort dropdowns.  Python sends the options and checks
+     what comes back; the options are rebuilt only when the list changes. */
+  function fillSelect(select, options, value) {
+    const key = JSON.stringify(options);
+    if (select.dataset.key !== key) {
+      select.replaceChildren(...options.map(o => {
+        const opt = document.createElement('option');
+        opt.value = o.id;
+        opt.textContent = o.label;
+        return opt;
+      }));
+      select.dataset.key = key;
+    }
+    if (document.activeElement !== select) select.value = value;
+  }
+
+  function paintChoice() {
+    const c = info.choice;
+    pickEl.hidden = !info.enabled || !c;
+    if (pickEl.hidden) return;
+    fillSelect(modelSel, c.models, c.model);
+    fillSelect(effortSel, c.efforts.map(e => ({ id: e, label: `${e} effort` })), c.effort);
+    const model = c.models.find(m => m.id === c.model)?.label || c.model;
+    pickEl.title = `Using ${model} at ${c.effort} effort. Changes apply from the next message.`;
+  }
+
+  async function changeChoice() {
+    const res = await bridge.claude_set_choice(modelSel.value, effortSel.value);
+    if (res?.error) notify?.(res.message || 'That model or effort could not be picked.');
+    else info.choice = res.choice; // on an error the old pick is painted back
+    modelSel.blur();
+    effortSel.blur();
+    paintChoice();
+  }
+
+  modelSel.addEventListener('change', changeChoice);
+  effortSel.addEventListener('change', changeChoice);
 
   function setStatus(thread, text) {
     thread.status = text;
@@ -605,6 +651,16 @@ export function createClaudeView({ onStateChanged, notify }) {
       if (res.error === 'not_found') thread.id = null;
       paint();
       return false;
+    }
+    if (res.terminal) {
+      // A command that needs Claude Code's own screen (/mcp, /login...): Python
+      // opened it in a terminal window, and this chat has no reply coming.
+      thread.running = false;
+      setStatus(thread, '');
+      addNote(thread, `Opened ${res.terminal} in a terminal window. Finish there and close it; ` +
+        'new chats pick up what you changed.');
+      paint();
+      return true;
     }
     thread.title = res.chat.title || thread.title;
     if (!thread.id) {

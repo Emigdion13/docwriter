@@ -60,6 +60,7 @@ from vaultnotes.frontmatter import is_important, set_important, set_tags
 from vaultnotes.links import LinkIndex, count_links, rename_links
 from vaultnotes.models import Note
 from vaultnotes.claude_chat import ClaudeError, ClaudeManager
+from vaultnotes.text_editor import TEXT_FILE_TYPES, EditorError, EditorFiles
 from vaultnotes.render import render_markdown, render_preview, toggle_task
 from vaultnotes.tags import (
     MAX_TAGS_PER_NOTE,
@@ -188,7 +189,7 @@ def bridge_method(method: Callable[..., Any]) -> Callable[..., Any]:
     def guarded(self: "Api", *args: Any, **kwargs: Any) -> Any:
         try:
             return method(self, *args, **kwargs)
-        except (BridgeError, TerminalError, SqlError, ClaudeError) as exc:
+        except (BridgeError, TerminalError, SqlError, ClaudeError, EditorError) as exc:
             return _error(exc.code, exc.message)
         except VaultLockedError as exc:
             return _error("locked", str(exc) or "Vault is locked")
@@ -304,6 +305,10 @@ class Api:
             on_change=self._claude_chats_changed,
         )
         self.claude.load(self._claude_settings().get("chats"))
+        self.claude.load_choice(self._claude_settings())
+
+        #: The Editor space's open files, by opaque id; unsaved text stays in the page.
+        self.editor_files = EditorFiles()
 
         #: The SQL space.  ``sql.db`` (saved connections) sits in
         #: ``%LOCALAPPDATA%\\VaultNotes``, never in the notes folder; passwords
@@ -2738,7 +2743,15 @@ class Api:
             "folder": str(self.config.notes_root),
             "chats": self.claude.chats() if enabled else [],
             "vertex": self._vertex_status(),
+            "choice": self.claude.choice(),
         }
+
+    @bridge_method
+    def claude_set_choice(self, model: str, effort: str) -> dict[str, Any]:
+        """Pick the model and effort for the next messages; kept in settings.json."""
+        self.claude.set_choice(model, effort)
+        self._save_claude(model=self.claude.model, effort=self.claude.effort)
+        return {"ok": True, "choice": self.claude.choice()}
 
     def _vertex_status(self) -> dict[str, Any]:
         """Whether a Claude-space chat may put PHI in AI-Notes.
@@ -2824,6 +2837,82 @@ class Api:
         """Take a chat off the list (Claude Code's own history file is left alone)."""
         self.claude.forget(chat_id)
         return {"ok": True, "chats": self.claude.chats()}
+
+    # ------------------------------------------------------------------
+    # The Editor space: text files in tabs (see vaultnotes.text_editor)
+    # ------------------------------------------------------------------
+    def _editor_blocked(self) -> list[Path]:
+        """Folders the editor keeps out of: every vault, and AI-Notes (ciphertext and keys)."""
+        root = self.config.notes_root
+        blocked = [root / "vaults", self.config.ai_dir]
+        for vault in self.config.data.get("vaults") or []:
+            name = vault.get("name") if isinstance(vault, dict) else None
+            if isinstance(name, str):
+                try:
+                    blocked.append(self.config.vault_dir(name))
+                except (KeyError, ValueError):
+                    pass
+        return [Path(p).resolve() for p in blocked]
+
+    def _editor_pick_open(self) -> list[Path]:
+        """Files picked in the native Open dialog (tests replace this)."""
+        if self.window is None:
+            return []
+        selected = self._file_dialog("OPEN", allow_multiple=True, file_types=TEXT_FILE_TYPES)
+        if not selected:
+            return []
+        if isinstance(selected, (str, Path)):
+            selected = [selected]
+        return [Path(str(each)).expanduser() for each in selected]
+
+    def _editor_pick_save(self, suggested_name: str) -> Path | None:
+        """A path picked in the native Save dialog (tests replace this)."""
+        if self.window is None:
+            return None
+        selected = self._file_dialog(
+            "SAVE", allow_multiple=False, file_types=TEXT_FILE_TYPES, save_filename=suggested_name
+        )
+        if isinstance(selected, (list, tuple)):
+            selected = selected[0] if selected else None
+        return Path(str(selected)).expanduser() if selected else None
+
+    @bridge_method
+    def editor_open(self) -> dict[str, Any]:
+        """Open text files picked in the native dialog. A file that cannot open is listed in ``failed``."""
+        files, failed = [], []
+        blocked = self._editor_blocked()
+        for path in self._editor_pick_open()[:20]:
+            try:
+                files.append(self.editor_files.open(path, blocked))
+            except EditorError as exc:
+                failed.append({"name": path.name, "message": exc.message})
+        if not files and not failed:
+            return _error("cancelled", "No file was opened.")
+        return {"ok": True, "files": files, "failed": failed}
+
+    @bridge_method
+    def editor_save(self, file_id: str, text: str, eol: str, encoding: str) -> dict[str, Any]:
+        """Save a tab back to its own file."""
+        return {"ok": True, "file": self.editor_files.save(file_id, text, eol, encoding, self._editor_blocked())}
+
+    @bridge_method
+    def editor_save_as(self, file_id: str | None, text: str, eol: str, encoding: str, name: str) -> dict[str, Any]:
+        """Save a tab to a file picked in the native Save dialog."""
+        if not isinstance(text, str):
+            raise EditorError("invalid_input", "There is no text to save.")
+        suggested = name if isinstance(name, str) and name.strip() else "new.txt"
+        suggested = "".join(ch for ch in suggested if ch.isprintable() and ch not in '<>:"/\\|?*')[:120] or "new.txt"
+        path = self._editor_pick_save(suggested)
+        if path is None:
+            return _error("cancelled", "Nothing was saved.")
+        saved = self.editor_files.save_as(path, text, eol, encoding, self._editor_blocked(), old_id=file_id)
+        return {"ok": True, "file": saved}
+
+    @bridge_method
+    def editor_close(self, file_id: str) -> dict[str, bool]:
+        """Forget an open file (the tab was closed)."""
+        self.editor_files.close(file_id)
+        return {"ok": True}
 
     # ------------------------------------------------------------------
     # The SQL space: saved connections and query tabs

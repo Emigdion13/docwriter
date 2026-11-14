@@ -1,0 +1,140 @@
+/* =================================================================
+   EDITOR SPACE  (frontend/src/styles/editor.css)
+   Text files in tabs, like Notepad++.  No list column: the editor takes
+   the note list's column too.  Tabs and the header reuse the CMD/SQL
+   classes (.term-head, .term-tabs, .term-tab).
+   ================================================================= */
+
+.ws-editor {
+  display: none;
+}
+
+.app.editor-mode > .notelist {
+  display: none;
+}
+
+.app.editor-mode .workspace {
+  grid-column: 2 / 4;
+}
+
+.app.editor-mode .workspace > :not(.ws-editor) {
+  display: none;
+}
+
+.app.editor-mode .ws-editor {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.ed-actions {
+  gap: 6px;
+}
+
+.ed-select {
+  height: 32px;
+  padding: 0 26px 0 10px;
+  border-radius: var(--r-btn);
+  border: 1px solid var(--glass-border);
+  background:
+    linear-gradient(45deg, transparent 50%, currentColor 50%) right 14px center / 4px 4px no-repeat,
+    linear-gradient(135deg, currentColor 50%, transparent 50%) right 10px center / 4px 4px no-repeat,
+    var(--glass);
+  color: var(--text);
+  font: 500 12px/1 var(--font-ui);
+  appearance: none;
+  cursor: pointer;
+}
+
+.ed-select:hover,
+.ed-select:focus-visible,
+.ed-mini:hover,
+.ed-mini:focus-visible {
+  border-color: var(--editor);
+  outline: none;
+}
+
+.ed-select option,
+.ed-mini option {
+  color: var(--text);
+  background: var(--bg); /* solid: a native list ignores see-through colours */
+}
+
+.ed-toggle[aria-pressed="true"] {
+  color: var(--editor);
+  border-color: color-mix(in srgb, var(--editor) 50%, transparent);
+  background: color-mix(in srgb, var(--editor) 12%, transparent);
+}
+
+.ws-editor .term-tab.dirty .term-tab-pick svg {
+  color: var(--warning);
+  opacity: 1;
+}
+
+/* One CodeMirror per tab; only the open one shows. */
+.ed-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  background: color-mix(in srgb, var(--code-bg) 70%, transparent);
+}
+
+.ed-pane {
+  position: absolute;
+  inset: 0;
+  display: none;
+}
+
+.ed-pane.on {
+  display: block;
+}
+
+.ed-pane .cm-editor {
+  height: 100%;
+}
+
+.ed-pane .cm-editor.cm-focused {
+  outline: none;
+}
+
+/* Notepad++'s status bar: position, selection, size, line endings, encoding, zoom. */
+.ed-status {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 30px;
+  padding: 3px 14px 3px 22px;
+  border-top: 1px solid var(--glass-border);
+  border-radius: 0 0 var(--r-panel) var(--r-panel);
+  background: color-mix(in srgb, var(--code-bg) 70%, transparent);
+  font: 500 11px/1 var(--font-mono);
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.ed-status #ed-pos {
+  color: var(--text);
+}
+
+.ed-status .ed-grow {
+  flex: 1;
+}
+
+.ed-mini {
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.ed-mini:hover {
+  color: var(--text);
+  background: var(--glass);
+}

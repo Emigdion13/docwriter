@@ -544,6 +544,43 @@ pre:hover > .cl-copy,
   border-color: color-mix(in srgb, var(--success) 40%, transparent);
 }
 
+/* Header dropdowns: the model and effort the next message runs with. */
+.cl-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.cl-pick[hidden] {
+  display: none;
+}
+
+.cl-pick select {
+  appearance: none;
+  max-width: 120px;
+  padding: 3px 20px 3px 8px;
+  border-radius: 999px;
+  font: 500 11px/1.2 var(--font-mono);
+  color: var(--text);
+  background:
+    linear-gradient(45deg, transparent 50%, currentColor 50%) right 10px center / 4px 4px no-repeat,
+    linear-gradient(135deg, currentColor 50%, transparent 50%) right 6px center / 4px 4px no-repeat,
+    var(--glass);
+  border: 1px solid var(--glass-border);
+  cursor: pointer;
+}
+
+.cl-pick select:hover,
+.cl-pick select:focus-visible {
+  border-color: var(--claude);
+  outline: none;
+}
+
+.cl-pick option {
+  color: var(--text);
+  background: var(--bg); /* solid: a native list ignores see-through colours */
+}
+
 /* ---- Off ---- */
 .ws-claude .cl-off {
   display: none;

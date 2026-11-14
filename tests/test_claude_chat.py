@@ -24,11 +24,13 @@ from vaultnotes.claude_chat import (
     Translator,
     allow_rule,
     build_args,
+    build_terminal_args,
     clean_title,
     deny_rules,
     history_path,
     read_history,
     summarize_tool,
+    terminal_command,
 )
 from vaultnotes.config import Config
 from vaultnotes.storage.ai_store import UnavailableAIStore
@@ -402,6 +404,58 @@ def test_unknown_chats_and_missing_claude(tmp_path: Path) -> None:
     assert exc.value.code == "no_claude" and h.manager.available() is False
 
 
+@pytest.mark.parametrize("text", ["/mcp", "  /login  ", "/permissions", "/model opus"])
+def test_terminal_commands_are_recognised(text: str) -> None:
+    assert terminal_command(text) == text.strip()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [None, 5, "", "/review-pr 123", "/code-review", "mcp", "please run /mcp", "/MCP", "/mcp\n/login",
+     "/mcp \x07", "/" + "m" * 50, "/model " + "x" * 400],
+)
+def test_other_text_is_not_a_terminal_command(text: Any) -> None:
+    assert terminal_command(text) is None
+
+
+def test_build_terminal_args_keeps_the_vault_denied_and_ends_options() -> None:
+    argv = build_terminal_args("claude", command="/mcp", denied=["Read(x/**)"], prompt="P")
+    assert argv[0] == "claude" and "-p" not in argv and "--resume" not in argv
+    assert argv[argv.index("--disallowedTools") + 1] == "Read(x/**)"
+    assert argv[-2:] == ["--", "/mcp"]  # the variadic deny list cannot swallow the command
+
+
+def test_a_terminal_command_opens_a_window_not_a_reply(tmp_path: Path) -> None:
+    h = Harness(tmp_path, [])
+    opened: list[tuple[list[str], str]] = []
+    h.manager._console = lambda argv, cwd, env: opened.append((argv, cwd))
+    res = h.send(None, "/mcp", wait=False)
+    assert res == {"terminal": "/mcp"}
+    assert h.spawned == [] and h.manager.chats() == [] and h.changes == 0
+    argv, cwd = opened[0]
+    assert cwd == str(h.root) and argv[-1] == "/mcp"
+    assert any(str(h.encrypted.as_posix()) in a for a in argv)  # still denied in the window
+
+
+def test_a_terminal_that_cannot_open_says_so(tmp_path: Path) -> None:
+    h = Harness(tmp_path, [])
+
+    def boom(argv: list[str], cwd: str, env: dict[str, str]) -> None:
+        raise OSError("no console")
+
+    h.manager._console = boom
+    with pytest.raises(ClaudeError) as exc:
+        h.send(None, "/login", wait=False)
+    assert exc.value.code == "start_failed" and "/login" in exc.value.message
+
+
+def test_skills_still_go_to_claude(tmp_path: Path) -> None:
+    h = Harness(tmp_path, [reply(result())])
+    h.manager._console = lambda *a: pytest.fail("a skill must not open a terminal")
+    h.send(None, "/review-pr 123")
+    assert h.spawned[0][2].stdin.data == b"/review-pr 123"
+
+
 def test_only_a_few_replies_run_at_once(tmp_path: Path) -> None:
     h = Harness(tmp_path, [reply(hold=True) for _ in range(5)])
     ids = [h.send(None, f"chat {i}", wait=False)["chat"]["id"] for i in range(4)]
@@ -642,6 +696,44 @@ def test_a_restart_brings_the_list_back(tmp_path: Path) -> None:
     assert eventually(lambda: saved(tmp_path)["chats"])
     again = make_api(tmp_path, FakeWindow())
     assert [c["id"] for c in again.claude.chats()] == [chat_id]
+
+
+def test_build_args_passes_only_listed_model_and_effort() -> None:
+    argv = build_args("claude", session_id=None, allowed=[], denied=[], prompt="p", model="sonnet", effort="max")
+    assert argv[argv.index("--model") + 1] == "sonnet" and argv[argv.index("--effort") + 1] == "max"
+    odd = build_args("claude", session_id=None, allowed=[], denied=[], prompt="p", model="--evil", effort="huge")
+    assert "--model" not in odd and "--effort" not in odd
+    term = build_terminal_args("claude", command="/mcp", denied=[], prompt="p", model="haiku", effort="low")
+    assert term[term.index("--model") + 1] == "haiku" and term[-2:] == ["--", "/mcp"]
+
+
+def test_the_picked_model_and_effort_reach_the_command_and_survive_a_restart(tmp_path: Path) -> None:
+    api = make_api(tmp_path, FakeWindow())
+    h = Harness(tmp_path, [reply(delta("ok"), result())])
+    api.claude = ClaudeManager(h._emit, api._claude_chats_changed, spawn=h._spawn, find=lambda: "claude")
+    api.claude_enable()
+    choice = api.claude_state()["choice"]
+    assert (choice["model"], choice["effort"]) == ("opus", "high")
+    assert [m["id"] for m in choice["models"]] == ["opus", "sonnet", "haiku", "fable"]
+    assert api.claude_set_choice("sonnet", "xhigh")["choice"]["model"] == "sonnet"
+    assert api.claude_set_choice("gpt", "high")["error"] == "invalid_input"
+    assert api.claude_set_choice("haiku", "--x")["error"] == "invalid_input"
+    assert (api.claude.model, api.claude.effort) == ("sonnet", "xhigh")
+    api.claude_send(None, "Hello")
+    h.wait()
+    argv = h.spawned[0][0]
+    assert argv[argv.index("--model") + 1] == "sonnet" and argv[argv.index("--effort") + 1] == "xhigh"
+    assert (saved(tmp_path)["model"], saved(tmp_path)["effort"]) == ("sonnet", "xhigh")
+    again = make_api(tmp_path, FakeWindow())
+    assert (again.claude.model, again.claude.effort) == ("sonnet", "xhigh")
+
+
+def test_a_damaged_saved_pick_falls_back_to_the_defaults(tmp_path: Path) -> None:
+    manager = ClaudeManager(lambda *_: None)
+    manager.load_choice({"model": "nope", "effort": "high"})
+    assert (manager.model, manager.effort) == ("opus", "high")
+    manager.load_choice("junk")
+    assert (manager.model, manager.effort) == ("opus", "high")
 
 
 def test_a_reply_can_not_pull_notes_in_through_links(tmp_path: Path) -> None:

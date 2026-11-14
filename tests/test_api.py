@@ -621,7 +621,13 @@ BRIDGE_SURFACE = [
     "claude_allow",
     "claude_history",
     "claude_forget",
+    "claude_set_choice",
     "render_chat",
+    # Extra: the Editor space (tests/test_text_editor.py covers what they do).
+    "editor_open",
+    "editor_save",
+    "editor_save_as",
+    "editor_close",
 ]
 
 

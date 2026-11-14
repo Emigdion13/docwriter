@@ -10,6 +10,7 @@ import './styles/base.css';
 import './styles/components.css';
 import './styles/preview.css';
 import './styles/claude.css';
+import './styles/editor.css';
 
 // Bridge & Services
 import { bridge, events } from './bridge.js';
@@ -50,6 +51,7 @@ import { createSettingsOverlay } from './ui/settings.js';
 import { createGraphOverlay } from './ui/graphView.js';
 import { createTerminal } from './ui/terminal.js';
 import { createCommandList } from './ui/commandList.js';
+import { createTextEditor } from './ui/textEditor.js';
 import { createClaudeView } from './ui/claudeView.js';
 import { createClaudeList } from './ui/claudeList.js';
 import { createSqlView } from './ui/sqlView.js';
@@ -94,6 +96,7 @@ const state = {
   claudeMode: false,    // the Claude space (a chat with Claude Code) is showing
   sqlMode: false,       // the SQL space is showing instead of a note space
   vtMode: false,        // the SQL - VT space (virtual tables) is showing
+  textMode: false,      // the Editor space (text files in tabs) is showing
   theme: 'nebula',
   effects: 'full',
   editorFontSize: 13.5,
@@ -137,6 +140,7 @@ let graphOverlay = null;
 let moveDialog = null;
 let tagBox = null;
 let terminalView = null;
+let textEditor = null;
 let claudeView = null;
 let claudeList = null;
 let commandList = null;
@@ -574,6 +578,7 @@ async function enterClaudeMode() {
   leaveTerminalMode();
   leaveSqlMode();
   leaveVtMode();
+  leaveTextMode();
   if (!state.claudeMode) {
     state.claudeMode = true;
     document.getElementById('app')?.classList.add('claude-mode');
@@ -629,6 +634,7 @@ async function enterTerminalMode() {
   leaveClaudeMode();
   leaveSqlMode();
   leaveVtMode();
+  leaveTextMode();
   if (!state.terminalMode) {
     state.terminalMode = true;
     document.getElementById('app')?.classList.add('terminal-mode');
@@ -677,6 +683,44 @@ async function disableTerminal() {
 }
 
 /* =================================================================
+   The Editor space: text files in tabs, like Notepad++.  Like CMD it is
+   not one of state.spaces, so nothing built for notes sees it.  It needs
+   no turning on: files only open through a native dialog.
+   ================================================================= */
+
+function editorEntrySub(s = textEditor?.getState()) {
+  if (!s || !s.tabs) return 'Text files';
+  if (s.unsaved) return `${s.unsaved} unsaved`;
+  return `${s.tabs} tab${s.tabs === 1 ? '' : 's'}`;
+}
+
+async function enterTextMode() {
+  if (!(await flushSave())) return;
+  leaveTerminalMode();
+  leaveClaudeMode();
+  leaveSqlMode();
+  leaveVtMode();
+  if (!state.textMode) {
+    state.textMode = true;
+    document.getElementById('app')?.classList.add('editor-mode');
+    setAccentColor('--editor');
+    setToolEntry('editor', { active: true });
+    const ws = document.getElementById('workspace');
+    if (ws) replay(ws, 'swap');
+  }
+  textEditor.show();
+}
+
+function leaveTextMode() {
+  if (!state.textMode) return;
+  state.textMode = false;
+  textEditor.hide();
+  document.getElementById('app')?.classList.remove('editor-mode');
+  setToolEntry('editor', { active: false });
+  setAccentColor(getActiveSpace()?.colorVar || '--accent');
+}
+
+/* =================================================================
    The SQL space: query tabs on saved connections instead of notes.  Like
    CMD it is not one of state.spaces, so nothing built for notes sees it.
    ================================================================= */
@@ -694,6 +738,7 @@ async function enterSqlMode() {
   leaveTerminalMode();
   leaveClaudeMode();
   leaveVtMode();
+  leaveTextMode();
   if (!state.sqlMode) {
     state.sqlMode = true;
     document.getElementById('app')?.classList.add('sql-mode');
@@ -764,6 +809,7 @@ async function enterVtMode() {
   leaveTerminalMode();
   leaveClaudeMode();
   leaveSqlMode();
+  leaveTextMode();
   if (!state.vtMode) {
     state.vtMode = true;
     document.getElementById('app')?.classList.add('vt-mode');
@@ -901,6 +947,7 @@ async function selectSpace(spaceId, targetNoteId = null, animate = true) {
   leaveClaudeMode();
   leaveSqlMode();
   leaveVtMode();
+  leaveTextMode();
   const prevSpaceId = state.currentSpaceId;
   state.currentSpaceId = spaceId;
   state.trashMode = false;
@@ -948,6 +995,7 @@ async function openNote(noteId) {
   leaveClaudeMode();
   leaveSqlMode();
   leaveVtMode();
+  leaveTextMode();
   state.trashMode = false;
   state.currentNoteId = noteId;
   const space = getActiveSpace();
@@ -2011,16 +2059,21 @@ async function saveBackupSettings(changes) {
 
 async function getPaletteCommands() {
   const space = getActiveSpace();
-  const hasOpenNote = !!state.currentNote && !space?.locked && !state.trashMode && !state.terminalMode && !state.claudeMode && !state.sqlMode && !state.vtMode;
+  const hasOpenNote = !!state.currentNote && !space?.locked && !state.trashMode && !state.terminalMode && !state.claudeMode && !state.sqlMode && !state.vtMode && !state.textMode;
   const cl = claudeView?.getState() || { enabled: false, available: true, chats: [], running: 0 };
   const vq = vtView?.getState() || { enabled: false, tables: [], active: null };
   const term = terminalView?.getState() || { enabled: false, shells: [], favorites: [] };
   const sq = sqlView?.getState() || { enabled: false, connections: [], tabs: 0, active: null };
   const commands = [
     { label: 'New note', hint: 'Ctrl N', icon: 'plus', run: () => createNote() },
-    (state.terminalMode || state.claudeMode || state.sqlMode || state.vtMode)
+    (state.terminalMode || state.claudeMode || state.sqlMode || state.vtMode || state.textMode)
       ? { label: `Back to ${space?.name || 'notes'}`, icon: spaceIcon(space), colorVar: space?.colorVar, run: () => selectSpace(state.currentSpaceId) }
       : { label: 'Open CMD', sub: term.enabled ? term.shellName : 'off until you turn it on', icon: 'terminal', colorVar: '--cmd', run: () => enterTerminalMode() },
+    ...(!state.textMode ? [
+      { label: 'Open Editor', sub: editorEntrySub(), icon: 'edit', colorVar: '--editor', run: () => enterTextMode() }
+    ] : []),
+    { label: 'Editor: New tab', hint: state.textMode ? 'Ctrl N' : undefined, icon: 'plus', colorVar: '--editor', run: async () => { await enterTextMode(); textEditor.newTab(); } },
+    { label: 'Editor: Open file…', hint: state.textMode ? 'Ctrl O' : undefined, icon: 'folder', colorVar: '--editor', run: async () => { await enterTextMode(); await textEditor.open(); } },
     ...(!state.claudeMode ? [
       { label: 'Open Claude', sub: cl.enabled ? claudeEntrySub(cl) : 'off until you turn it on', icon: 'sparkle', colorVar: '--claude', run: () => enterClaudeMode() }
     ] : []),
@@ -2331,8 +2384,17 @@ function setupShortcuts() {
       else sqlView.save();
       return;
     }
+    // In the Editor space Ctrl+S/O/N/W/F/G/Tab and zoom are the editor's; the
+    // palette, Lock all and the panels toggle stay global.
+    if (state.textMode && !(mod && (key === 'k' || key === 'l' || e.key === '\\'))) {
+      if (textEditor.handleKey(e)) {
+        e.preventDefault();
+        return;
+      }
+      if (e.target?.closest?.('.ws-editor')) return;
+    }
     // Keys about the open note do nothing while the CMD or SQL space shows.
-    if ((state.terminalMode || state.claudeMode || state.sqlMode || state.vtMode) && mod && ['n', 'd', 's', 'e'].includes(key)) {
+    if ((state.terminalMode || state.claudeMode || state.sqlMode || state.vtMode || state.textMode) && mod && ['n', 'd', 's', 'e'].includes(key)) {
       e.preventDefault();
       return;
     }
@@ -2559,6 +2621,7 @@ async function init() {
   const sidebarContainer = document.getElementById('sidebar');
   const sidebarEl = createSidebar({
     onSelectSpace: (id) => (id === 'cmd' ? enterTerminalMode()
+      : id === 'editor' ? enterTextMode()
       : id === 'claude' ? enterClaudeMode()
         : id === 'sql' ? enterSqlMode()
           : id === 'vt' ? enterVtMode()
@@ -2633,6 +2696,13 @@ async function init() {
   });
   document.getElementById('workspace')?.appendChild(terminalView.element);
   await terminalView.refresh();
+
+  // The Editor space: no list column (CSS gives it the note list's width too).
+  textEditor = createTextEditor({
+    onStateChanged: (s) => setToolEntry('editor', { sub: editorEntrySub(s) }),
+    notify: (message) => toast(message, { icon: 'edit' })
+  });
+  document.getElementById('workspace')?.appendChild(textEditor.element);
 
   // The Claude space: its chats share the note list's column, and the chat
   // sits in the workspace; CSS shows them only in Claude mode.

@@ -62,6 +62,33 @@ EDIT_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
 #: Tools that run a command line.
 SHELL_TOOLS = frozenset({"PowerShell", "Bash"})
 
+#: Slash commands that need Claude Code's own screen (a menu, a dialog or a
+#: browser sign-in) and so do nothing useful under ``claude -p``.  Sending one
+#: opens a terminal window running ``claude`` with that command instead.  Any
+#: other slash command (a skill, ``/code-review``...) goes to ``claude -p`` as
+#: an ordinary message, which already runs it.
+TERMINAL_COMMANDS = frozenset({
+    "mcp", "login", "logout", "config", "settings", "permissions", "allowed-tools", "model",
+    "resume", "agents", "hooks", "memory", "doctor", "status", "plugin", "plugins", "ide",
+    "theme", "vim", "keybindings", "terminal-setup", "privacy-settings", "upgrade", "fast",
+})
+#: Models the page may pick, as ``--model`` aliases (they work on Vertex too),
+#: with the name shown in the dropdown.
+MODELS: tuple[tuple[str, str], ...] = (
+    ("opus", "Opus 5.5"),
+    ("sonnet", "Sonnet 5.5"),
+    ("haiku", "Haiku 5.5"),
+    ("fable", "Fable 5.1"),
+)
+#: ``--effort`` levels, lowest first.
+EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+DEFAULT_MODEL = "opus"
+DEFAULT_EFFORT = "high"
+
+#: ``/name`` then, optionally, arguments on the same line.
+SLASH_RE = re.compile(r"^/([a-z][a-z0-9_-]{0,40})(?:\s+(.*))?$")
+MAX_TERMINAL_COMMAND_LENGTH = 300
+
 Emit = Callable[[str, Any], None]
 Spawn = Callable[[list[str], str, dict[str, str]], Any]
 
@@ -127,6 +154,8 @@ def build_args(
     allowed: Iterable[str],
     denied: Iterable[str],
     prompt: str,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> list[str]:
     """The whole command line. The message itself goes in on stdin, not here."""
     argv = [
@@ -138,6 +167,7 @@ def build_args(
         "--permission-mode", "default",
         "--append-system-prompt", prompt,
     ]
+    argv += _choice_args(model, effort)
     if session_id:
         argv += ["--resume", session_id]
     allowed = sorted(set(allowed))
@@ -147,6 +177,57 @@ def build_args(
     if denied:
         argv += ["--disallowedTools", *denied]
     return argv
+
+
+def clean_choice(model: Any, effort: Any) -> tuple[str, str]:
+    """``(model, effort)`` when both are on the lists, else :class:`ClaudeError`."""
+    if model not in {value for value, _ in MODELS}:
+        raise ClaudeError("invalid_input", "Pick a model from the list.")
+    if effort not in EFFORTS:
+        raise ClaudeError("invalid_input", "Pick an effort level from the list.")
+    return model, effort
+
+
+def _choice_args(model: str | None, effort: str | None) -> list[str]:
+    """``--model`` / ``--effort``, only for values on the lists."""
+    argv: list[str] = []
+    if model in {value for value, _ in MODELS}:
+        argv += ["--model", model]
+    if effort in EFFORTS:
+        argv += ["--effort", effort]
+    return argv
+
+
+def terminal_command(text: Any) -> str | None:
+    """The command line when ``text`` is a slash command that needs a terminal, else None."""
+    if not isinstance(text, str):
+        return None
+    text = text.strip()
+    match = SLASH_RE.match(text)
+    if not match or match.group(1) not in TERMINAL_COMMANDS:
+        return None
+    if len(text) > MAX_TERMINAL_COMMAND_LENGTH or not text.isprintable():
+        return None  # one short line; a newline or control character is not a command
+    return text
+
+
+def build_terminal_args(
+    exe: str, *, command: str, denied: Iterable[str], prompt: str,
+    model: str | None = None, effort: str | None = None,
+) -> list[str]:
+    """``claude`` on its own screen, starting with ``command``.
+
+    The same Encrypted-vault deny rules and app prompt as a chat turn.  No
+    ``--resume``: a second process writing to a running chat's session would
+    split its history, and these commands do not need the conversation.
+    """
+    argv = [exe, "--permission-mode", "default", "--append-system-prompt", prompt]
+    argv += _choice_args(model, effort)
+    denied = list(denied)
+    if denied:
+        argv += ["--disallowedTools", *denied]
+    # "--" so the command can never be read as an option.
+    return argv + ["--", command]
 
 
 # ----------------------------------------------------------------------
@@ -524,6 +605,13 @@ def _popen(argv: list[str], cwd: str, env: dict[str, str]) -> Any:
     )
 
 
+def _open_console(argv: list[str], cwd: str, env: dict[str, str]) -> Any:
+    """Start ``argv`` in a new console window the user types in; the app does not read it."""
+    if sys.platform != "win32":
+        raise OSError("A terminal window can only be opened on Windows.")
+    return subprocess.Popen(argv, cwd=cwd, env=env, creationflags=subprocess.CREATE_NEW_CONSOLE)
+
+
 def _kill_tree(process: Any) -> None:
     """End Claude Code and anything it started (a command it was running)."""
     if sys.platform == "win32":
@@ -549,10 +637,12 @@ class ClaudeManager:
         spawn: Spawn | None = None,
         find: Callable[[], str | None] | None = None,
         kill: Callable[[Any], None] | None = None,
+        console: Spawn | None = None,
     ) -> None:
         self._emit = emit
         self._on_change = on_change
         self._spawn = spawn or _popen
+        self._console = console or _open_console
         self._find = find or find_claude
         self._kill = kill or _kill_tree
         self._lock = threading.Lock()
@@ -560,6 +650,31 @@ class ClaudeManager:
         #: Where the running chats were started, for :meth:`allow` and history.
         self.cwd: Path | None = None
         self.encrypted_dir: Path | None = None
+        #: Model and effort every new turn runs with (the page's dropdowns).
+        self.model = DEFAULT_MODEL
+        self.effort = DEFAULT_EFFORT
+
+    # -- model and effort ----------------------------------------------
+    def choice(self) -> dict[str, Any]:
+        """What the dropdowns show: the picked values and every option."""
+        return {
+            "model": self.model,
+            "effort": self.effort,
+            "models": [{"id": value, "label": label} for value, label in MODELS],
+            "efforts": list(EFFORTS),
+        }
+
+    def set_choice(self, model: Any, effort: Any) -> None:
+        """Use ``model`` and ``effort`` from the next message on (a running reply keeps its own)."""
+        self.model, self.effort = clean_choice(model, effort)
+
+    def load_choice(self, stored: Any) -> None:
+        """The saved pick, or the defaults when it is missing or damaged."""
+        data = stored if isinstance(stored, dict) else {}
+        try:
+            self.set_choice(data.get("model"), data.get("effort"))
+        except ClaudeError:
+            self.model, self.effort = DEFAULT_MODEL, DEFAULT_EFFORT
 
     # -- the saved list ------------------------------------------------
     def load(self, stored: Any) -> None:
@@ -620,7 +735,12 @@ class ClaudeManager:
         notes_root: Path,
         phi_notes: bool = False,
     ) -> dict[str, Any]:
-        """Send a message in a chat (``None`` starts a new one) and start the reply."""
+        """Send a message in a chat (``None`` starts a new one) and start the reply.
+
+        A slash command that needs Claude Code's own screen (:data:`TERMINAL_COMMANDS`)
+        opens a terminal window instead and returns ``{"terminal": command}``;
+        the chat is left as it was.
+        """
         if chat_id is not None and not isinstance(chat_id, str):
             raise ClaudeError("not_found", "That chat is not in the list any more.")
         if not isinstance(text, str) or not text.strip():
@@ -632,6 +752,9 @@ class ClaudeManager:
             raise ClaudeError("no_claude", "Claude Code was not found on this PC. Install it, then try again.")
         if not cwd.is_dir():
             raise ClaudeError("no_folder", "The notes folder could not be found.")
+        command = terminal_command(text)
+        if command is not None:
+            return self._open_terminal(exe, command, cwd, encrypted_dir, notes_root, phi_notes)
         self.cwd, self.encrypted_dir = cwd, encrypted_dir
         with self._lock:
             chat = self._chats.get(chat_id) if chat_id is not None else None
@@ -648,10 +771,27 @@ class ClaudeManager:
             argv = build_args(
                 exe, session_id=chat.session_id, allowed=chat.allowed, denied=deny_rules(encrypted_dir),
                 prompt=system_prompt(notes_root, encrypted_dir, phi_notes),
+                model=self.model, effort=self.effort,
             )
             started = self._start(chat, argv, str(cwd), text)
         self._changed()
         return {"chat": started.public()}
+
+    def _open_terminal(
+        self, exe: str, command: str, cwd: Path, encrypted_dir: Path, notes_root: Path, phi_notes: bool,
+    ) -> dict[str, Any]:
+        argv = build_terminal_args(
+            exe, command=command, denied=deny_rules(encrypted_dir),
+            prompt=system_prompt(notes_root, encrypted_dir, phi_notes),
+            model=self.model, effort=self.effort,
+        )
+        try:
+            self._console(argv, str(cwd), dict(os.environ))
+        except Exception as exc:  # noqa: BLE001
+            raise ClaudeError(
+                "start_failed", f"A terminal window for {command.split()[0]} could not be opened ({type(exc).__name__})."
+            ) from exc
+        return {"terminal": command}
 
     def _start(self, chat: _Chat, argv: list[str], cwd: str, text: str) -> _Chat:
         env = dict(os.environ)
