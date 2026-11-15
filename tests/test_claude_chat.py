@@ -1025,6 +1025,20 @@ def test_each_turn_registers_the_permission_tool(tmp_path: Path) -> None:
     assert "--mcp-config" not in plain and "--permission-prompt-tool" not in plain
 
 
+def test_the_built_app_runs_its_helpers_through_its_own_exe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No python.exe and no .py files in the built app: VaultNotes.exe takes a flag instead."""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", r"C:\Apps\VaultNotes\VaultNotes.exe")
+    argv = build_args("claude", session_id=None, allowed=[], denied=[], prompt="p",
+                      permit_folder=tmp_path / "p", queue_folder=tmp_path / "q")
+    server = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"][claude_permit.SERVER_NAME]
+    assert server["command"] == "C:/Apps/VaultNotes/VaultNotes.exe"
+    assert server["args"] == ["--claude-permit", (tmp_path / "p").as_posix(), "600"]
+    hook = json.loads(argv[argv.index("--settings") + 1])["hooks"]["PostToolUse"][0]["hooks"][0]
+    assert hook["command"] == "C:/Apps/VaultNotes/VaultNotes.exe"
+    assert hook["args"] == ["--claude-queue-hook", (tmp_path / "q").as_posix()]
+
+
 def test_always_allow_saves_only_exact_rules_for_safe_tools(tmp_path: Path) -> None:
     assert always_rule(WRITE_REQ) == "Edit(C:/n/a.md)"
     assert always_rule({"tool_name": "PowerShell", "input": {"command": "git status"}}) == "PowerShell(git status)"

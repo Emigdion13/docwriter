@@ -273,10 +273,11 @@ class Server:
         self.send({"jsonrpc": "2.0", "id": mid, "result": {"content": [{"type": "text", "text": text}]}})
 
     def serve(self, lines: Any) -> None:
+        """Read requests until stdin closes; ``lines`` may be text or raw bytes."""
         for line in lines:
             try:
-                msg = json.loads(line)
-            except ValueError:
+                msg = json.loads(line)  # bytes are decoded as UTF-8, whatever the code page
+            except ValueError:  # includes UnicodeDecodeError
                 continue
             self.handle(msg)
         for thread in self._threads:
@@ -290,7 +291,11 @@ def main(argv: list[str]) -> int:
         timeout = float(argv[1]) if len(argv) > 1 else DEFAULT_TIMEOUT
     except ValueError:
         timeout = DEFAULT_TIMEOUT
-    Server(Path(argv[0]), timeout, sys.stdout).serve(sys.stdin)
+    # Raw bytes, not sys.stdin's text: on Windows that decodes with the local code
+    # page, and an "allow" hands the input back, so a non-ASCII file would be
+    # written mangled.  Replies are JSON with ASCII escapes, safe in any encoding.
+    stdin = getattr(sys.stdin, "buffer", sys.stdin)
+    Server(Path(argv[0]), timeout, sys.stdout).serve(stdin)
     return 0
 
 

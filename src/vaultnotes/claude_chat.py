@@ -184,16 +184,29 @@ def hook_python() -> str:
     return str(exe)
 
 
+def helper_command(module: Any, flag: str) -> tuple[str, list[str]]:
+    """``(command, args)`` that start one of the helpers Claude Code runs for a reply.
+
+    From a checkout it is ``python -I <module>.py`` (``-I`` keeps the script's
+    folder off ``sys.path``).  The built app has no python.exe and no .py files,
+    so there it is ``VaultNotes.exe <flag>``, which ``run.py`` hands to the
+    helper before any window code loads.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).as_posix(), [flag]
+    return Path(hook_python()).as_posix(), ["-I", Path(module.__file__).as_posix()]
+
+
 def queue_settings(folder: Path | str) -> str:
     """``--settings`` JSON adding the PostToolUse hook that hands over queued messages.
 
     The hook settings merge with the user's own (the PHI filter keeps running).
-    ``-I`` keeps the script's folder off ``sys.path``.
     """
+    command, args = helper_command(claude_queue, "--claude-queue-hook")
     hook = {
         "type": "command",
-        "command": Path(hook_python()).as_posix(),
-        "args": ["-I", Path(claude_queue.__file__).as_posix(), Path(folder).as_posix()],
+        "command": command,
+        "args": [*args, Path(folder).as_posix()],
         "timeout": 10,
     }
     return json.dumps({"hooks": {"PostToolUse": [{"matcher": "*", "hooks": [hook]}]}})
@@ -204,10 +217,11 @@ def permit_config(folder: Path | str, timeout: float = PERMIT_TIMEOUT_SECONDS) -
 
     It is added to the user's own MCP servers, which keep working.
     """
+    command, args = helper_command(claude_permit, "--claude-permit")
     server = {
         "type": "stdio",
-        "command": Path(hook_python()).as_posix(),
-        "args": ["-I", Path(claude_permit.__file__).as_posix(), Path(folder).as_posix(), str(int(timeout))],
+        "command": command,
+        "args": [*args, Path(folder).as_posix(), str(int(timeout))],
     }
     return json.dumps({"mcpServers": {claude_permit.SERVER_NAME: server}})
 

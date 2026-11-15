@@ -172,6 +172,50 @@ def test_a_call_for_another_tool_is_refused_without_asking(tmp_path: Path) -> No
     assert pending(tmp_path) == []
 
 
+def mcp_process(argv: list[str]) -> subprocess.Popen:
+    return subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8")
+
+
+def test_non_ascii_input_comes_back_unchanged(tmp_path: Path) -> None:
+    """An allow hands the input back; a mangled copy would write a mangled file."""
+    content = "café ✓ ñ — 日本"
+    proc = mcp_process([sys.executable, "-I", claude_permit.__file__, str(tmp_path), "5"])
+    try:
+        answer_when_asked(tmp_path, True, seconds=5)
+        proc.stdin.write(call(3, {"file_path": "C:/n/ü.md", "content": content}) + "\n")
+        proc.stdin.flush()
+        got = json.loads(json.loads(proc.stdout.readline())["result"]["content"][0]["text"])
+        assert got == {"behavior": "allow", "updatedInput": {"file_path": "C:/n/ü.md", "content": content}}
+    finally:
+        proc.stdin.close()
+        proc.wait(5)
+
+
+RUN_PY = Path(__file__).resolve().parent.parent / "run.py"
+
+
+def test_run_py_starts_the_permission_tool_without_the_window(tmp_path: Path) -> None:
+    """What the built VaultNotes.exe does when Claude Code starts it with --claude-permit."""
+    proc = mcp_process([sys.executable, str(RUN_PY), "--claude-permit", str(tmp_path), "5"])
+    try:
+        proc.stdin.write(rpc(1, "initialize", {"protocolVersion": "2024-11-05"}) + "\n")
+        proc.stdin.flush()
+        assert json.loads(proc.stdout.readline())["result"]["serverInfo"]["name"] == claude_permit.SERVER_NAME
+    finally:
+        proc.stdin.close()
+        assert proc.wait(10) == 0
+
+
+def test_run_py_runs_the_queue_hook(tmp_path: Path) -> None:
+    from vaultnotes import claude_queue
+
+    claude_queue.enqueue(tmp_path, "and also this")
+    out = subprocess.run([sys.executable, str(RUN_PY), "--claude-queue-hook", str(tmp_path)],
+                         input="{}", capture_output=True, text=True, encoding="utf-8", timeout=20)
+    assert out.returncode == 0
+    assert "and also this" in json.loads(out.stdout)["hookSpecificOutput"]["additionalContext"]
+
+
 def test_the_real_tool_process_speaks_mcp(tmp_path: Path) -> None:
     proc = subprocess.Popen(
         [sys.executable, "-I", claude_permit.__file__, str(tmp_path), "5"],
