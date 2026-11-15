@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from vaultnotes import claude_queue
+from vaultnotes import claude_permit, claude_queue
 from vaultnotes.api import Api
 from vaultnotes.backup.gdrive_auth import TokenStore
 from vaultnotes.claude_chat import (
@@ -26,11 +26,13 @@ from vaultnotes.claude_chat import (
     ClaudeManager,
     Translator,
     allow_rule,
+    always_rule,
     build_args,
     build_terminal_args,
     clean_title,
     deny_rules,
     history_path,
+    names_folder,
     read_history,
     summarize_tool,
     terminal_command,
@@ -122,9 +124,10 @@ class Harness:
         self.root.mkdir(exist_ok=True)
         self.encrypted = self.root / "vaults" / "encrypted"
         self.queue_root = tmp_path / "queue"
+        self.permit_root = tmp_path / "permit"
         self.manager = ClaudeManager(
             self._emit, self._changed, spawn=self._spawn, find=lambda: "claude", kill=lambda p: p.kill(),
-            queue_root=self.queue_root,
+            queue_root=self.queue_root, permit_root=self.permit_root,
         )
 
     def _emit(self, name: str, data: dict[str, Any]) -> None:
@@ -973,3 +976,248 @@ def test_queue_needs_a_running_reply_and_real_text(tmp_path: Path) -> None:
     with pytest.raises(ClaudeError) as exc:
         h.manager.queue("f" * 32, "hi")
     assert exc.value.code == "not_found"
+
+
+# ----------------------------------------------------------------------
+# Permission pop-ups: Claude waits while the user answers
+# ----------------------------------------------------------------------
+WRITE_REQ = {"tool_name": "Write", "input": {"file_path": "C:/n/a.md", "content": "x"}, "tool_use_id": "toolu_1"}
+
+
+class AskingProcess(FakeProcess):
+    """Prints ``before``, waits until ``gate`` is set (or it is killed), then prints ``after``."""
+
+    def __init__(self, before: list[bytes], after: list[bytes], gate: threading.Event) -> None:
+        self._before, self._after, self._gate = before, after, gate
+        super().__init__([])
+
+    def _out(self):
+        yield from self._before
+        while not self._gate.wait(0.02):
+            if self._killed.is_set():
+                return
+        yield from self._after
+
+
+def tool_asks(folder: Path, request: dict[str, Any], timeout: float = 5) -> tuple[threading.Thread, dict[str, Any]]:
+    """Play Claude Code's permission tool: ask, and keep the answer."""
+    box: dict[str, Any] = {}
+
+    def run() -> None:
+        box["answer"] = claude_permit.ask(folder, request, timeout)
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread, box
+
+
+def first(h: Harness, kind: str) -> dict[str, Any]:
+    assert eventually(lambda: any(e["kind"] == kind for e in h.events)), f"no {kind} event"
+    return next(e for e in h.events if e["kind"] == kind)
+
+
+def test_each_turn_registers_the_permission_tool(tmp_path: Path) -> None:
+    argv = build_args("claude", session_id=None, allowed=[], denied=[], prompt="p", permit_folder=tmp_path / "p")
+    server = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"][claude_permit.SERVER_NAME]
+    assert server["args"][:2] == ["-I", Path(claude_permit.__file__).as_posix()]
+    assert server["args"][2:] == [(tmp_path / "p").as_posix(), "600"]
+    assert argv[argv.index("--permission-prompt-tool") + 1] == claude_permit.PROMPT_TOOL
+    plain = build_args("claude", session_id=None, allowed=[], denied=[], prompt="p")
+    assert "--mcp-config" not in plain and "--permission-prompt-tool" not in plain
+
+
+def test_always_allow_saves_only_exact_rules_for_safe_tools(tmp_path: Path) -> None:
+    assert always_rule(WRITE_REQ) == "Edit(C:/n/a.md)"
+    assert always_rule({"tool_name": "PowerShell", "input": {"command": "git status"}}) == "PowerShell(git status)"
+    assert always_rule({"tool_name": "PowerShell", "input": {"command": "a (b)"}}) is None  # not exact
+    assert always_rule({"tool_name": "Task", "input": {"prompt": "x"}}) is None  # whole tool only
+    read_tool = "mcp__atlassian__searchJiraIssuesUsingJql"
+    assert always_rule({"tool_name": read_tool, "input": {}}) == read_tool
+    for outward in ("mcp__plugin_slack_slack__slack_send_message", "mcp__atlassian__addOrEditJiraIssueComment",
+                    "mcp__atlassian__executeWrite", "mcp__atlassian__transitionJiraIssue"):
+        assert always_rule({"tool_name": outward, "input": {}}) is None, outward
+    # The server name is not judged: "postman" is not "post".
+    assert always_rule({"tool_name": "mcp__plugin_postman_postman__getCollections", "input": {}}) is not None
+    vault = tmp_path / "vaults" / "encrypted"
+    inside = {"tool_name": "Edit", "input": {"file_path": (vault / "x.md").as_posix()}}
+    assert always_rule(inside, vault) is None
+
+
+def test_names_folder_finds_full_and_relative_paths(tmp_path: Path) -> None:
+    root = tmp_path / "notes"
+    vault = root / "vaults" / "encrypted"
+    assert names_folder({"command": f"type {vault}\\key.vnkey".replace("/", "\\")}, vault, root)
+    assert names_folder({"command": "Get-ChildItem VAULTS\\Encrypted"}, vault, root)
+    assert names_folder({"nested": {"paths": [f"{vault.as_posix()}/a.md"]}}, vault, root)
+    assert not names_folder({"command": "Get-ChildItem vaults\\personal"}, vault, root)
+    assert not names_folder({"command": "dir"}, vault, None)
+
+
+def test_a_question_pops_up_and_always_allow_saves_the_exact_rule(tmp_path: Path) -> None:
+    gate = threading.Event()
+    h = Harness(tmp_path, [AskingProcess([message_start()], [result()], gate), reply(result())])
+    chat_id = h.send(None, "write it", wait=False)["chat"]["id"]
+    folder = h.permit_root / chat_id
+    assert folder.is_dir()
+    thread, box = tool_asks(folder, WRITE_REQ)
+    ev = first(h, "permission")
+    assert (ev["chat"], ev["tool"], ev["summary"], ev["always"], ev["timeout"]) == (chat_id, "Write", "C:/n/a.md", True, 600)
+    assert ev["title"] == "write it"
+    assert [a["id"] for a in h.manager.waiting_asks()] == [ev["id"]]
+    assert h.manager.answer_permission(chat_id, ev["id"], "always") == {"always_changed": True}
+    thread.join(3)
+    assert box["answer"] == (True, "")
+    assert h.manager.always_list() == ["Edit(C:/n/a.md)"]
+    assert first(h, "permission_done")["ids"] == [ev["id"]]
+    assert h.manager.waiting_asks() == []
+    gate.set()
+    h.wait()
+    # Every later turn starts with it allowed, so Claude Code does not even ask.
+    h.send(chat_id, "again")
+    argv = h.spawned[1][0]
+    assert "Edit(C:/n/a.md)" in argv[argv.index("--allowedTools") + 1:]
+
+
+def test_allow_for_the_chat_answers_the_next_question_without_a_pop_up(tmp_path: Path) -> None:
+    gate = threading.Event()
+    h = Harness(tmp_path, [AskingProcess([message_start()], [result()], gate)])
+    chat_id = h.send(None, "run things", wait=False)["chat"]["id"]
+    folder = h.permit_root / chat_id
+    ps = {"tool_name": "PowerShell", "input": {"command": "git status"}, "tool_use_id": "toolu_1"}
+    thread, box = tool_asks(folder, ps)
+    ev = first(h, "permission")
+    assert ev["chat_rule"] is True
+    assert h.manager.answer_permission(chat_id, ev["id"], "chat") == {"always_changed": False}
+    thread.join(3)
+    assert box["answer"] == (True, "")
+    h.events.clear()
+    thread, box = tool_asks(folder, {**ps, "input": {"command": "git log"}, "tool_use_id": "toolu_2"})
+    thread.join(3)
+    assert box["answer"] == (True, "")
+    assert "permission" not in h.kinds()
+    assert h.manager.always_list() == []  # this chat only
+    gate.set()
+    h.wait()
+
+
+def test_allow_once_asks_again_next_time(tmp_path: Path) -> None:
+    gate = threading.Event()
+    h = Harness(tmp_path, [AskingProcess([message_start()], [result()], gate)])
+    chat_id = h.send(None, "write", wait=False)["chat"]["id"]
+    folder = h.permit_root / chat_id
+    thread, box = tool_asks(folder, WRITE_REQ)
+    h.manager.answer_permission(chat_id, first(h, "permission")["id"], "once")
+    thread.join(3)
+    assert box["answer"] == (True, "")
+    h.events.clear()
+    tool_asks(folder, {**WRITE_REQ, "tool_use_id": "toolu_2"})
+    assert first(h, "permission")["tool"] == "Write"
+    gate.set()
+    h.wait()
+
+
+def test_deny_passes_the_note_on_and_leaves_no_card(tmp_path: Path) -> None:
+    gate = threading.Event()
+    denial = {"tool_name": "Write", "tool_use_id": "toolu_1", "tool_input": WRITE_REQ["input"]}
+    h = Harness(tmp_path, [AskingProcess([message_start()], [result(permission_denials=[denial])], gate)])
+    chat_id = h.send(None, "write", wait=False)["chat"]["id"]
+    thread, box = tool_asks(h.permit_root / chat_id, WRITE_REQ)
+    ev = first(h, "permission")
+    h.manager.answer_permission(chat_id, ev["id"], "deny", "Use AI-Notes\ninstead.")
+    thread.join(3)
+    allowed, message = box["answer"]
+    assert allowed is False and message.endswith("Their note: Use AI-Notes instead.")
+    gate.set()
+    h.wait()
+    assert first(h, "done")["denials"] == []  # already refused in the pop-up
+
+
+def test_the_encrypted_vault_is_refused_without_asking(tmp_path: Path) -> None:
+    gate = threading.Event()
+    h = Harness(tmp_path, [AskingProcess([message_start()], [result()], gate)])
+    chat_id = h.send(None, "look", wait=False)["chat"]["id"]
+    sneaky = {"tool_name": "PowerShell", "input": {"command": "Get-ChildItem vaults\\encrypted"}, "tool_use_id": "t9"}
+    thread, box = tool_asks(h.permit_root / chat_id, sneaky)
+    thread.join(3)
+    allowed, message = box["answer"]
+    assert allowed is False and "Encrypted vault" in message
+    auto = first(h, "permission_auto")
+    assert auto["tool"] == "PowerShell" and "Encrypted vault" in auto["message"]
+    assert "permission" not in h.kinds()
+    gate.set()
+    h.wait()
+
+
+def test_an_open_question_is_refused_when_the_reply_ends(tmp_path: Path) -> None:
+    gate = threading.Event()
+    h = Harness(tmp_path, [AskingProcess([message_start()], [result()], gate)])
+    chat_id = h.send(None, "write", wait=False)["chat"]["id"]
+    folder = h.permit_root / chat_id
+    thread, box = tool_asks(folder, WRITE_REQ)
+    ev = first(h, "permission")
+    gate.set()
+    h.wait()
+    assert first(h, "done")["asks_gone"] == [ev["id"]]
+    thread.join(3)
+    assert box["answer"] == (False, claude_permit.DENIED_GONE)
+    assert not folder.exists()
+    with pytest.raises(ClaudeError) as exc:
+        h.manager.answer_permission(chat_id, ev["id"], "once")
+    assert exc.value.code == "not_found"
+
+
+def test_answers_that_cannot_be_given_leave_the_question_waiting(tmp_path: Path) -> None:
+    gate = threading.Event()
+    h = Harness(tmp_path, [AskingProcess([message_start()], [result()], gate)])
+    chat_id = h.send(None, "post", wait=False)["chat"]["id"]
+    slack = {"tool_name": "mcp__plugin_slack_slack__slack_send_message", "input": {"text": "hi"}, "tool_use_id": "t1"}
+    thread, box = tool_asks(h.permit_root / chat_id, slack)
+    ev = first(h, "permission")
+    assert ev["always"] is False
+    for choice, code in (("always", "not_allowed"), ("forever", "invalid_input")):
+        with pytest.raises(ClaudeError) as exc:
+            h.manager.answer_permission(chat_id, ev["id"], choice)
+        assert exc.value.code == code
+    with pytest.raises(ClaudeError) as exc:
+        h.manager.answer_permission(chat_id, "1-0000000a", "once")
+    assert exc.value.code == "not_found"
+    h.manager.answer_permission(chat_id, ev["id"], "once")  # still waiting, so this works
+    thread.join(3)
+    assert box["answer"] == (True, "")
+    gate.set()
+    h.wait()
+
+
+def test_saved_rules_are_checked_when_loaded() -> None:
+    manager = ClaudeManager(lambda *_: None)
+    manager.load_always(["Edit(C:/n/a.md)", "PowerShell(git status)", "mcp__x__y", "", 5, "--evil", "a" * 3000])
+    assert manager.always_list() == ["Edit(C:/n/a.md)", "mcp__x__y", "PowerShell(git status)"]
+    manager.load_always("nope")
+    assert manager.always_list() == []
+
+
+def test_always_rules_are_saved_listed_removed_and_survive_a_restart(tmp_path: Path) -> None:
+    api = make_api(tmp_path, FakeWindow())
+    gate = threading.Event()
+    h = Harness(tmp_path, [AskingProcess([message_start()], [result()], gate)])
+    api.claude = ClaudeManager(h._emit, api._claude_chats_changed, spawn=h._spawn, find=lambda: "claude",
+                               permit_root=h.permit_root)
+    api.claude_enable()
+    chat_id = api.claude_send(None, "write")["chat"]["id"]
+    thread, box = tool_asks(h.permit_root / chat_id, WRITE_REQ)
+    ev = first(h, "permission")
+    assert [a["id"] for a in api.claude_state()["asks"]] == [ev["id"]]
+    assert api.claude_permission(chat_id, ev["id"], "always") == {"ok": True}
+    thread.join(3)
+    assert saved(tmp_path)["always"] == ["Edit(C:/n/a.md)"]
+    assert api.claude_always() == {"ok": True, "rules": ["Edit(C:/n/a.md)"]}
+    gate.set()
+    h.wait()
+    assert eventually(lambda: saved(tmp_path)["chats"])  # the reply's own save is done
+    again = make_api(tmp_path, FakeWindow())
+    assert again.claude.always_list() == ["Edit(C:/n/a.md)"]
+    assert again.claude_always_remove("Edit(C:/n/a.md)") == {"ok": True, "rules": []}
+    assert saved(tmp_path)["always"] == []
+    assert again.claude_always_remove("Edit(C:/n/a.md)")["error"] == "not_found"
+    # The page cannot write rules any other way.
+    assert again.update_settings({"claude": {"always": ["PowerShell"]}})["error"] == "invalid_settings"
+    assert again.claude_permission(chat_id, "1-0000000a", "once")["error"] == "not_found"

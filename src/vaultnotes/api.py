@@ -306,6 +306,7 @@ class Api:
         )
         self.claude.load(self._claude_settings().get("chats"))
         self.claude.load_choice(self._claude_settings())
+        self.claude.load_always(self._claude_settings().get("always"))
 
         #: The Editor space's open files, by opaque id; unsaved text stays in the page.
         self.editor_files = EditorFiles()
@@ -2744,6 +2745,8 @@ class Api:
             "chats": self.claude.chats() if enabled else [],
             "vertex": self._vertex_status(),
             "choice": self.claude.choice(),
+            # Pop-ups still waiting, so a reloaded page shows them again.
+            "asks": self.claude.waiting_asks() if enabled else [],
         }
 
     @bridge_method
@@ -2837,6 +2840,33 @@ class Api:
         self._require_claude()
         return {"ok": True, **self.claude.allow(chat_id, ids, scope, **self._claude_paths(),
                                                 phi_notes=self._vertex_status()["ready"])}
+
+    @bridge_method
+    def claude_permission(self, chat_id: str, ask_id: str, choice: str, note: str | None = None) -> dict[str, Any]:
+        """Answer a permission pop-up while Claude waits.
+
+        ``once`` allows this use, ``always`` also saves its exact rule for every
+        later chat, ``chat`` allows the tool for the rest of this chat, ``deny``
+        refuses (``note`` is passed on to Claude).
+        """
+        self._require_claude()
+        res = self.claude.answer_permission(chat_id, ask_id, choice, note)
+        if res.get("always_changed"):
+            self._save_claude(always=self.claude.always_list())
+        return {"ok": True}
+
+    @bridge_method
+    def claude_always(self) -> dict[str, Any]:
+        """The saved "Always allow" rules."""
+        return {"ok": True, "rules": self.claude.always_list()}
+
+    @bridge_method
+    def claude_always_remove(self, rule: str) -> dict[str, Any]:
+        """Stop always allowing one rule; Claude asks again from the next message on."""
+        if not self.claude.forget_always(rule):
+            return _error("not_found", "That rule is not saved any more.")
+        self._save_claude(always=self.claude.always_list())
+        return {"ok": True, "rules": self.claude.always_list()}
 
     @bridge_method
     def claude_history(self, chat_id: str) -> dict[str, Any]:

@@ -12,10 +12,16 @@ rule.  Python finds ``claude`` itself, builds every argument, keeps the session
 ids, and works out an "Allow" rule only from a denial Claude Code reported.
 
 Permissions: Claude Code runs in its default mode, so it reads freely but a
-write or a command it does not already trust is *denied* and reported at the
-end of the turn.  The page shows each denial as a card; Allow adds a rule for
-that chat only (kept in memory, gone when the app closes) and resumes the turn
-so Claude retries.  The Encrypted vault folder is always denied.
+write or a command it does not already trust needs the user's OK.  Each turn
+registers :mod:`vaultnotes.claude_permit` as Claude Code's permission-prompt
+tool, so Claude *waits* while the page shows a pop-up (``permission``): Allow
+once, Always allow (an exact rule kept in settings.json and passed to every
+later turn), Allow the tool for this chat (memory only), or Deny.  Questions
+an existing rule already answers, and anything that names the Encrypted vault,
+are answered without a pop-up.  A question nobody answers in time is refused
+and comes back at the end of the turn as a card, as before: Allow there adds a
+rule for that chat and resumes the turn so Claude retries.  The Encrypted vault
+folder is always denied.
 
 Chat titles (the first words of the first message) and session ids are kept in
 settings.json under ``claude`` so the list survives a restart; the messages
@@ -44,7 +50,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePath
 from typing import Any, Callable, Iterable
 
-from vaultnotes import claude_queue
+from vaultnotes import claude_permit, claude_queue
 
 #: Chats kept in settings.json, newest first.
 MAX_CHATS_KEPT = 30
@@ -70,6 +76,20 @@ TOOL_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
 EDIT_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
 #: Tools that run a command line.
 SHELL_TOOLS = frozenset({"PowerShell", "Bash"})
+#: MCP tools that act outside this PC (post, send, change a ticket...): never
+#: "Always allow", so each one is asked about (PHI must not leave by accident).
+OUTWARD_MCP_RE = re.compile(
+    r"send|post|create|edit|update|delete|remove|transition|comment|write|schedule|upload|"
+    r"add|publish|execute|destructive|move|assign|reply|react|invite|share|merge|deploy",
+    re.IGNORECASE,
+)
+#: How long a permission pop-up waits before the question counts as refused.
+PERMIT_TIMEOUT_SECONDS = 600
+#: Most "Always allow" rules kept, and the longest one.
+MAX_ALWAYS_RULES = 500
+MAX_RULE_LENGTH = 2000
+#: What a saved rule may look like: ``Tool`` or ``Tool(specifier)``.
+RULE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,127}(?:\(.+\))?$", re.DOTALL)
 
 #: Slash commands that need Claude Code's own screen (a menu, a dialog or a
 #: browser sign-in) and so do nothing useful under ``claude -p``.  Sending one
@@ -179,6 +199,19 @@ def queue_settings(folder: Path | str) -> str:
     return json.dumps({"hooks": {"PostToolUse": [{"matcher": "*", "hooks": [hook]}]}})
 
 
+def permit_config(folder: Path | str, timeout: float = PERMIT_TIMEOUT_SECONDS) -> str:
+    """``--mcp-config`` JSON for the permission-prompt tool (:mod:`vaultnotes.claude_permit`).
+
+    It is added to the user's own MCP servers, which keep working.
+    """
+    server = {
+        "type": "stdio",
+        "command": Path(hook_python()).as_posix(),
+        "args": ["-I", Path(claude_permit.__file__).as_posix(), Path(folder).as_posix(), str(int(timeout))],
+    }
+    return json.dumps({"mcpServers": {claude_permit.SERVER_NAME: server}})
+
+
 def build_args(
     exe: str,
     *,
@@ -189,6 +222,8 @@ def build_args(
     model: str | None = None,
     effort: str | None = None,
     queue_folder: Path | str | None = None,
+    permit_folder: Path | str | None = None,
+    permit_timeout: float = PERMIT_TIMEOUT_SECONDS,
 ) -> list[str]:
     """The whole command line. The message itself goes in on stdin, not here."""
     argv = [
@@ -200,6 +235,12 @@ def build_args(
         "--permission-mode", "default",
         "--append-system-prompt", prompt,
     ]
+    if permit_folder is not None:
+        # One config per --mcp-config (it takes several values; the next "--" ends it).
+        argv += [
+            "--mcp-config", permit_config(permit_folder, permit_timeout),
+            "--permission-prompt-tool", claude_permit.PROMPT_TOOL,
+        ]
     if queue_folder is not None:
         argv += ["--settings", queue_settings(queue_folder)]
     argv += _choice_args(model, effort)
@@ -358,6 +399,54 @@ def allow_rule(denial: dict[str, Any], scope: str, encrypted_dir: Path | str | N
     if name.startswith("mcp__"):
         return name  # an MCP tool takes no specifier: the tool itself is the narrowest rule
     return None
+
+
+def request_rule(request: dict[str, Any], scope: str, encrypted_dir: Path | str | None = None) -> str | None:
+    """:func:`allow_rule` for a permission-tool question (``input`` rather than ``tool_input``)."""
+    return allow_rule({"tool_name": request.get("tool_name"), "tool_input": request.get("input")}, scope, encrypted_dir)
+
+
+def always_rule(request: dict[str, Any], encrypted_dir: Path | str | None = None) -> str | None:
+    """The rule "Always allow" saves for one question, or None when it may not be saved.
+
+    Always the exact rule (this file, this command, this site), never a whole
+    tool, and never an MCP tool that acts outside this PC.
+    """
+    rule = request_rule(request, "exact", encrypted_dir)
+    if rule is None or len(rule) > MAX_RULE_LENGTH:
+        return None
+    name = request.get("tool_name")
+    if isinstance(name, str) and name.startswith("mcp__"):
+        if OUTWARD_MCP_RE.search(name.rsplit("__", 1)[-1]):
+            return None
+    return rule
+
+
+def _strings(value: Any, depth: int = 0) -> Iterable[str]:
+    """Every string inside a tool's input (a few levels deep)."""
+    if isinstance(value, str):
+        yield value
+    elif depth < 4 and isinstance(value, dict):
+        for item in value.values():
+            yield from _strings(item, depth + 1)
+    elif depth < 4 and isinstance(value, list):
+        for item in value:
+            yield from _strings(item, depth + 1)
+
+
+def names_folder(tool_input: Any, folder: Path | str, cwd: Path | str | None = None) -> bool:
+    """Whether any text in ``tool_input`` names ``folder``, as a full path or relative to ``cwd``."""
+    full = Path(folder).as_posix().rstrip("/").casefold()
+    forms = {full}
+    if cwd is not None:
+        base = Path(cwd).as_posix().rstrip("/").casefold()
+        if full.startswith(base + "/"):
+            forms.add(full[len(base) + 1:])
+    for text in _strings(tool_input):
+        flat = text.replace("\\", "/").casefold()
+        if any(form and form in flat for form in forms):
+            return True
+    return False
 
 
 class Translator:
@@ -533,6 +622,12 @@ class _Chat:
         #: Where the last message was sent from (``send``'s keyword arguments),
         #: so a queued message left over can go out as the next one.
         self.opts: dict[str, Any] = {}
+        #: Permission questions on screen: ask id -> request (tool_name, input, tool_use_id).
+        self.asks: dict[str, dict[str, Any]] = {}
+        #: Ask ids already looked at in the running turn.
+        self.seen_asks: set[str] = set()
+        #: tool_use_ids the user refused in the pop-up: no card for them at the end.
+        self.refused: set[str] = set()
 
     def public(self) -> dict[str, Any]:
         return {"id": self.id, "title": self.title, "updated": self.updated, "running": self.turn is not None}
@@ -558,6 +653,19 @@ class _Turn:
         self._stderr_reader.start()
         threading.Thread(target=self._read_stdout, name="VaultNotes-claude-read", daemon=True).start()
         threading.Thread(target=self._send_loop, name="VaultNotes-claude-send", daemon=True).start()
+        threading.Thread(target=self._watch_asks, name="VaultNotes-claude-permit", daemon=True).start()
+
+    def _watch_asks(self) -> None:
+        """Hand each permission question the tool writes to the manager, until the turn ends."""
+        while True:
+            with self._wake:
+                if self._ended:
+                    return
+            try:
+                self.manager._check_asks(self.chat)
+            except Exception:  # noqa: BLE001 - a bad question file must never end the reply
+                pass
+            time.sleep(claude_permit.POLL_SECONDS)
 
     def _push(self, event: dict[str, Any]) -> None:
         with self._wake:
@@ -676,6 +784,12 @@ def default_queue_root() -> Path:
     return (Path(base) if base else Path.home() / ".vaultnotes") / "VaultNotes" / "claude-queue"
 
 
+def default_permit_root() -> Path:
+    """``%LOCALAPPDATA%\\VaultNotes\\claude-permit``: questions waiting for the pop-up."""
+    base = os.environ.get("LOCALAPPDATA")
+    return (Path(base) if base else Path.home() / ".vaultnotes") / "VaultNotes" / "claude-permit"
+
+
 class ClaudeManager:
     """The Claude space's chats, at most :data:`MAX_RUNNING` replying at once."""
 
@@ -689,10 +803,17 @@ class ClaudeManager:
         kill: Callable[[Any], None] | None = None,
         console: Spawn | None = None,
         queue_root: Path | None = None,
+        permit_root: Path | None = None,
+        permit_timeout: float = PERMIT_TIMEOUT_SECONDS,
     ) -> None:
         self._emit = emit
         #: One folder per chat holds its queued messages (see :mod:`vaultnotes.claude_queue`).
         self.queue_root = queue_root or default_queue_root()
+        #: One folder per chat holds its permission questions (see :mod:`vaultnotes.claude_permit`).
+        self.permit_root = permit_root or default_permit_root()
+        self.permit_timeout = permit_timeout
+        #: "Always allow" rules: passed to every turn, kept in settings.json by the Api.
+        self.always: set[str] = set()
         self._on_change = on_change
         self._spawn = spawn or _popen
         self._console = console or _open_console
@@ -821,12 +942,21 @@ class ClaudeManager:
                 chat = _Chat(secrets.token_hex(16), clean_title(text) or "Chat")
                 self._chats[chat.id] = chat
             chat.denials = {}
+            chat.asks, chat.seen_asks, chat.refused = {}, set(), set()
             chat.opts = {"cwd": cwd, "encrypted_dir": encrypted_dir, "notes_root": notes_root,
                          "phi_notes": phi_notes}
+            permit_folder = self._permit_folder(chat)
+            claude_permit.clear(permit_folder)  # nothing left from an earlier turn
+            try:
+                permit_folder.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                permit_folder = None  # no pop-up this turn: refusals come back as cards
             argv = build_args(
-                exe, session_id=chat.session_id, allowed=chat.allowed, denied=deny_rules(encrypted_dir),
+                exe, session_id=chat.session_id, allowed=chat.allowed | self.always,
+                denied=deny_rules(encrypted_dir),
                 prompt=system_prompt(notes_root, encrypted_dir, phi_notes),
                 model=self.model, effort=self.effort, queue_folder=self._queue_folder(chat),
+                permit_folder=permit_folder, permit_timeout=self.permit_timeout,
             )
             started = self._start(chat, argv, str(cwd), text)
         self._changed()
@@ -850,6 +980,12 @@ class ClaudeManager:
 
     def _start(self, chat: _Chat, argv: list[str], cwd: str, text: str) -> _Chat:
         env = dict(os.environ)
+        # Claude Code must wait for the pop-up longer than the pop-up waits for the user.
+        # Its default is far longer already; only a lower value the user set is raised.
+        needed = int((self.permit_timeout + 120) * 1000)
+        current = env.get("MCP_TOOL_TIMEOUT", "")
+        if current.isdigit() and int(current) < needed:
+            env["MCP_TOOL_TIMEOUT"] = str(needed)
         try:
             process = self._spawn(argv, cwd, env)
         except Exception as exc:  # noqa: BLE001
@@ -873,8 +1009,15 @@ class ClaudeManager:
                 chat.session_id = turn.translator.session_id
             chat.updated = _now()
             chat.turn = None
+            # Pop-ups still open have nobody waiting for them any more.
+            asks_gone = list(chat.asks)
+            chat.asks, chat.seen_asks = {}, set()
+            refused, chat.refused = chat.refused, set()
+            claude_permit.clear(self._permit_folder(chat))
             cards = []
             for item in event.get("denials", []):
+                if item["tool_use_id"] in refused:
+                    continue  # the user already said no in the pop-up
                 chat.denials[item["tool_use_id"]] = item
                 name = str(item.get("tool_name", ""))[:60]
                 cards.append({
@@ -885,7 +1028,151 @@ class ClaudeManager:
             gone = chat.session_id is None
             if gone:
                 self._chats.pop(chat.id, None)  # it never got going: the page keeps its draft
-        return {**event, "denials": cards, "gone": gone}
+        return {**event, "denials": cards, "gone": gone, "asks_gone": asks_gone}
+
+    # -- permission pop-ups ------------------------------------------
+    def _permit_folder(self, chat: _Chat) -> Path:
+        return self.permit_root / chat.id
+
+    def _auto_answer(self, chat: _Chat, request: dict[str, Any]) -> tuple[bool, str] | None:
+        """An answer no pop-up is needed for, or None to ask the user.
+
+        Anything naming the Encrypted vault is refused; anything a rule of this
+        chat or an "Always allow" rule covers is allowed (a rule added while the
+        reply runs only reaches Claude Code at the next turn, so it is matched here).
+        """
+        name, data = request.get("tool_name"), request.get("input")
+        if not isinstance(name, str) or not TOOL_NAME_RE.match(name) or not isinstance(data, dict):
+            return False, "VaultNotes could not read that request, so it was not allowed."
+        if self.encrypted_dir is not None and names_folder(data, self.encrypted_dir, self.cwd):
+            return False, "That touches the Encrypted vault, which is always off-limits (it holds PHI)."
+        rules = chat.allowed | self.always
+        if name in rules or request_rule(request, "exact", self.encrypted_dir) in rules:
+            return True, ""
+        return None
+
+    def _check_asks(self, chat: _Chat) -> None:
+        """New questions from the permission tool: answer them, or show a pop-up."""
+        folder = self._permit_folder(chat)
+        shown, auto_refused = [], []
+        with self._lock:
+            for ask_id, request in claude_permit.pending(folder):
+                if ask_id in chat.seen_asks:
+                    continue
+                chat.seen_asks.add(ask_id)
+                auto = self._auto_answer(chat, request)
+                if auto is not None:
+                    allowed, message = auto
+                    claude_permit.answer(folder, ask_id, allowed, message)
+                    if not allowed:
+                        if request.get("tool_use_id"):
+                            chat.refused.add(request["tool_use_id"])
+                        auto_refused.append((request, message))
+                    continue
+                chat.asks[ask_id] = request
+                shown.append((ask_id, request))
+        for request, message in auto_refused:
+            name = str(request.get("tool_name", ""))[:60]
+            self._emit("claude_event", {
+                "chat": chat.id, "kind": "permission_auto", "tool": name,
+                "summary": summarize_tool(name, request.get("input")), "message": message,
+            })
+        for ask_id, request in shown:
+            self._emit("claude_event", self._ask_event(chat, ask_id, request))
+
+    def _ask_event(self, chat: _Chat, ask_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        name = str(request.get("tool_name", ""))[:60]
+        return {
+            "chat": chat.id, "kind": "permission", "id": ask_id, "tool": name, "title": chat.title,
+            "summary": summarize_tool(name, request.get("input")),
+            "always": always_rule(request, self.encrypted_dir) is not None,
+            "chat_rule": request_rule(request, "tool", self.encrypted_dir) is not None,
+            "timeout": int(self.permit_timeout),
+        }
+
+    def waiting_asks(self) -> list[dict[str, Any]]:
+        """Every pop-up still waiting (the page asks again after it reloads)."""
+        with self._lock:
+            return [self._ask_event(chat, ask_id, request)
+                    for chat in self._chats.values() for ask_id, request in chat.asks.items()]
+
+    def answer_permission(self, chat_id: Any, ask_id: Any, choice: Any, note: Any = None) -> dict[str, Any]:
+        """The user's answer in the pop-up: ``once``, ``always``, ``chat`` or ``deny``.
+
+        Returns ``always_changed`` when a rule was saved, so the Api writes settings.json.
+        """
+        if choice not in ("once", "always", "chat", "deny"):
+            raise ClaudeError("invalid_input", "Pick an answer.")
+        if note is not None and (not isinstance(note, str) or len(note) > 2000):
+            raise ClaudeError("invalid_input", "That note is too long.")
+        chat = self._chat(chat_id)
+        with self._lock:
+            request = chat.asks.get(ask_id) if isinstance(ask_id, str) else None
+            if request is None:
+                raise ClaudeError("not_found", "That question is not waiting any more.")
+            rule = None
+            if choice == "always":
+                rule = always_rule(request, self.encrypted_dir)
+                if rule is None:
+                    raise ClaudeError("not_allowed", "That cannot be allowed for good. Allow it once instead.")
+                if rule not in self.always and len(self.always) >= MAX_ALWAYS_RULES:
+                    raise ClaudeError("too_many", "Too many saved rules. Remove some first.")
+            elif choice == "chat":
+                rule = request_rule(request, "tool", self.encrypted_dir)
+                if rule is None:
+                    raise ClaudeError("not_allowed", f"{request.get('tool_name')} cannot be allowed from here.")
+            allowed = choice != "deny"
+            message = ""
+            if not allowed:
+                message = "The user said no in the VaultNotes pop-up."
+                if note and note.strip():
+                    message += f" Their note: {' '.join(note.split())}"
+            # Only once Claude Code has the answer does anything change here.
+            chat.asks.pop(ask_id, None)
+            if not claude_permit.answer(self._permit_folder(chat), ask_id, allowed, message):
+                raise ClaudeError("not_found", "That question is not waiting any more.")
+            always_changed = choice == "always" and rule not in self.always
+            if choice == "always":
+                self.always.add(rule)
+            elif choice == "chat":
+                chat.allowed.add(rule)
+            elif not allowed and request.get("tool_use_id"):
+                chat.refused.add(request["tool_use_id"])
+            # Other questions on screen that the new rule now covers.
+            covered = []
+            if allowed and choice != "once":
+                for other_id, other in list(chat.asks.items()):
+                    if self._auto_answer(chat, other) == (True, ""):
+                        claude_permit.answer(self._permit_folder(chat), other_id, True, "")
+                        chat.asks.pop(other_id, None)
+                        covered.append(other_id)
+        self._emit("claude_event", {"chat": chat.id, "kind": "permission_done", "ids": [ask_id, *covered],
+                                    "choice": choice})
+        return {"always_changed": always_changed}
+
+    # -- "Always allow" rules ------------------------------------------
+    def load_always(self, stored: Any) -> None:
+        """The saved rules, skipping anything that does not look like one."""
+        rules = set()
+        for item in stored if isinstance(stored, list) else []:
+            if isinstance(item, str) and len(item) <= MAX_RULE_LENGTH and RULE_RE.match(item):
+                rules.add(item)
+            if len(rules) >= MAX_ALWAYS_RULES:
+                break
+        with self._lock:
+            self.always = rules
+
+    def always_list(self) -> list[str]:
+        with self._lock:
+            return sorted(self.always, key=str.casefold)
+
+    def forget_always(self, rule: Any) -> bool:
+        """Remove one saved rule (it applies from the next message on); False when it was not there."""
+        with self._lock:
+            if not isinstance(rule, str) or rule not in self.always:
+                return False
+            self.always.discard(rule)
+            return True
 
     # -- queued messages ----------------------------------------------
     def _queue_folder(self, chat: _Chat) -> Path:

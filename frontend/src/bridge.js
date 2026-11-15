@@ -425,6 +425,7 @@ const mockClaude = {
   denied: new Map() // chat id -> true while a denial is waiting
 };
 let mockClaudeSeq = 0;
+const mockClaudeAlways = new Set();
 let mockEditorSeq = 0;
 const mockClaudeChoice = {
   model: 'opus',
@@ -1151,6 +1152,30 @@ export const bridge = {
     chat.running = true;
     mockClaudeReply(chat.id, '', true);
     return { ok: true, chat: { ...chat } };
+  },
+
+  /** Answer a permission pop-up while Claude waits: "once", "always" (saved for every
+      later chat), "chat" (the tool, this chat only) or "deny" (note goes to Claude). */
+  async claude_permission(chat_id, ask_id, choice, note = null) {
+    const api = await waitForBridge();
+    if (api?.claude_permission) return await api.claude_permission(chat_id, ask_id, choice, note);
+    if (choice === 'always') mockClaudeAlways.add(`Edit(C:/mock/${ask_id}.md)`);
+    events.emit('claude_event', { chat: chat_id, kind: 'permission_done', ids: [ask_id], choice });
+    return { ok: true };
+  },
+
+  /** The saved "Always allow" rules. */
+  async claude_always() {
+    const api = await waitForBridge();
+    if (api?.claude_always) return await api.claude_always();
+    return { ok: true, rules: [...mockClaudeAlways].sort() };
+  },
+
+  async claude_always_remove(rule) {
+    const api = await waitForBridge();
+    if (api?.claude_always_remove) return await api.claude_always_remove(rule);
+    if (!mockClaudeAlways.delete(rule)) return { error: 'not_found', message: 'That rule is not saved any more.' };
+    return { ok: true, rules: [...mockClaudeAlways].sort() };
   },
 
   async claude_history(chat_id) {

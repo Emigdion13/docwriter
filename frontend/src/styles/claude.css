@@ -462,6 +462,109 @@ pre:hover > .cl-copy,
   gap: 8px;
 }
 
+/* The permission pop-up: Claude waits while it is open */
+.cl-ask-dialog {
+  width: min(560px, calc(100vw - 32px));
+  text-align: center;
+}
+
+.cl-ask-dialog .confirm-mark {
+  color: var(--warning);
+}
+
+.cl-ask-more {
+  color: var(--warning);
+  font-weight: 600;
+}
+
+.cl-ask-what {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
+  background: color-mix(in srgb, var(--warning) 9%, transparent);
+  text-align: left;
+}
+
+.cl-ask-tool {
+  font: 600 13px/1.3 var(--font-ui);
+  color: var(--warning);
+}
+
+.cl-ask-summary {
+  max-height: 9em;
+  overflow: auto;
+  font: 400 12px/1.45 var(--font-mono);
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.cl-ask-note {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--glass-border);
+  background: var(--glass);
+  color: var(--text);
+  font: 400 12.5px/1.4 var(--font-ui);
+}
+
+.cl-ask-timer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.cl-ask-actions {
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+/* "Always allowed" rules */
+.cl-rules-dialog {
+  width: min(560px, calc(100vw - 32px));
+}
+
+.cl-rules-list {
+  max-height: 50vh;
+  overflow: auto;
+  margin: 10px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cl-rules-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--glass-border);
+}
+
+.cl-rules-list code {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font: 400 12px/1.4 var(--font-mono);
+  color: var(--text);
+}
+
+.cl-rules-empty {
+  color: var(--muted);
+  font-size: 12.5px;
+  border-bottom: 0 !important;
+}
+
 .cl-note {
   align-self: center;
   max-width: 90%;

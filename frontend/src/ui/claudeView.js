@@ -51,6 +51,9 @@ export function createClaudeView({ onStateChanged, notify }) {
         </div>
         <span class="cl-vertex" id="cl-vertex" hidden></span>
         <span class="meta" id="cl-status"></span>
+        <button class="btn icon" id="cl-rules" type="button" aria-label="Always-allowed rules" title="What Claude may always do without asking">
+          ${icon('shield', 16)}
+        </button>
         <button class="btn icon" id="cl-new-chat" type="button" aria-label="New chat" title="New chat (Ctrl+Shift+T)">
           ${icon('plus', 16)}
         </button>
@@ -632,6 +635,9 @@ export function createClaudeView({ onStateChanged, notify }) {
       case 'text': appendText(thread, ev.text); break;
       case 'tool': addTool(thread, ev); break;
       case 'tool_result': toolResult(thread, ev); break;
+      case 'permission_auto':
+        addNote(thread, `Refused without asking: ${ev.tool} ${ev.summary || ''}. ${ev.message || ''}`.trim(), 'error');
+        break;
       case 'done': finish(thread, ev); refreshChats(); break;
       case 'queue_delivered':
         settle(thread, ev.ids, 'delivered');
@@ -670,8 +676,196 @@ export function createClaudeView({ onStateChanged, notify }) {
     if (thread === active && !replaying) paint();
   }
 
+  // ------------------------------------------------------ permission pop-ups
+  /* Claude is waiting on these.  One pop-up at a time, oldest first, shown in
+     whichever space is open; the rest wait in line.  Python decides what each
+     answer may do; this only draws the question and sends the choice back. */
+  const askQueue = [];      // { ev, at }
+  let askShown = null;      // { item, overlay, timer }
+
+  function enqueueAsk(ev) {
+    if (!ev?.id || askQueue.some(a => a.ev.id === ev.id) || askShown?.item.ev.id === ev.id) return;
+    askQueue.push({ ev, at: Date.now() });
+    if (!askShown) showNextAsk();
+    else paintAskCount();
+  }
+
+  function dropAsks(ids) {
+    if (!Array.isArray(ids) || !ids.length) return;
+    for (let i = askQueue.length - 1; i >= 0; i--) if (ids.includes(askQueue[i].ev.id)) askQueue.splice(i, 1);
+    if (askShown && ids.includes(askShown.item.ev.id)) closeAsk();
+    else paintAskCount();
+  }
+
+  function paintAskCount() {
+    const more = askShown?.overlay.querySelector('.cl-ask-more');
+    if (more) more.textContent = askQueue.length ? `${askQueue.length} more waiting` : '';
+  }
+
+  function closeAsk() {
+    if (!askShown) return;
+    const { overlay, timer } = askShown;
+    clearInterval(timer);
+    overlay.classList.remove('open');
+    setTimeout(() => overlay.remove(), 260);
+    askShown = null;
+    setTimeout(showNextAsk, 120);
+  }
+
+  const ASK_LABELS = { once: 'Allowed once', always: 'Always allowed', chat: 'Allowed for this chat', deny: 'Denied' };
+
+  function showNextAsk() {
+    if (askShown || !askQueue.length) return;
+    const item = askQueue.shift();
+    const { ev } = item;
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay cl-ask-overlay';
+    overlay.setAttribute('role', 'alertdialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.innerHTML = `
+      <div class="dialog cl-ask-dialog">
+        <div class="confirm-mark">${icon('shield', 26)}</div>
+        <h3>Claude needs your OK</h3>
+        <p class="dlg-sub"><span class="cl-ask-chat"></span> <span class="cl-ask-more"></span></p>
+        <div class="cl-ask-what"><b class="cl-ask-tool"></b><code class="cl-ask-summary"></code></div>
+        <textarea class="cl-ask-note" rows="2" maxlength="2000"
+          placeholder="Optional: tell Claude why, if you say no"></textarea>
+        <p class="cl-ask-timer">${icon('clock', 13)}<span></span></p>
+        <div class="dlg-actions cl-ask-actions">
+          <button class="btn danger" type="button" data-a="deny">Deny</button>
+          <button class="btn" type="button" data-a="chat"></button>
+          <button class="btn" type="button" data-a="always">Always allow</button>
+          <button class="btn primary" type="button" data-a="once">Allow once</button>
+        </div>
+      </div>
+    `;
+    // Text, never HTML: tool input comes from Claude.
+    overlay.querySelector('.cl-ask-chat').textContent = ev.title ? `In “${ev.title}”` : '';
+    overlay.querySelector('.cl-ask-tool').textContent = ev.tool;
+    overlay.querySelector('.cl-ask-summary').textContent = ev.summary || '(no details)';
+    const chatBtn = overlay.querySelector('[data-a="chat"]');
+    chatBtn.textContent = `Allow every ${ev.tool} in this chat`;
+    chatBtn.hidden = !ev.chat_rule;
+    const alwaysBtn = overlay.querySelector('[data-a="always"]');
+    alwaysBtn.disabled = !ev.always;
+    alwaysBtn.title = ev.always
+      ? 'Never ask again for exactly this, in any chat (you can remove it with the shield button)'
+      : 'This cannot be allowed for good: it acts outside this PC or cannot be matched exactly.';
+
+    const timerText = overlay.querySelector('.cl-ask-timer span');
+    const tick = () => {
+      const left = Math.max(0, Math.round((ev.timeout || 600) - (Date.now() - item.at) / 1000));
+      const m = Math.floor(left / 60);
+      const s = String(left % 60).padStart(2, '0');
+      timerText.textContent = left
+        ? `Claude is waiting. No answer in ${m}:${s} counts as Deny.`
+        : 'Time is up: Claude was told no. It will show up as a card in the chat.';
+      if (!left) overlay.querySelectorAll('.cl-ask-actions button').forEach(b => { b.disabled = true; });
+    };
+    tick();
+    const timer = setInterval(tick, 1000);
+
+    overlay.querySelector('.cl-ask-actions').addEventListener('click', async (e) => {
+      const button = e.target.closest('[data-a]');
+      if (!button || button.disabled) return;
+      const act = button.dataset.a;
+      const note = overlay.querySelector('.cl-ask-note').value.trim();
+      const buttons = [...overlay.querySelectorAll('.cl-ask-actions button')];
+      buttons.forEach(b => { b.disabled = true; });
+      const res = await bridge.claude_permission(ev.chat, ev.id, act, act === 'deny' && note ? note : null);
+      if (res?.error) {
+        notify?.(res.message || 'That answer could not be given.');
+        if (res.error === 'not_found') { closeAsk(); return; }
+        buttons.forEach(b => { b.disabled = false; });
+        alwaysBtn.disabled = !ev.always;
+        return;
+      }
+      const thread = byChat(ev.chat);
+      if (thread) {
+        addNote(thread, `${ASK_LABELS[act]}: ${ev.tool} ${ev.summary || ''}`.trim());
+        follow(thread);
+        if (thread === active) paint();
+      }
+      closeAsk();
+    });
+    // No Escape or click-outside: a stray key must not answer for you.
+    overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') e.stopPropagation(); });
+
+    document.getElementById('overlays-root')?.appendChild(overlay);
+    askShown = { item, overlay, timer };
+    paintAskCount();
+    requestAnimationFrame(() => overlay.classList.add('open'));
+    setTimeout(() => overlay.querySelector('[data-a="once"]')?.focus(), 60);
+  }
+
+  /* The saved "Always allow" rules, each with a Remove button. */
+  async function openRules() {
+    const res = await bridge.claude_always();
+    if (res?.error) { notify?.(res.message || 'The rules could not be read.'); return; }
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.innerHTML = `
+      <div class="dialog cl-rules-dialog">
+        <h3>Always allowed</h3>
+        <p class="dlg-sub">Claude does these without asking, in every chat. Remove one and it asks again from the next message.</p>
+        <ul class="cl-rules-list"></ul>
+        <div class="dlg-actions"><button class="btn primary" type="button" data-x="close">Done</button></div>
+      </div>
+    `;
+    const list = overlay.querySelector('.cl-rules-list');
+    const draw = (rules) => {
+      list.innerHTML = '';
+      if (!rules.length) {
+        const none = document.createElement('li');
+        none.className = 'cl-rules-empty';
+        none.textContent = 'Nothing yet. Pick "Always allow" in a permission pop-up to add one.';
+        list.appendChild(none);
+      }
+      for (const rule of rules) {
+        const li = document.createElement('li');
+        const code = document.createElement('code');
+        code.textContent = rule;
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'btn icon';
+        remove.title = 'Remove: Claude asks again';
+        remove.setAttribute('aria-label', `Remove ${rule}`);
+        remove.innerHTML = icon('trash', 14);
+        remove.onclick = async () => {
+          remove.disabled = true;
+          const out = await bridge.claude_always_remove(rule);
+          if (out?.error && out.error !== 'not_found') {
+            notify?.(out.message || 'That rule could not be removed.');
+            remove.disabled = false;
+            return;
+          }
+          draw(out?.rules || rules.filter(r => r !== rule));
+        };
+        li.append(code, remove);
+        list.appendChild(li);
+      }
+    };
+    draw(res.rules || []);
+    const done = () => {
+      overlay.classList.remove('open');
+      setTimeout(() => overlay.remove(), 260);
+    };
+    overlay.querySelector('[data-x="close"]').onclick = done;
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) done(); });
+    overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); done(); } });
+    document.getElementById('overlays-root')?.appendChild(overlay);
+    requestAnimationFrame(() => overlay.classList.add('open'));
+    setTimeout(() => overlay.querySelector('[data-x="close"]')?.focus(), 60);
+  }
+
   events.on('claude_event', (ev) => {
     if (!ev?.chat) return;
+    // Pop-ups are app-wide: shown even before the chat's thread exists.
+    if (ev.kind === 'permission') { enqueueAsk(ev); return; }
+    if (ev.kind === 'permission_done') { dropAsks(ev.ids); return; }
+    if (ev.kind === 'done') dropAsks(ev.asks_gone);
     const thread = byChat(ev.chat);
     if (!thread) {
       // claude_send has not answered yet: keep it for the chat it is for.
@@ -861,6 +1055,7 @@ export function createClaudeView({ onStateChanged, notify }) {
   });
 
   root.querySelector('#cl-new-chat').onclick = () => { newChat(); };
+  root.querySelector('#cl-rules').onclick = () => openRules();
   root.querySelector('#cl-enable').onclick = () => enable();
 
   const starters = root.querySelector('#cl-starters');
@@ -883,6 +1078,8 @@ export function createClaudeView({ onStateChanged, notify }) {
     const res = await bridge.claude_state();
     if (res?.error) return publicState();
     info = { ...info, ...res };
+    // A reloaded page: Claude may still be waiting on pop-ups.
+    for (const ev of res.asks || []) enqueueAsk(ev);
     paint();
     return publicState();
   }
