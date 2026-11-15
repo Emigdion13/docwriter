@@ -1123,6 +1123,25 @@ export const bridge = {
     return { ok: true };
   },
 
+  /** A message typed while Claude replies; it gets it at its next step (queue_delivered),
+      or as the next message when the reply ends (queue_sent). */
+  async claude_queue(chat_id, text) {
+    const api = await waitForBridge();
+    if (api?.claude_queue) return await api.claude_queue(chat_id, text);
+    const chat = mockClaude.chats.find(c => c.id === chat_id);
+    if (!chat?.running) return { error: 'not_running', message: 'Claude is not replying any more. Send it as a message.' };
+    const id = `${Date.now()}000000-${Math.random().toString(16).slice(2, 10).padEnd(8, '0')}`;
+    setTimeout(() => events.emit('claude_event', { chat: chat_id, kind: 'queue_delivered', ids: [id] }), 800);
+    return { ok: true, id };
+  },
+
+  /** Take back a queued message Claude has not seen yet. */
+  async claude_unqueue(chat_id, queue_id) {
+    const api = await waitForBridge();
+    if (api?.claude_unqueue) return await api.claude_unqueue(chat_id, queue_id);
+    return { error: 'delivered', message: 'Claude already has that message.' };
+  },
+
   /** scope "exact": only that use; "tool": every use of the tool in this chat. */
   async claude_allow(chat_id, ids, scope) {
     const api = await waitForBridge();

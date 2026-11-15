@@ -7,6 +7,8 @@ start Claude Code or touch the network.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -14,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from vaultnotes import claude_queue
 from vaultnotes.api import Api
 from vaultnotes.backup.gdrive_auth import TokenStore
 from vaultnotes.claude_chat import (
@@ -118,8 +121,10 @@ class Harness:
         self.root = tmp_path / "notes"
         self.root.mkdir(exist_ok=True)
         self.encrypted = self.root / "vaults" / "encrypted"
+        self.queue_root = tmp_path / "queue"
         self.manager = ClaudeManager(
             self._emit, self._changed, spawn=self._spawn, find=lambda: "claude", kill=lambda p: p.kill(),
+            queue_root=self.queue_root,
         )
 
     def _emit(self, name: str, data: dict[str, Any]) -> None:
@@ -816,3 +821,155 @@ def test_the_chat_prompt_allows_phi_notes_only_when_vertex_ready(tmp_path: Path,
     assert eventually(lambda: len(h.spawned) == 2)
     prompt = prompt_of(h.spawned[1][0])
     assert "PHI may go in AI-Notes notes" in prompt and "Never put PHI in a note." not in prompt
+
+
+# ----------------------------------------------------------------------
+# Messages queued while Claude replies
+# ----------------------------------------------------------------------
+class GatedProcess(FakeProcess):
+    """Prints ``before``, waits for :meth:`go` (or a kill), then prints ``after``."""
+
+    def __init__(self, before: list[bytes], after: list[bytes]) -> None:
+        self._gate = threading.Event()
+        self._after = after
+        super().__init__(before)
+
+    def _out(self):
+        yield from self._lines
+        while not self._gate.wait(0.01):
+            if self.killed:
+                return
+        yield from self._after
+
+    def go(self) -> None:
+        self._gate.set()
+
+
+def tool_round(tool_id: str = "t1") -> list[bytes]:
+    return [
+        assistant([{"type": "tool_use", "id": tool_id, "name": "Read", "input": {"file_path": "a.md"}}]),
+        line({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": tool_id, "content": "x"}]}}),
+    ]
+
+
+def test_queue_files_are_taken_once_and_in_order(tmp_path: Path) -> None:
+    folder = tmp_path / "q"
+    first = claude_queue.enqueue(folder, "first")
+    second = claude_queue.enqueue(folder, "second")
+    assert claude_queue.waiting(folder) == {first, second}
+    assert claude_queue.take_all(folder) == [(first, "first"), (second, "second")]
+    assert claude_queue.take_all(folder) == [] and claude_queue.take(folder, first) is None
+    assert claude_queue.take(folder, "../../etc") is None
+
+
+def test_the_hook_hands_queued_text_to_claude(tmp_path: Path) -> None:
+    folder = tmp_path / "q"
+    claude_queue.enqueue(folder, "also check the Jira ticket")
+    out = subprocess.run(
+        [sys.executable, "-I", claude_queue.__file__, str(folder)],
+        input=b'{"hook_event_name": "PostToolUse"}', capture_output=True, timeout=30,
+    )
+    assert out.returncode == 0
+    data = json.loads(out.stdout)["hookSpecificOutput"]
+    assert data["hookEventName"] == "PostToolUse"
+    assert data["additionalContext"].endswith("also check the Jira ticket")
+    assert claude_queue.waiting(folder) == set()
+    # Nothing waiting (or no folder at all): no output, and never a failed tool call.
+    empty = subprocess.run([sys.executable, "-I", claude_queue.__file__, str(tmp_path / "none")],
+                           input=b"{}", capture_output=True, timeout=30)
+    assert empty.returncode == 0 and empty.stdout == b""
+
+
+def test_every_turn_registers_the_queue_hook(tmp_path: Path) -> None:
+    argv = build_args("claude", session_id=None, allowed=[], denied=[], prompt="p", queue_folder=tmp_path / "q")
+    hooks = json.loads(argv[argv.index("--settings") + 1])["hooks"]["PostToolUse"][0]["hooks"]
+    assert hooks[0]["args"] == ["-I", Path(claude_queue.__file__).as_posix(), (tmp_path / "q").as_posix()]
+    assert "--settings" not in build_args("claude", session_id=None, allowed=[], denied=[], prompt="p")
+    h = Harness(tmp_path, [reply(delta("a"), result())])
+    chat_id = h.send(None, "hi")["chat"]["id"]
+    assert (h.queue_root / chat_id).as_posix() in h.spawned[0][0][h.spawned[0][0].index("--settings") + 1]
+
+
+def test_a_message_the_hook_takes_is_reported_delivered(tmp_path: Path) -> None:
+    proc = GatedProcess([delta("working")], [*tool_round(), delta("done"), result()])
+    h = Harness(tmp_path, [proc])
+    chat_id = h.send(None, "one", wait=False)["chat"]["id"]
+    queue_id = h.manager.queue(chat_id, "and also this")["id"]
+    # What Claude Code does after the tool call: run the hook.
+    assert claude_queue.take_all(h.queue_root / chat_id) == [(queue_id, "and also this")]
+    proc.go()
+    h.wait()
+    assert {"chat": chat_id, "kind": "queue_delivered", "ids": [queue_id]} in h.events
+    assert len(h.spawned) == 1  # nothing left over to send
+
+
+def test_a_message_left_over_goes_out_as_the_next_one(tmp_path: Path) -> None:
+    proc = GatedProcess([delta("working")], [delta("done"), result()])
+    h = Harness(tmp_path, [proc, reply(delta("ok"), result())])
+    chat_id = h.send(None, "one", wait=False)["chat"]["id"]
+    first = h.manager.queue(chat_id, "two")["id"]
+    second = h.manager.queue(chat_id, "three")["id"]
+    proc.go()
+    assert eventually(lambda: len(h.spawned) == 2)
+    assert {"chat": chat_id, "kind": "queue_sent", "ids": [first, second], "text": "two\n\nthree"} in h.events
+    argv, _, nxt = h.spawned[1]
+    assert nxt.stdin.data == b"two\n\nthree" and argv[argv.index("--resume") + 1] == SESSION
+    assert eventually(lambda: not h.manager.chats()[0]["running"])
+
+
+def test_after_a_stop_queued_messages_come_back(tmp_path: Path) -> None:
+    proc = GatedProcess([delta("working")], [])
+    h = Harness(tmp_path, [proc])
+    chat_id = h.send(None, "one", wait=False)["chat"]["id"]
+    queue_id = h.manager.queue(chat_id, "never mind")["id"]
+    h.manager.stop(chat_id)
+    assert eventually(lambda: any(e["kind"] == "queue_returned" for e in h.events))
+    returned = next(e for e in h.events if e["kind"] == "queue_returned")
+    assert returned["ids"] == [queue_id] and returned["text"] == "never mind"
+    assert len(h.spawned) == 1
+
+
+def test_unqueue_gives_the_text_back_unless_claude_has_it(tmp_path: Path) -> None:
+    proc = GatedProcess([delta("working")], [result()])
+    h = Harness(tmp_path, [proc])
+    chat_id = h.send(None, "one", wait=False)["chat"]["id"]
+    kept = h.manager.queue(chat_id, "take me back")["id"]
+    taken = h.manager.queue(chat_id, "too late")["id"]
+    assert h.manager.unqueue(chat_id, kept) == {"text": "take me back"}
+    claude_queue.take(h.queue_root / chat_id, taken)  # the hook got there first
+    with pytest.raises(ClaudeError) as exc:
+        h.manager.unqueue(chat_id, taken)
+    assert exc.value.code == "delivered"
+    proc.go()
+    h.wait()
+
+
+def test_queue_through_the_api(tmp_path: Path) -> None:
+    api = make_api(tmp_path, FakeWindow())
+    proc = GatedProcess([delta("working")], [result()])
+    h = Harness(tmp_path, [proc])
+    api.claude = h.manager
+    assert api.claude_queue("f" * 32, "hi")["error"] == "claude_off"
+    api.claude_enable()
+    chat_id = api.claude_send(None, "one")["chat"]["id"]
+    queued = api.claude_queue(chat_id, "two")
+    assert queued["ok"] is True
+    assert api.claude_unqueue(chat_id, queued["id"]) == {"ok": True, "text": "two"}
+    assert api.claude_unqueue(chat_id, queued["id"])["error"] == "delivered"
+    proc.go()
+    h.wait()
+
+
+def test_queue_needs_a_running_reply_and_real_text(tmp_path: Path) -> None:
+    h = Harness(tmp_path, [reply(delta("a"), result())])
+    chat_id = h.send(None, "one")["chat"]["id"]
+    with pytest.raises(ClaudeError) as exc:
+        h.manager.queue(chat_id, "late")
+    assert exc.value.code == "not_running"
+    for bad in (None, "", "  ", "x" * (MAX_PROMPT_LENGTH + 1)):
+        with pytest.raises(ClaudeError) as exc:
+            h.manager.queue(chat_id, bad)
+        assert exc.value.code == "invalid_input"
+    with pytest.raises(ClaudeError) as exc:
+        h.manager.queue("f" * 32, "hi")
+    assert exc.value.code == "not_found"

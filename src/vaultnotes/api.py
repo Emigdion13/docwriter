@@ -2820,6 +2820,18 @@ class Api:
         return {"ok": True}
 
     @bridge_method
+    def claude_queue(self, chat_id: str, text: str) -> dict[str, Any]:
+        """Queue a message for a running reply; Claude gets it after its next step."""
+        self._require_claude()
+        return {"ok": True, **self.claude.queue(chat_id, text)}
+
+    @bridge_method
+    def claude_unqueue(self, chat_id: str, queue_id: str) -> dict[str, Any]:
+        """Take back a queued message Claude has not seen yet; its text comes back."""
+        self._require_claude()
+        return {"ok": True, **self.claude.unqueue(chat_id, queue_id)}
+
+    @bridge_method
     def claude_allow(self, chat_id: str, ids: list[str], scope: str) -> dict[str, Any]:
         """Allow what Claude was refused (``exact``: those uses; ``tool``: the tool) and retry."""
         self._require_claude()

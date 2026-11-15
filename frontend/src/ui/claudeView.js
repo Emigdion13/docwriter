@@ -142,8 +142,12 @@ export function createClaudeView({ onStateChanged, notify }) {
     const empty = !!t && !t.inner.childElementCount;
     startEl.hidden = !(info.enabled && empty);
     statusEl.textContent = t?.status || '';
-    sendBtn.hidden = !!t?.running;
+    // While Claude replies, Send queues the message for its next step.
+    sendBtn.title = t?.running ? 'Queue for Claude\'s next step (Enter)' : 'Send (Enter)';
     stopBtn.hidden = !t?.running;
+    input.placeholder = t?.running
+      ? 'Queue a message…  Claude gets it at its next step'
+      : 'Message Claude…  (Enter sends, Shift+Enter adds a line)';
     input.disabled = !info.enabled;
     footEl.textContent = info.enabled && info.folder ? `Runs in ${info.folder} · the Encrypted vault is kept out` : '';
     paintVertex();
@@ -317,7 +321,7 @@ export function createClaudeView({ onStateChanged, notify }) {
   function buildThread(id, title) {
     const thread = {
       key: ++threadSeq, id, title: title || 'New chat', running: false, loaded: !id, stick: true, scrollTop: 0,
-      draft: '', assistant: null, tools: new Map(), cards: [], status: ''
+      draft: '', assistant: null, tools: new Map(), cards: [], status: '', queue: [], settled: new Map()
     };
     thread.el = document.createElement('div');
     thread.el.className = 'cl-thread';
@@ -361,6 +365,115 @@ export function createClaudeView({ onStateChanged, notify }) {
     el.appendChild(bubble);
     thread.inner.appendChild(el);
   }
+
+  /* A message queued while Claude replies.  Shown faded with a remove button
+     until Claude takes it (queue_delivered) or it goes out as the next message. */
+  function addQueued(thread, text) {
+    const el = document.createElement('div');
+    el.className = 'cl-msg user queued';
+    const bubble = document.createElement('div');
+    bubble.className = 'cl-bubble';
+    bubble.textContent = text; // what someone typed is text, never HTML
+    const tag = document.createElement('div');
+    tag.className = 'cl-queued-tag';
+    tag.innerHTML = '<span>Queued: Claude gets it at its next step</span>' +
+      '<button class="cl-unqueue" type="button" aria-label="Remove from queue" title="Remove from queue">✕</button>';
+    bubble.appendChild(tag);
+    el.appendChild(bubble);
+    thread.inner.appendChild(el);
+    const item = { id: null, text, el, removing: false };
+    thread.queue.push(item);
+    return item;
+  }
+
+  function dropQueued(thread, item) {
+    thread.queue = thread.queue.filter(q => q !== item);
+  }
+
+  /* Claude has it now: an ordinary bubble, where it was typed. */
+  function markDelivered(thread, item) {
+    dropQueued(thread, item);
+    item.el.classList.remove('queued');
+    item.el.querySelector('.cl-queued-tag')?.remove();
+  }
+
+  function queuedByIds(thread, ids) {
+    const want = new Set(Array.isArray(ids) ? ids : []);
+    return thread.queue.filter(q => q.id && want.has(q.id));
+  }
+
+  async function pushQueued(thread, item) {
+    const res = await bridge.claude_queue(thread.id, item.text);
+    if (res?.error) {
+      item.el.remove();
+      dropQueued(thread, item);
+      returnToComposer(thread, item.text);
+      notify?.(res.message || 'That message could not be queued.');
+      paint();
+      return;
+    }
+    item.id = res.id;
+    // The reply may have ended (or the hook taken it) while this call was on its way.
+    const settled = thread.settled.get(res.id);
+    if (settled === 'delivered') markDelivered(thread, item);
+    else if (settled) {
+      item.el.remove();
+      dropQueued(thread, item);
+    }
+  }
+
+  /* What became of queued messages, by id, for ones whose id arrives late. */
+  function settle(thread, ids, kind) {
+    for (const id of Array.isArray(ids) ? ids : []) thread.settled.set(id, kind);
+    while (thread.settled.size > 200) thread.settled.delete(thread.settled.keys().next().value);
+  }
+
+  /* Text that did not reach Claude goes back into the composer, ahead of any draft. */
+  function returnToComposer(thread, text) {
+    if (!text) return;
+    const draft = (thread === active ? input.value : thread.draft) || '';
+    const merged = draft.trim() ? `${text}\n\n${draft}` : text;
+    if (thread === active) {
+      input.value = merged;
+      autosize();
+    }
+    thread.draft = merged;
+  }
+
+  function queueMessage(thread, text) {
+    input.value = '';
+    thread.draft = '';
+    autosize();
+    thread.stick = true;
+    const item = addQueued(thread, text);
+    // A brand-new chat has no id until claude_send answers; send() pushes it then.
+    if (thread.id) pushQueued(thread, item);
+    follow(thread);
+    paint();
+  }
+
+  stage.addEventListener('click', async (e) => {
+    const button = e.target.closest('.cl-unqueue');
+    if (!button) return;
+    const thread = threads.find(t => t.queue.some(q => q.el.contains(button)));
+    const item = thread?.queue.find(q => q.el.contains(button));
+    if (!item || item.removing) return;
+    item.removing = true;
+    if (item.id) {
+      const res = await bridge.claude_unqueue(thread.id, item.id);
+      if (res?.error) {
+        item.removing = false;
+        if (res.error === 'delivered') markDelivered(thread, item);
+        else notify?.(res.message || 'That message could not be removed.');
+        return;
+      }
+    }
+    // No id: Python never had it (a new chat still starting), so just drop it.
+    item.el.remove();
+    dropQueued(thread, item);
+    returnToComposer(thread, item.text);
+    paint();
+  });
 
   function addNote(thread, text, kind = '') {
     closeAssistant(thread);
@@ -520,6 +633,37 @@ export function createClaudeView({ onStateChanged, notify }) {
       case 'tool': addTool(thread, ev); break;
       case 'tool_result': toolResult(thread, ev); break;
       case 'done': finish(thread, ev); refreshChats(); break;
+      case 'queue_delivered':
+        settle(thread, ev.ids, 'delivered');
+        for (const item of queuedByIds(thread, ev.ids)) markDelivered(thread, item);
+        break;
+      case 'queue_sent':
+        settle(thread, ev.ids, 'sent');
+        // Left over when the reply ended: it goes out now as the next message.
+        for (const item of queuedByIds(thread, ev.ids)) {
+          item.el.remove();
+          dropQueued(thread, item);
+        }
+        expireCards(thread);
+        addUser(thread, String(ev.text || ''));
+        thread.running = true;
+        thread.stick = true;
+        setStatus(thread, 'Thinking…');
+        break;
+      case 'queue_returned':
+        // Stopped, failed or waiting for an Allow: back in the composer, unsent.
+        settle(thread, ev.ids, 'returned');
+        for (const item of queuedByIds(thread, ev.ids)) {
+          item.el.remove();
+          dropQueued(thread, item);
+        }
+        if (ev.message) {
+          thread.running = false;
+          setStatus(thread, '');
+          addNote(thread, ev.message, 'error');
+        }
+        returnToComposer(thread, String(ev.text || ''));
+        break;
       default: break;
     }
     follow(thread);
@@ -633,7 +777,12 @@ export function createClaudeView({ onStateChanged, notify }) {
   async function send(text) {
     const thread = active;
     text = String(text ?? '').trim();
-    if (!thread || !text || thread.running || !info.enabled) return false;
+    if (!thread || !text || !info.enabled) return false;
+    if (thread.running) {
+      // Like the CLI: typed while Claude works, handed over at its next step.
+      queueMessage(thread, text);
+      return true;
+    }
     expireCards(thread);
     addUser(thread, text);
     thread.running = true;
@@ -649,10 +798,12 @@ export function createClaudeView({ onStateChanged, notify }) {
       setStatus(thread, '');
       addNote(thread, res.message || 'The message could not be sent.', 'error');
       if (res.error === 'not_found') thread.id = null;
+      takeBackUnsent(thread);
       paint();
       return false;
     }
     if (res.terminal) {
+      takeBackUnsent(thread);
       // A command that needs Claude Code's own screen (/mcp, /login...): Python
       // opened it in a terminal window, and this chat has no reply coming.
       thread.running = false;
@@ -668,8 +819,25 @@ export function createClaudeView({ onStateChanged, notify }) {
       for (const ev of early.get(thread.id) || []) handle(thread, ev);
       early.delete(thread.id);
     }
+    // Typed before the new chat had an id: hand them over now (or send them, if it already ended).
+    const waiting = thread.queue.filter(q => !q.id && !q.removing);
+    if (waiting.length && thread.running) {
+      for (const item of waiting) pushQueued(thread, item);
+    } else if (waiting.length) {
+      takeBackUnsent(thread);
+    }
     refreshChats();
     return true;
+  }
+
+  /* Queued messages Python never got go back into the composer. */
+  function takeBackUnsent(thread) {
+    const unsent = thread.queue.filter(q => !q.id);
+    for (const item of unsent.reverse()) {
+      item.el.remove();
+      dropQueued(thread, item);
+      returnToComposer(thread, item.text);
+    }
   }
 
   async function stop() {

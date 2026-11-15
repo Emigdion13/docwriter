@@ -20,6 +20,13 @@ so Claude retries.  The Encrypted vault folder is always denied.
 Chat titles (the first words of the first message) and session ids are kept in
 settings.json under ``claude`` so the list survives a restart; the messages
 themselves stay in Claude Code's own history, which :func:`read_history` reads.
+
+Queued messages: while a reply runs, the page may queue more messages
+(:meth:`ClaudeManager.queue`).  Each turn registers :mod:`vaultnotes.claude_queue`
+as a PostToolUse hook, which hands them to Claude after its next tool call
+(``queue_delivered``).  What is still waiting when the reply ends goes out as
+the next message (``queue_sent``), or back to the page (``queue_returned``) when
+the reply was stopped, failed, or is waiting for an Allow.
 """
 
 from __future__ import annotations
@@ -36,6 +43,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
 from typing import Any, Callable, Iterable
+
+from vaultnotes import claude_queue
 
 #: Chats kept in settings.json, newest first.
 MAX_CHATS_KEPT = 30
@@ -147,6 +156,29 @@ def system_prompt(notes_root: Path | str, encrypted_dir: Path | str, phi_notes: 
     )
 
 
+def hook_python() -> str:
+    """The Python that runs the queue hook: ``python.exe`` rather than ``pythonw.exe``."""
+    exe = Path(sys.executable)
+    if exe.name.lower() == "pythonw.exe" and (exe.parent / "python.exe").is_file():
+        return str(exe.parent / "python.exe")
+    return str(exe)
+
+
+def queue_settings(folder: Path | str) -> str:
+    """``--settings`` JSON adding the PostToolUse hook that hands over queued messages.
+
+    The hook settings merge with the user's own (the PHI filter keeps running).
+    ``-I`` keeps the script's folder off ``sys.path``.
+    """
+    hook = {
+        "type": "command",
+        "command": Path(hook_python()).as_posix(),
+        "args": ["-I", Path(claude_queue.__file__).as_posix(), Path(folder).as_posix()],
+        "timeout": 10,
+    }
+    return json.dumps({"hooks": {"PostToolUse": [{"matcher": "*", "hooks": [hook]}]}})
+
+
 def build_args(
     exe: str,
     *,
@@ -156,6 +188,7 @@ def build_args(
     prompt: str,
     model: str | None = None,
     effort: str | None = None,
+    queue_folder: Path | str | None = None,
 ) -> list[str]:
     """The whole command line. The message itself goes in on stdin, not here."""
     argv = [
@@ -167,6 +200,8 @@ def build_args(
         "--permission-mode", "default",
         "--append-system-prompt", prompt,
     ]
+    if queue_folder is not None:
+        argv += ["--settings", queue_settings(queue_folder)]
     argv += _choice_args(model, effort)
     if session_id:
         argv += ["--resume", session_id]
@@ -493,6 +528,11 @@ class _Chat:
         #: tool_use_id -> the denial Claude Code reported at the last turn's end.
         self.denials: dict[str, dict[str, Any]] = {}
         self.turn: "_Turn | None" = None
+        #: queue id -> text: queued for the running reply and not yet seen by Claude.
+        self.queued: dict[str, str] = {}
+        #: Where the last message was sent from (``send``'s keyword arguments),
+        #: so a queued message left over can go out as the next one.
+        self.opts: dict[str, Any] = {}
 
     def public(self) -> dict[str, Any]:
         return {"id": self.id, "title": self.title, "updated": self.updated, "running": self.turn is not None}
@@ -583,9 +623,13 @@ class _Turn:
                 if finished:
                     event = self.manager._turn_done(self, event)
                 self.manager._emit("claude_event", {"chat": self.chat.id, **event})
+                if event["kind"] == "tool_result":
+                    # The queue hook runs before the result is printed.
+                    self.manager._report_delivered(self.chat)
                 if finished:
                     # After the page has the reply: saving waits for the call lock.
                     self.manager._changed()
+                    self.manager._after_turn(self.chat, event)
             if ended and not self._pending:
                 break
 
@@ -626,6 +670,12 @@ def _kill_tree(process: Any) -> None:
     process.kill()
 
 
+def default_queue_root() -> Path:
+    """``%LOCALAPPDATA%\\VaultNotes\\claude-queue``: on this PC only, never backed up."""
+    base = os.environ.get("LOCALAPPDATA")
+    return (Path(base) if base else Path.home() / ".vaultnotes") / "VaultNotes" / "claude-queue"
+
+
 class ClaudeManager:
     """The Claude space's chats, at most :data:`MAX_RUNNING` replying at once."""
 
@@ -638,8 +688,11 @@ class ClaudeManager:
         find: Callable[[], str | None] | None = None,
         kill: Callable[[Any], None] | None = None,
         console: Spawn | None = None,
+        queue_root: Path | None = None,
     ) -> None:
         self._emit = emit
+        #: One folder per chat holds its queued messages (see :mod:`vaultnotes.claude_queue`).
+        self.queue_root = queue_root or default_queue_root()
         self._on_change = on_change
         self._spawn = spawn or _popen
         self._console = console or _open_console
@@ -768,10 +821,12 @@ class ClaudeManager:
                 chat = _Chat(secrets.token_hex(16), clean_title(text) or "Chat")
                 self._chats[chat.id] = chat
             chat.denials = {}
+            chat.opts = {"cwd": cwd, "encrypted_dir": encrypted_dir, "notes_root": notes_root,
+                         "phi_notes": phi_notes}
             argv = build_args(
                 exe, session_id=chat.session_id, allowed=chat.allowed, denied=deny_rules(encrypted_dir),
                 prompt=system_prompt(notes_root, encrypted_dir, phi_notes),
-                model=self.model, effort=self.effort,
+                model=self.model, effort=self.effort, queue_folder=self._queue_folder(chat),
             )
             started = self._start(chat, argv, str(cwd), text)
         self._changed()
@@ -832,6 +887,77 @@ class ClaudeManager:
                 self._chats.pop(chat.id, None)  # it never got going: the page keeps its draft
         return {**event, "denials": cards, "gone": gone}
 
+    # -- queued messages ----------------------------------------------
+    def _queue_folder(self, chat: _Chat) -> Path:
+        return self.queue_root / chat.id
+
+    def queue(self, chat_id: Any, text: Any) -> dict[str, Any]:
+        """Queue a message for the reply running in a chat; returns its ``id``."""
+        if not isinstance(text, str) or not text.strip():
+            raise ClaudeError("invalid_input", "Write a message first.")
+        if len(text) > MAX_PROMPT_LENGTH:
+            raise ClaudeError("invalid_input", "That message is too long.")
+        chat = self._chat(chat_id)
+        with self._lock:
+            # Under the lock: a reply that ends now takes the leftovers after this.
+            if chat.turn is None:
+                raise ClaudeError("not_running", "Claude is not replying any more. Send it as a message.")
+            try:
+                queue_id = claude_queue.enqueue(self._queue_folder(chat), text)
+            except OverflowError as exc:
+                raise ClaudeError("too_many", f"Up to {claude_queue.MAX_QUEUED} messages can wait at once.") from exc
+            except OSError as exc:
+                raise ClaudeError("queue_failed", f"The message could not be queued ({type(exc).__name__}).") from exc
+            chat.queued[queue_id] = text
+        return {"id": queue_id}
+
+    def unqueue(self, chat_id: Any, queue_id: Any) -> dict[str, Any]:
+        """Take back a queued message; its text comes back. ``delivered`` when Claude has it."""
+        chat = self._chat(chat_id)
+        with self._lock:
+            known = isinstance(queue_id, str) and chat.queued.pop(queue_id, None) is not None
+        text = claude_queue.take(self._queue_folder(chat), queue_id) if known else None
+        if text is None:
+            raise ClaudeError("delivered", "Claude already has that message.")
+        return {"text": text}
+
+    def _report_delivered(self, chat: _Chat) -> None:
+        """Tell the page which queued messages the hook handed to Claude."""
+        with self._lock:
+            if not chat.queued:
+                return
+            left = claude_queue.waiting(self._queue_folder(chat))
+            gone = [q for q in chat.queued if q not in left]
+            for queue_id in gone:
+                del chat.queued[queue_id]
+        if gone:
+            self._emit("claude_event", {"chat": chat.id, "kind": "queue_delivered", "ids": gone})
+
+    def _after_turn(self, chat: _Chat, done: dict[str, Any]) -> None:
+        """The reply ended: what is still queued goes out next, or back to the page."""
+        with self._lock:
+            if not chat.queued:
+                return
+            leftovers = claude_queue.take_all(self._queue_folder(chat))
+            delivered = [q for q in chat.queued if q not in {i for i, _ in leftovers}]
+            chat.queued = {}
+        if delivered:
+            self._emit("claude_event", {"chat": chat.id, "kind": "queue_delivered", "ids": delivered})
+        if not leftovers:
+            return
+        ids = [i for i, _ in leftovers]
+        text = "\n\n".join(t.strip() for _, t in leftovers)
+        # Not after a stop, an error or a refusal: the user decides what comes next.
+        if done.get("stopped") or not done.get("ok") or done.get("denials") or done.get("gone") or not chat.opts:
+            self._emit("claude_event", {"chat": chat.id, "kind": "queue_returned", "ids": ids, "text": text})
+            return
+        self._emit("claude_event", {"chat": chat.id, "kind": "queue_sent", "ids": ids, "text": text})
+        try:
+            self.send(chat.id, text, **chat.opts)
+        except ClaudeError as exc:
+            self._emit("claude_event", {"chat": chat.id, "kind": "queue_returned", "ids": ids, "text": text,
+                                        "message": exc.message})
+
     def stop(self, chat_id: Any) -> None:
         """Stop the reply being written in a chat."""
         chat = self._chat(chat_id)
@@ -871,6 +997,8 @@ class ClaudeManager:
             chat.turn.stop()
         with self._lock:
             self._chats.pop(chat.id, None)
+            chat.queued = {}
+        claude_queue.clear(self._queue_folder(chat))
         self._changed()
 
     def history(self, chat_id: Any, cwd: Path) -> list[dict[str, Any]]:

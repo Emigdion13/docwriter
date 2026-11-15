@@ -618,6 +618,8 @@ BRIDGE_SURFACE = [
     "claude_disable",
     "claude_send",
     "claude_stop",
+    "claude_queue",
+    "claude_unqueue",
     "claude_allow",
     "claude_history",
     "claude_forget",

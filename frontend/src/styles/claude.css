@@ -41,6 +41,35 @@
   display: none !important;
 }
 
+/* ---- A message queued while Claude replies: faded until Claude has it ---- */
+.ws-claude .cl-msg.user.queued .cl-bubble {
+  opacity: .6;
+  border-style: dashed;
+}
+
+.ws-claude .cl-queued-tag {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-3, #888);
+}
+
+.ws-claude .cl-unqueue {
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 2px;
+  font: inherit;
+}
+
+.ws-claude .cl-unqueue:hover {
+  color: var(--text-1, inherit);
+}
+
 .ws-claude {
   flex: 1;
   flex-direction: column;
