@@ -441,6 +441,20 @@ function mockClaudePublic() {
   return mockClaude.chats.map(c => ({ ...c }));
 }
 
+const mockMcp = { enabled: false, token: 'mock-token-for-the-browser-preview-only-xxxx' };
+
+function mockMcpState() {
+  const url = 'http://MY-PC.mshome.net:8765/mcp';
+  return {
+    enabled: mockMcp.enabled, running: mockMcp.enabled, host: mockMcp.enabled ? '172.25.240.1' : null,
+    port: 8765, url, problem: null,
+    command: mockMcp.enabled
+      ? `claude mcp add --transport http vaultnotes ${url} --header "Authorization: Bearer ${mockMcp.token}"` : null,
+    firewall: "New-NetFirewallRule -DisplayName 'VaultNotes MCP (Hyper-V VM)' -Direction Inbound -Protocol TCP " +
+      "-LocalPort 8765 -InterfaceAlias 'vEthernet (Default Switch)' -Action Allow"
+  };
+}
+
 function mockClaudeReply(chatId, text, retry = false) {
   const chat = mockClaude.chats.find(c => c.id === chatId);
   const say = (kind, extra, ms) => setTimeout(() => events.emit('claude_event', { chat: chatId, kind, ...extra }), ms);
@@ -1116,6 +1130,35 @@ export const bridge = {
     chat.updated = new Date().toISOString();
     mockClaudeReply(chat.id, String(text));
     return { ok: true, chat: { ...chat } };
+  },
+
+  /* ---- The VM server: VaultNotes as an MCP server on the Hyper-V Default
+     Switch.  Python finds the address, makes the token and asks Windows. ---- */
+  async mcp_state() {
+    const api = await waitForBridge();
+    if (api?.mcp_state) return await api.mcp_state();
+    return mockMcpState();
+  },
+
+  async mcp_enable() {
+    const api = await waitForBridge();
+    if (api?.mcp_enable) return await api.mcp_enable();
+    mockMcp.enabled = true;
+    return { ok: true, ...mockMcpState() };
+  },
+
+  async mcp_disable() {
+    const api = await waitForBridge();
+    if (api?.mcp_disable) return await api.mcp_disable();
+    mockMcp.enabled = false;
+    return { ok: true, ...mockMcpState() };
+  },
+
+  async mcp_renew_token() {
+    const api = await waitForBridge();
+    if (api?.mcp_renew_token) return await api.mcp_renew_token();
+    mockMcp.token = Math.random().toString(36).slice(2).padEnd(43, 'x');
+    return { ok: true, ...mockMcpState() };
   },
 
   async claude_stop(chat_id) {

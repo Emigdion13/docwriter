@@ -2119,6 +2119,29 @@
   margin-top: 10px;
 }
 
+/* The VM server's two commands: one line each, copyable. */
+.set-mcp-setup[hidden] {
+  display: none;
+}
+
+.set-mcp-cmd {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.set-mcp-cmd code {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--panel-2, rgba(127, 127, 127, .12));
+  font-size: 11px;
+  word-break: break-all;
+  user-select: all;
+}
+
 .check-row {
   display: flex;
   align-items: center;
