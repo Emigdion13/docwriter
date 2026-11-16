@@ -540,8 +540,9 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run(argv: Sequence[str] | None = None, out=None, stdin=None) -> int:
+def run(argv: Sequence[str] | None = None, out=None, stdin=None, err=None) -> int:
     out = out or sys.stdout
+    err = err or sys.stderr
     args = _parser().parse_args(argv)
 
     reader: NotesReader | None = None
@@ -601,13 +602,13 @@ def run(argv: Sequence[str] | None = None, out=None, stdin=None) -> int:
                     print(f"    {line}", file=out)
         return 0
     except Refused as exc:
-        print(f"Refused: {exc}", file=sys.stderr)
+        print(f"Refused: {exc}", file=err)
         return EXIT_REFUSED
     except CliError as exc:
-        print(str(exc), file=sys.stderr)
+        print(str(exc), file=err)
         return EXIT_ERROR
     except OSError as exc:
-        print(f"The notes folder could not be used ({exc.strerror or type(exc).__name__}).", file=sys.stderr)
+        print(f"The notes folder could not be used ({exc.strerror or type(exc).__name__}).", file=err)
         return EXIT_ERROR
     finally:
         if reader is not None:

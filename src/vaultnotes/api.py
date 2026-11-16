@@ -60,6 +60,7 @@ from vaultnotes.frontmatter import is_important, set_important, set_tags
 from vaultnotes.links import LinkIndex, count_links, rename_links
 from vaultnotes.models import Note
 from vaultnotes.claude_chat import ClaudeError, ClaudeManager
+from vaultnotes.mcp_server import McpServer
 from vaultnotes.text_editor import TEXT_FILE_TYPES, EditorError, EditorFiles
 from vaultnotes.render import render_markdown, render_preview, toggle_task
 from vaultnotes.tags import (
@@ -240,6 +241,7 @@ class Api:
         sql_dir: Path | str | None = None,
         sql_passwords: SqlPasswords | None = None,
         ai_key_path: Path | str | None = None,
+        mcp_server: McpServer | None = None,
     ) -> None:
         self._calls = CallLock()
         #: Set by :meth:`ready_to_close` once the page saved its last edit.
@@ -325,6 +327,14 @@ class Api:
         self.ai_share.clear()
         self.sql = SqlManager(emit=lambda name, data: self._emit(name, data), share=self.ai_share)
 
+        #: VaultNotes as an MCP server for the Claude in the Hyper-V VM (off by
+        #: default).  Started off the call lock: finding the switch takes a moment.
+        self.mcp = mcp_server if mcp_server is not None else McpServer(
+            notes_root=lambda: self.config.notes_root, token_dir=get_local_app_dir(),
+        )
+        if self._mcp_settings().get("enabled") is True:
+            threading.Thread(target=self.mcp.start, name="VaultNotes-mcp-start", daemon=True).start()
+
     def set_window(self, window: Any) -> None:
         """Store the pywebview window used for native file dialogs/events."""
         self.window = window
@@ -335,6 +345,7 @@ class Api:
         self.backup.finish_on_close()
         self.terminal.stop()
         self.claude.stop_all()
+        self.mcp.stop()
         self.sql.close()
         self.ai_share.clear()
         with self._calls:
@@ -2879,6 +2890,63 @@ class Api:
         """Take a chat off the list (Claude Code's own history file is left alone)."""
         self.claude.forget(chat_id)
         return {"ok": True, "chats": self.claude.chats()}
+
+    # ------------------------------------------------------------------
+    # VaultNotes as an MCP server for the Claude in the Hyper-V VM
+    # ------------------------------------------------------------------
+    def _mcp_settings(self) -> dict[str, Any]:
+        block = self.config.data.get("mcp")
+        if not isinstance(block, dict):
+            block = {"enabled": False}
+            self.config.data["mcp"] = block
+        return block
+
+    def _mcp_state(self) -> dict[str, Any]:
+        return {"enabled": self._mcp_settings().get("enabled") is True, **self.mcp.status()}
+
+    @bridge_method
+    def mcp_state(self) -> dict[str, Any]:
+        """Whether the VM server is on and listening, and what to run on each side."""
+        return self._mcp_state()
+
+    @bridge_method
+    def mcp_enable(self) -> dict[str, Any]:
+        """Turn the VM server on, but only after the user says yes in a native dialog."""
+        if self._mcp_settings().get("enabled") is not True:
+            if self.window is None:
+                raise BridgeError("no_window", "The VM server can only be turned on in the app window.")
+            try:
+                with self._calls.released():
+                    allowed = self.window.create_confirmation_dialog(
+                        "Let the Hyper-V VM reach your notes?",
+                        "VaultNotes will listen on the Hyper-V Default Switch only, so a Claude in a local "
+                        "VM can read your Plain and AI-Notes notes and write to AI-Notes, with a token. "
+                        "Replies go through the PHI filter, Personal is not offered, and the Encrypted "
+                        "vault is always refused.\n\nTurn it on?",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                raise BridgeError("dialog_failed", f"The question could not be shown ({type(exc).__name__}).") from exc
+            if allowed is not True:
+                return _error("cancelled", "The VM server stays off.")
+            self._mcp_settings()["enabled"] = True
+            self.config.save()
+        with self._calls.released():  # finding the switch runs PowerShell
+            self.mcp.start()
+        return {"ok": True, **self._mcp_state()}
+
+    @bridge_method
+    def mcp_disable(self) -> dict[str, Any]:
+        """Stop the VM server and keep it off."""
+        self.mcp.stop()
+        self._mcp_settings()["enabled"] = False
+        self.config.save()
+        return {"ok": True, **self._mcp_state()}
+
+    @bridge_method
+    def mcp_renew_token(self) -> dict[str, Any]:
+        """A new token: the VM's old one stops working at once."""
+        self.mcp.renew_token()
+        return {"ok": True, **self._mcp_state()}
 
     # ------------------------------------------------------------------
     # The Editor space: text files in tabs (see vaultnotes.text_editor)

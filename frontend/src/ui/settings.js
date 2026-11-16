@@ -4,6 +4,7 @@
    notes folder, and the Google Drive backup controls (section 7 "Backup").
    ================================================================= */
 
+import { bridge } from '../bridge.js';
 import { icon } from '../icons.js';
 
 const FONT_SIZES = [11, 12, 13, 13.5, 14, 15, 16];
@@ -159,6 +160,29 @@ export function createSettingsOverlay({
       </div>
 
       <div class="settings-group">
+        <label>VM server (MCP)</label>
+        <div class="drive-state" id="set-mcp-state">
+          <span class="dot"></span>
+          <span class="grow" id="set-mcp-text">Off</span>
+          <button class="btn" id="set-mcp-toggle" type="button">${icon('shield', 15)}<span>Turn on…</span></button>
+        </div>
+        <div class="set-mcp-setup" id="set-mcp-setup" hidden>
+          <p class="settings-hint">1. Once, in an <b>admin</b> PowerShell on this PC:</p>
+          <div class="set-mcp-cmd"><code id="set-mcp-firewall"></code><button class="btn" type="button" data-copy="set-mcp-firewall">Copy</button></div>
+          <p class="settings-hint">2. In the VM's terminal:</p>
+          <div class="set-mcp-cmd"><code id="set-mcp-command"></code><button class="btn" type="button" data-copy="set-mcp-command">Copy</button></div>
+          <div class="drive-actions">
+            <button class="btn" id="set-mcp-renew" type="button">${icon('sync', 15)}New token</button>
+          </div>
+        </div>
+        <p class="settings-hint">
+          Lets the Claude in your Hyper-V VM read Plain and AI-Notes and write to AI-Notes.
+          It listens on the Hyper-V Default Switch only, needs the token, and every reply
+          goes through the PHI filter. Personal and the Encrypted vault are never offered.
+        </p>
+      </div>
+
+      <div class="settings-group">
         <label>CMD space</label>
         <div class="drive-state" id="set-term-state">
           <span class="dot"></span>
@@ -294,6 +318,47 @@ export function createSettingsOverlay({
     paintSql();
   };
 
+  /* The VM server card talks to Python itself: nothing else in the page needs its state. */
+  const paintMcp = (m) => {
+    const s = m || { enabled: false, running: false };
+    overlay.querySelector('#set-mcp-state').classList.toggle('on', !!s.running);
+    let text = 'Off';
+    if (s.enabled && s.running) text = `On · listening on ${s.host}:${s.port}`;
+    else if (s.enabled) text = s.problem || 'On · starting…';
+    overlay.querySelector('#set-mcp-text').textContent = text;
+    overlay.querySelector('#set-mcp-text').title = s.problem || '';
+    overlay.querySelector('#set-mcp-toggle span').textContent = s.enabled ? 'Turn off' : 'Turn on…';
+    overlay.querySelector('#set-mcp-setup').hidden = !s.running;
+    overlay.querySelector('#set-mcp-firewall').textContent = s.firewall || '';
+    overlay.querySelector('#set-mcp-command').textContent = s.command || '';
+  };
+
+  const refreshMcp = async (call = 'mcp_state') => {
+    const res = await bridge[call]();
+    if (res?.error) {
+      if (res.error !== 'cancelled') overlay.querySelector('#set-mcp-text').textContent = res.message || 'That did not work.';
+      return;
+    }
+    paintMcp(res);
+  };
+
+  overlay.querySelector('#set-mcp-toggle').onclick = async () => {
+    const res = await bridge.mcp_state();
+    await refreshMcp(res?.enabled ? 'mcp_disable' : 'mcp_enable');
+  };
+  overlay.querySelector('#set-mcp-renew').onclick = () => refreshMcp('mcp_renew_token');
+  overlay.querySelector('#set-mcp-setup').addEventListener('click', async (e) => {
+    const button = e.target.closest('[data-copy]');
+    if (!button) return;
+    try {
+      await navigator.clipboard.writeText(overlay.querySelector(`#${button.dataset.copy}`).textContent);
+      button.textContent = 'Copied';
+      setTimeout(() => { button.textContent = 'Copy'; }, 1200);
+    } catch {
+      button.textContent = 'Blocked';
+    }
+  });
+
   overlay.querySelector('#set-browse').onclick = async () => {
     const result = await onChooseFolder?.();
     if (result?.ok) {
@@ -337,6 +402,7 @@ export function createSettingsOverlay({
       paintClaude();
       paintTerminal();
       paintSql();
+      refreshMcp();
       overlay.classList.add('open');
     },
     close: closeSettings,

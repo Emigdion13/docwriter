@@ -93,6 +93,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "enabled": False,
         "chats": [],
     },
+    # The VM server: VaultNotes as an MCP server on the Hyper-V Default Switch.
+    # Off until the user allows it in a native Windows dialog (api.mcp_enable).
+    # Its token lives in %LOCALAPPDATA%\VaultNotes, not here.
+    "mcp": {
+        "enabled": False,
+    },
 }
 
 INITIAL_SHOPPING_LIST = """# Shopping list
@@ -291,7 +297,7 @@ class Config:
             self.data["autolock_minutes"] = defaults["autolock_minutes"]
             reset.append("autolock_minutes")
 
-        for block in ("look", "backup", "terminal", "sql", "claude"):
+        for block in ("look", "backup", "terminal", "sql", "claude", "mcp"):
             if not isinstance(self.data.get(block), dict):
                 self.data[block] = defaults[block]
                 reset.append(block)
@@ -316,6 +322,7 @@ class Config:
             ("sql", "enabled"): isinstance(sql.get("enabled"), bool),
             ("claude", "enabled"): isinstance(claude.get("enabled"), bool),
             ("claude", "chats"): isinstance(claude.get("chats"), list),
+            ("mcp", "enabled"): isinstance(self.data["mcp"].get("enabled"), bool),
         }
         for (block, key), ok in checks.items():
             if not ok:
