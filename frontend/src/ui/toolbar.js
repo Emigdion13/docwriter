@@ -1,12 +1,12 @@
 /* =================================================================
    TOOLBAR  (frontend/src/ui/toolbar.js)
    Top glass header: brand, command palette trigger, view switcher,
-   lock all, backup button, and theme switcher.
+   lock all, backup button, theme switcher and the Settings button.
    ================================================================= */
 
 import { icon } from '../icons.js';
 
-export function createToolbar({ onViewChange, onLockAll, onBackup, onThemeChange, onOpenPalette, onTogglePanels }) {
+export function createToolbar({ onViewChange, onLockAll, onBackup, onThemeChange, onOpenPalette, onTogglePanels, onOpenSettings }) {
   const header = document.createElement('header');
   header.className = 'toolbar glass';
 
@@ -56,6 +56,9 @@ export function createToolbar({ onViewChange, onLockAll, onBackup, onThemeChange
         <button data-theme-id="synthwave" title="Synthwave" aria-label="Synthwave theme"></button>
         <button data-theme-id="arctic" title="Arctic" aria-label="Arctic theme"></button>
       </div>
+      <button class="btn icon" id="open-settings" aria-label="Settings (Ctrl ,)" title="Settings (Ctrl ,)">
+        ${icon('settings', 16)}
+      </button>
     </div>
   `;
 
@@ -64,6 +67,7 @@ export function createToolbar({ onViewChange, onLockAll, onBackup, onThemeChange
   header.querySelector('#panels-toggle').onclick = () => onTogglePanels?.();
   header.querySelector('#lock-all').onclick = () => onLockAll?.();
   header.querySelector('#backup-btn').onclick = () => onBackup?.();
+  header.querySelector('#open-settings').onclick = () => onOpenSettings?.();
 
   const segButtons = header.querySelectorAll('#seg button');
   segButtons.forEach(btn => {
