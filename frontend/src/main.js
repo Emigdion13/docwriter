@@ -2271,6 +2271,7 @@ async function getPaletteCommands() {
     })),
     {
       label: 'Settings…',
+      hint: 'Ctrl ,',
       icon: 'settings',
       run: () => settingsOverlay?.open()
     },
@@ -2440,6 +2441,9 @@ function setupShortcuts() {
     if (mod && key === 'k') {
       e.preventDefault();
       commandPalette?.open();
+    } else if (mod && e.key === ',') {
+      e.preventDefault();
+      settingsOverlay?.open();
     } else if (mod && key === 'l') {
       e.preventDefault();
       lockAllVaults();
@@ -2613,7 +2617,8 @@ async function init() {
     onBackup: runBackup,
     onThemeChange: setTheme,
     onOpenPalette: () => commandPalette?.open(),
-    onTogglePanels: togglePanels
+    onTogglePanels: togglePanels,
+    onOpenSettings: () => settingsOverlay?.open()
   });
   toolbarContainer.replaceWith(toolbarEl);
 
