@@ -1706,6 +1706,20 @@
   backdrop-filter: blur(24px);
   box-shadow: var(--shadow);
   text-align: left;
+  /* Taller than a small window now: it scrolls inside, the buttons stay in view. */
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.settings-box > .dlg-actions {
+  position: sticky;
+  bottom: -28px; /* over the box's bottom padding */
+  margin: 0 -28px -28px;
+  padding: 14px 28px 20px;
+  /* --surface is see-through; over --bg it is solid, so text scrolling under it is hidden. */
+  background: linear-gradient(var(--surface), var(--surface)), var(--bg);
+  border-top: 1px solid var(--glass-border);
 }
 
 .settings-box h3 {
