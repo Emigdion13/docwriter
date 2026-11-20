@@ -13,8 +13,10 @@ from typing import Any
 import webview
 from filelock import FileLock, Timeout
 
+from vaultnotes import webview_guard
 from vaultnotes.api import Api, expose_bridge
 from vaultnotes.config import get_app_dir, get_config
+from vaultnotes.events import PAGE_DOWN
 
 # Directory that "npm run build" fills (frontend/vite.config.js -> build.outDir).
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -37,12 +39,21 @@ def hold_close_until_saved(window: Any, api: Api) -> None:
     may_close = threading.Event()
     started = threading.Event()
 
-    def save_then_close() -> None:
+    def ask_page_to_save() -> None:
         try:
             window.evaluate_js(
                 "window.vn && window.vn.flushBeforeClose && (window.vn.flushBeforeClose(), true)"
             )
-            api.page_saved_for_close.wait(CLOSE_SAVE_TIMEOUT)
+        except Exception:  # noqa: BLE001 - closing must always go ahead
+            pass
+
+    def save_then_close() -> None:
+        try:
+            # On its own thread: a dead page (black window) can leave
+            # evaluate_js waiting forever, and the window must close anyway.
+            if not PAGE_DOWN.is_set():
+                threading.Thread(target=ask_page_to_save, name="VaultNotes-flush", daemon=True).start()
+                api.page_saved_for_close.wait(CLOSE_SAVE_TIMEOUT)
         except Exception:  # noqa: BLE001 - closing must always go ahead
             pass
         finally:
@@ -114,6 +125,8 @@ def main(dev: bool = False) -> None:
         )
         expose_bridge(window, api)
         hold_close_until_saved(window, api)
+        # A crashed WebView2 used to leave a black window for good.
+        webview_guard.install(window, app_dir)
         api.set_window(window)
         try:
             webview.start(debug=dev, private_mode=True)
